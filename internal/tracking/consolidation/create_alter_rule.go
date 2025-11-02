@@ -76,6 +76,21 @@ func (r *CreateAlterConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle
 	// Build consolidated CREATE statement by actually integrating ALTER operations
 	consolidatedSQL := integrateAlterIntoCreate(createStmt, alterStmts)
 
+	// CRITICAL FIX: pg_query deparser sometimes corrupts char_length() to char_char_length()
+	// This happens when deparsing CHECK constraints with char_length() function calls
+	// Fix it immediately after consolidation to prevent corruption in output
+	if strings.Contains(consolidatedSQL, "char_char_length") {
+		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Info("CONSOLIDATION FIX: Found and fixing char_char_length corruption in %s", createStmt.ObjectName)
+		consolidatedSQL = strings.ReplaceAll(consolidatedSQL, "char_char_length", "char_length")
+	}
+
+	// BUGFIX Bug #5: Ensure consolidated SQL always ends with semicolon
+	// This is critical for when separate ALTER statements (like RLS) are appended later by the engine
+	consolidatedSQL = strings.TrimRight(consolidatedSQL, " \t\n")
+	if !strings.HasSuffix(consolidatedSQL, ";") {
+		consolidatedSQL += ";"
+	}
+
 	// Build list of original statements
 	originalStmts := []types.Statement{*createStmt}
 	originalStmts = append(originalStmts, alterStmts...)
@@ -107,6 +122,14 @@ func (r *CreateAlterConsolidationRule) Risk() tracking.RiskLevel {
 // integrateAlterIntoCreate integrates ALTER operations into a CREATE statement
 func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.Statement) string {
 	createSQL := createStmt.SQL
+
+	// DEBUG: Log incoming SQL for analytics tables
+	objectName := createStmt.ObjectName
+	if strings.Contains(strings.ToLower(objectName), "analytics") {
+		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER-DEBUG").Info(
+			"BEFORE consolidation for %s: SQL length=%d, starts with: %s",
+			objectName, len(createSQL), createSQL[:min(100, len(createSQL))])
+	}
 
 	// Handle ENUM types specially - merge ALTER TYPE ADD VALUE into CREATE TYPE
 	if createStmt.ObjectType == types.TypeEnum {
@@ -167,6 +190,13 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 	// Integrate columns and constraints into the CREATE statement
 	if len(addedColumns) > 0 || len(addedConstraints) > 0 {
 		createSQL = integrateColumnsAndConstraintsIntoCreate(createSQL, addedColumns, addedConstraints)
+	}
+
+	// DEBUG: Log outgoing SQL for analytics tables
+	if strings.Contains(strings.ToLower(objectName), "analytics") {
+		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER-DEBUG").Info(
+			"AFTER consolidation for %s: SQL length=%d, starts with: %s, ends with: %s",
+			objectName, len(createSQL), createSQL[:min(100, len(createSQL))], createSQL[max(0, len(createSQL)-50):])
 	}
 
 	return createSQL
@@ -295,7 +325,15 @@ func integrateColumnsAndConstraintsIntoCreate(createSQL string, columns []string
 	}
 
 	// Ensure proper formatting with closing paren on its own line
-	return beforeParen + "\n" + strings.TrimLeft(afterParen, " \t")
+	result := beforeParen + "\n" + strings.TrimLeft(afterParen, " \t")
+
+	// Ensure the statement ends with a semicolon
+	result = strings.TrimRight(result, " \t\n")
+	if !strings.HasSuffix(result, ";") {
+		result += ";"
+	}
+
+	return result
 }
 
 // integrateAlterTypeIntoCreate merges ALTER TYPE ADD VALUE statements into CREATE TYPE

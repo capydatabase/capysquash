@@ -1237,6 +1237,13 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 			}
 
 			consolidatedSQL := finalState.SQL
+
+			// BUGFIX Bug #5: Ensure SQL always ends with semicolon before appending separate statements
+			consolidatedSQL = strings.TrimRight(consolidatedSQL, " \t\n")
+			if !strings.HasSuffix(consolidatedSQL, ";") {
+				consolidatedSQL += ";"
+			}
+
 			allStatements := []types.Statement{*finalState}
 
 			// For tables, include ALTER statements as separate statements (not consolidated)
@@ -1244,12 +1251,8 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 			if finalState.ObjectType == types.TypeTable {
 				alterStmts := lifecycle.GetAlterStatements()
 				if len(alterStmts) > 0 {
-					// Ensure CREATE TABLE ends with semicolon before appending ALTERs
-					consolidatedSQL = strings.TrimSpace(consolidatedSQL)
-					if !strings.HasSuffix(consolidatedSQL, ";") {
-						consolidatedSQL += ";"
-					}
 					// Append ALTER statements after CREATE TABLE (original migration structure)
+					// No need to add semicolon again - already added above
 					for _, alterStmt := range alterStmts {
 						consolidatedSQL += "\n\n" + alterStmt.SQL
 						allStatements = append(allStatements, alterStmt)
@@ -1446,6 +1449,16 @@ func (e *Engine) generateOptimizedSQL(ctx context.Context, consolidatedObjects m
 				sql = unifiedResolver.EnhanceExtensionSQL(sql)
 			}
 
+			// DEBUG: Log what we're writing for analytics tables
+			if category == types.CategoryFoundation && strings.Contains(strings.ToLower(sql), "analytics") {
+				startsPreview := strings.ReplaceAll(sql[:min(100, len(sql))], "\n", "\\n")
+				endsPreview := strings.ReplaceAll(sql[max(0, len(sql)-100):], "\n", "\\n")
+				e.logger.Info("ENGINE-OUTPUT-DEBUG: Writing analytics table: len=%d",
+					len(sql))
+				e.logger.Info("  STARTS: %s", startsPreview)
+				e.logger.Info("  ENDS: %s", endsPreview)
+			}
+
 			// DEBUG: Log what we're writing for functions
 			if category == types.CategoryFunctions && strings.Contains(strings.ToLower(sql), "clerk_user_id") {
 				createCount := strings.Count(strings.ToUpper(sql), "CREATE")
@@ -1544,11 +1557,19 @@ func (e *Engine) generateOptimizedSQL(ctx context.Context, consolidatedObjects m
 	// Build enum replacements map
 	enumReplacements := e.buildEnumReplacementsMap()
 
-	// Apply post-processing
-	processor := postprocessing.NewProcessor(e.config)
+	// Apply post-processing using AST-based processor (falls back to regex for malformed SQL)
+	processor := postprocessing.NewProcessorAST(e.config)
 	finalSQL, err := processor.Apply(finalSQL, enumReplacements)
 	if err != nil {
 		return "", err
+	}
+
+	// CRITICAL SAFETY NET: Fix pg_query deparser corruption bugs that slip through post-processing
+	// The deparser sometimes duplicates "char_" prefix on char_length() function calls
+	// This happens during deparsing and can corrupt CHECK constraints
+	if strings.Contains(finalSQL, "char_char_length") {
+		e.logger.Info("SAFETY NET: Fixing char_char_length corruption in final SQL")
+		finalSQL = strings.ReplaceAll(finalSQL, "char_char_length", "char_length")
 	}
 
 	return finalSQL, nil
