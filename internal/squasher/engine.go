@@ -364,6 +364,7 @@ func NewSquasherRuleEngine(safetyLevel SafetyLevel) *consolidation.Consolidation
 	switch safetyLevel {
 	case Conservative:
 		engine.AddRule(&consolidation.DOBlockEnumTypeRule{})
+		engine.AddRule(&consolidation.DOBlockAlterTableRule{})
 		engine.AddRule(&consolidation.EnumDeduplicationRule{})
 		engine.AddRule(&consolidation.PublicationDeduplicationRule{})
 
@@ -375,6 +376,7 @@ func NewSquasherRuleEngine(safetyLevel SafetyLevel) *consolidation.Consolidation
 		engine.AddRule(&consolidation.AdvancedColumnLifecycleRule{})
 	case Standard:
 		engine.AddRule(&consolidation.DOBlockEnumTypeRule{})
+		engine.AddRule(&consolidation.DOBlockAlterTableRule{})
 		engine.AddRule(&consolidation.EnumDeduplicationRule{})
 		engine.AddRule(&consolidation.PublicationDeduplicationRule{})
 
@@ -389,6 +391,7 @@ func NewSquasherRuleEngine(safetyLevel SafetyLevel) *consolidation.Consolidation
 		engine.AddRule(&consolidation.TransactionBoundaryRule{})
 	case Aggressive:
 		engine.AddRule(&consolidation.DOBlockEnumTypeRule{})
+		engine.AddRule(&consolidation.DOBlockAlterTableRule{})
 		engine.AddRule(&consolidation.EnumDeduplicationRule{})
 		engine.AddRule(&consolidation.PublicationDeduplicationRule{})
 
@@ -404,6 +407,7 @@ func NewSquasherRuleEngine(safetyLevel SafetyLevel) *consolidation.Consolidation
 		engine.AddRule(&consolidation.FunctionDeduplicationRule{})
 	case Paranoid:
 		engine.AddRule(&consolidation.DOBlockEnumTypeRule{})
+		engine.AddRule(&consolidation.DOBlockAlterTableRule{})
 		engine.AddRule(&consolidation.EnumDeduplicationRule{})
 		engine.AddRule(&consolidation.PublicationDeduplicationRule{})
 
