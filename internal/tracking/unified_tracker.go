@@ -993,7 +993,26 @@ func (ut *UnifiedTracker) parseObjectID(identifier string) ObjectID {
 	parts := strings.Split(identifier, ".")
 	switch len(parts) {
 	case 1:
-		return ObjectID{Name: parts[0], Type: types.TypeTable} // Default assumption
+		// BUGFIX Bug #3: Check if this is a custom type (enum) before defaulting to table
+		// Enum types often end with _enum, _status, _type suffixes
+		// Also check if this identifier exists as an enum in our tracked lifecycles
+		objType := types.TypeTable // Default assumption
+
+		identifier_lower := strings.ToLower(parts[0])
+		if strings.HasSuffix(identifier_lower, "_enum") ||
+		   strings.HasSuffix(identifier_lower, "_status") ||
+		   strings.HasSuffix(identifier_lower, "_type") {
+			// Likely a custom enum type
+			objType = types.TypeEnum
+		} else {
+			// Check if this exists as an enum in tracked objects
+			enumKey := makeKey(parts[0], types.TypeEnum)
+			if _, exists := ut.objects[enumKey]; exists {
+				objType = types.TypeEnum
+			}
+		}
+
+		return ObjectID{Name: parts[0], Type: objType}
 	case 2:
 		return ObjectID{Schema: parts[0], Name: parts[1], Type: types.TypeTable}
 	case 3:

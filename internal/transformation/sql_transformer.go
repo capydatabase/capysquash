@@ -494,7 +494,12 @@ func (st *SQLTransformer) transformToModernSyntax(ctx context.Context, sql strin
 	// Convert old function names to modern equivalents
 	if st.patterns.OldFunctionPattern.MatchString(sql) {
 		modernSQL := strings.ReplaceAll(transformedSQL, "substr(", "substring(")
-		modernSQL = strings.ReplaceAll(modernSQL, "length(", "char_length(")
+
+		// BUGFIX: Use word boundary regex to avoid converting char_length -> char_char_length
+		// The \b boundary prevents matching when "length" is preceded by underscore (char_length, character_length)
+		lengthRegex := regexp.MustCompile(`\blength\(`)
+		modernSQL = lengthRegex.ReplaceAllString(modernSQL, "char_length(")
+
 		modernSQL = strings.ReplaceAll(modernSQL, "position(", "strpos(")
 
 		if modernSQL != transformedSQL {

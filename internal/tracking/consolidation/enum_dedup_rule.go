@@ -67,7 +67,10 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 	var conflictingEnums []tracking.ObjectLifecycle
 	var primaryEnum string // The name that should be kept
 
-	// Collect all similar ENUMs including self
+	// BUGFIX: Extract values from this enum for comparison
+	currentEnumValues := extractEnumValuesFromLifecycle(lifecycle)
+
+	// Collect all similar ENUMs including self (but only if they have the SAME values)
 	allSimilarEnums := []string{typeName}
 	for _, categoryObjects := range allLifecycles {
 		for _, otherLifecycle := range categoryObjects {
@@ -75,11 +78,19 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 				continue // Skip self
 			}
 
-			// Check if other lifecycle is also an ENUM with similar name
+			// Check if other lifecycle is also an ENUM with similar name AND same values
 			if (otherLifecycle.Type == types.TypeEnum || otherLifecycle.Type == types.TypeType) &&
 				isSimilarEnumName(typeName, otherLifecycle.Name) {
-				conflictingEnums = append(conflictingEnums, *otherLifecycle)
-				allSimilarEnums = append(allSimilarEnums, otherLifecycle.Name)
+
+				// BUGFIX: Only treat as duplicate if values match
+				otherEnumValues := extractEnumValuesFromLifecycle(otherLifecycle)
+				if enumValuesMatch(currentEnumValues, otherEnumValues) {
+					conflictingEnums = append(conflictingEnums, *otherLifecycle)
+					allSimilarEnums = append(allSimilarEnums, otherLifecycle.Name)
+					utils.GetDefaultLogger().WithPrefix("ENUM-DEDUP").Info("Found duplicate ENUM: %s has same values as %s", otherLifecycle.Name, typeName)
+				} else {
+					utils.GetDefaultLogger().WithPrefix("ENUM-DEDUP").Info("ENUM %s has similar name to %s but DIFFERENT values - keeping both", otherLifecycle.Name, typeName)
+				}
 			}
 		}
 	}
@@ -380,4 +391,39 @@ func contains(slice []string, value string) bool {
 		}
 	}
 	return false
+}
+
+// extractEnumValuesFromLifecycle extracts enum values from a lifecycle's SQL
+func extractEnumValuesFromLifecycle(lifecycle *tracking.ObjectLifecycle) []string {
+	enumPattern := regexp.MustCompile(`(?is)CREATE\s+TYPE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+ENUM\s*\((.*?)\)`)
+
+	for _, event := range lifecycle.History {
+		if matches := enumPattern.FindStringSubmatch(event.Statement.SQL); len(matches) > 1 {
+			return parseEnumValues(matches[1])
+		}
+	}
+	return []string{}
+}
+
+// enumValuesMatch checks if two enum value lists are the same (order-independent)
+func enumValuesMatch(values1, values2 []string) bool {
+	if len(values1) != len(values2) {
+		return false
+	}
+
+	// Create a map of values from first list
+	valueMap := make(map[string]bool)
+	for _, v := range values1 {
+		valueMap[strings.ToLower(strings.TrimSpace(v))] = true
+	}
+
+	// Check if all values from second list exist in map
+	for _, v := range values2 {
+		normalized := strings.ToLower(strings.TrimSpace(v))
+		if !valueMap[normalized] {
+			return false
+		}
+	}
+
+	return true
 }
