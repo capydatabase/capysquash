@@ -68,6 +68,45 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 			continue
 		}
 
+		// BUGFIX Bug #4: Extract ALTER TABLE statements from DO blocks BEFORE parsing
+		// DO blocks often wrap ALTER statements in IF NOT EXISTS checks:
+		//   DO $$ BEGIN IF NOT EXISTS (...) THEN ALTER TABLE foo ADD COLUMN bar; END IF; END $$;
+		// We need to extract these ALTER statements and parse them separately
+		// so they can be properly tracked and consolidated
+		if strings.Contains(strings.ToUpper(stmtStr), "DO") && strings.Contains(strings.ToUpper(stmtStr), "$$") {
+			// Check if this DO block contains ALTER TABLE statements
+			alterStmts := extractAlterStatementsFromDoBlock(stmtStr)
+
+			if len(alterStmts) > 0 {
+				// Log extraction for debugging
+				utils.GetDefaultLogger().WithPrefix("PARSER").Info(
+					"Extracted %d ALTER TABLE statement(s) from DO block in %s",
+					len(alterStmts), filename)
+
+				// Parse and add each extracted ALTER statement
+				for _, alterSQL := range alterStmts {
+					alterStmt, err := parseStatementWithNormalizationAndContext(alterSQL, i, normalizer, errorHandler, filename)
+					if err != nil {
+						if !errorHandler.ShouldContinue() {
+							break
+						}
+						continue
+					}
+
+					// Assign comments and category
+					alterStmt.Comments = getRelevantComments(comments, i)
+					alterStmt.Category = categorizeStatement(*alterStmt)
+
+					migration.Statements = append(migration.Statements, *alterStmt)
+				}
+
+				// Skip the original DO block - we've extracted what we need
+				// The DO block itself doesn't need to be in the output
+				continue
+			}
+		}
+
+		// Parse the statement normally
 		stmt, err := parseStatementWithNormalizationAndContext(stmtStr, i, normalizer, errorHandler, filename)
 		if err != nil {
 			// Error was already handled by parseStatementWithNormalizationAndContext
@@ -1352,6 +1391,83 @@ func extractNestedTypesFromDoBlock(doBlockSQL string) []string {
 	}
 
 	return nestedTypes
+}
+
+// extractAlterStatementsFromDoBlock extracts ALTER TABLE statements from DO blocks
+// This is critical for handling migrations that wrap ALTER statements in IF NOT EXISTS checks
+// Example:
+//   DO $$ BEGIN
+//     IF NOT EXISTS (...) THEN
+//       ALTER TABLE foo ADD COLUMN bar TEXT;
+//     END IF;
+//   END $$;
+// Returns: ["ALTER TABLE foo ADD COLUMN bar TEXT;"]
+func extractAlterStatementsFromDoBlock(doBlockSQL string) []string {
+	var alterStatements []string
+
+	// Strategy: Extract complete ALTER TABLE statements from DO blocks
+	// Must handle:
+	// 1. Simple columns: ALTER TABLE foo ADD COLUMN bar TEXT;
+	// 2. Complex columns: ALTER TABLE foo ADD COLUMN bar TEXT GENERATED ALWAYS AS (...) STORED;
+	// 3. Constraints: ALTER TABLE foo ADD CONSTRAINT ...;
+	// 4. RLS: ALTER TABLE foo ENABLE ROW LEVEL SECURITY;
+
+	// Pattern 1: Extract ALTER TABLE ... ADD COLUMN (handles multi-line GENERATED columns)
+	// Captures everything from ALTER TABLE to the semicolon
+	addColumnPattern := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(\S+)\s+ADD\s+COLUMN\s+([^;]+);`)
+	matches := addColumnPattern.FindAllStringSubmatch(doBlockSQL, -1)
+
+	for _, match := range matches {
+		if len(match) >= 3 {
+			tableName := strings.TrimSpace(match[1])
+			columnDef := strings.TrimSpace(match[2])
+
+			// Normalize whitespace (collapse newlines and multiple spaces)
+			columnDef = regexp.MustCompile(`\s+`).ReplaceAllString(columnDef, " ")
+			columnDef = strings.TrimSpace(columnDef)
+
+			if columnDef != "" {
+				stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s;", tableName, columnDef)
+				alterStatements = append(alterStatements, stmt)
+			}
+		}
+	}
+
+	// Pattern 2: Extract ALTER TABLE ... ADD CONSTRAINT
+	addConstraintPattern := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(\S+)\s+ADD\s+CONSTRAINT\s+([^;]+);`)
+	constraintMatches := addConstraintPattern.FindAllStringSubmatch(doBlockSQL, -1)
+
+	for _, match := range constraintMatches {
+		if len(match) >= 3 {
+			tableName := strings.TrimSpace(match[1])
+			constraintDef := strings.TrimSpace(match[2])
+
+			// Normalize whitespace
+			constraintDef = regexp.MustCompile(`\s+`).ReplaceAllString(constraintDef, " ")
+			constraintDef = strings.TrimSpace(constraintDef)
+
+			if constraintDef != "" {
+				stmt := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s;", tableName, constraintDef)
+				alterStatements = append(alterStatements, stmt)
+			}
+		}
+	}
+
+	// Pattern 3: Extract other ALTER TABLE operations (ENABLE/DISABLE RLS, etc.)
+	otherAlterPattern := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(\S+)\s+((?:ENABLE|DISABLE)\s+ROW\s+LEVEL\s+SECURITY)\s*;`)
+	otherMatches := otherAlterPattern.FindAllStringSubmatch(doBlockSQL, -1)
+
+	for _, match := range otherMatches {
+		if len(match) >= 3 {
+			tableName := strings.TrimSpace(match[1])
+			alterAction := strings.TrimSpace(match[2])
+
+			stmt := fmt.Sprintf("ALTER TABLE %s %s;", tableName, alterAction)
+			alterStatements = append(alterStatements, stmt)
+		}
+	}
+
+	return alterStatements
 }
 
 // enrichStatementWithPlugins calls all active plugins to enrich statement metadata
