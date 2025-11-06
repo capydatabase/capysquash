@@ -1,6 +1,7 @@
 package ast
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
@@ -26,8 +27,8 @@ func (fn *FunctionNormalizer) NormalizeAll(sql string) (string, error) {
 	// Parse SQL to AST
 	parseResult, err := pg_query.Parse(sql)
 	if err != nil {
-		fn.logger.Info("Failed to parse SQL for AST normalization: %v (falling back to original)", err)
-		return sql, nil // Return original SQL if parse fails
+		fn.logger.Info("Failed to parse SQL for AST normalization: %v", err)
+		return sql, err
 	}
 
 	modified := false
@@ -62,20 +63,32 @@ func (fn *FunctionNormalizer) NormalizeAll(sql string) (string, error) {
 		}
 	}
 
-	if !modified {
-		return sql, nil // No changes needed
+	if modified {
+		fn.logger.Info("Applied %d AST-based function normalizations", fixCount)
+
+		// Only deparse if we actually modified something
+		// WARNING: pg_query.Deparse() is known to truncate function bodies!
+		deparsed, err := pg_query.Deparse(parseResult)
+		if err != nil {
+			fn.logger.Info("Failed to deparse normalized AST: %v (falling back to original)", err)
+			return sql, nil
+		}
+
+		// CRITICAL FIX: pg_query deparser sometimes omits LANGUAGE clauses from output
+		// even when they're present in the AST. We need to verify and fix this.
+		deparsed = fn.ensureLanguageClausesPresent(parseResult, deparsed)
+
+		return deparsed, nil
 	}
 
-	fn.logger.Info("Applied %d AST-based function normalizations", fixCount)
+	// No modifications needed - return original SQL to preserve function bodies
+	// BUT: We still need to fix LANGUAGE clause positions if they're at the end
+	// PostgreSQL allows: AS $$ ... $$ LANGUAGE plpgsql;
+	// But prefers: LANGUAGE plpgsql AS $$ ... $$;
+	// We use ensureLanguageClausesPresent to normalize this
+	sql = fn.ensureLanguageClausesPresent(parseResult, sql)
 
-	// Deparse back to SQL
-	deparsed, err := pg_query.Deparse(parseResult)
-	if err != nil {
-		fn.logger.Info("Failed to deparse normalized AST: %v (falling back to original)", err)
-		return sql, nil
-	}
-
-	return deparsed, nil
+	return sql, nil
 }
 
 // fixLanguageOrder ensures LANGUAGE comes before VOLATILE/STABLE/IMMUTABLE.
@@ -162,50 +175,99 @@ func (fn *FunctionNormalizer) removeRedundantLanguage(funcStmt *pg_query.CreateF
 	return true
 }
 
-// inferMissingLanguage adds missing LANGUAGE declaration based on function body.
+// inferMissingLanguage adds missing LANGUAGE declaration or fixes incorrect LANGUAGE based on function body.
+// This is the critical fix for Bug #2: Functions with simple SQL bodies declared as plpgsql.
 func (fn *FunctionNormalizer) inferMissingLanguage(funcStmt *pg_query.CreateFunctionStmt) bool {
+	// Get function name for debugging
+	funcName := fn.getFunctionName(funcStmt)
+
 	// Check if function already has a language
 	hasLanguage := false
-	for _, opt := range funcStmt.Options {
+	languageValue := ""
+	languageOptionIndex := -1
+	for i, opt := range funcStmt.Options {
 		defElem := opt.GetDefElem()
 		if defElem != nil && defElem.Defname == "language" {
 			hasLanguage = true
+			languageOptionIndex = i
+			// Extract language value
+			if strNode := defElem.Arg.GetString_(); strNode != nil {
+				languageValue = strings.ToLower(strNode.Sval)
+			}
 			break
 		}
 	}
 
+	// Infer the correct language from function body or return type
+	correctLanguage := fn.inferLanguageFromFunction(funcStmt)
+	if correctLanguage == "" {
+		correctLanguage = "sql" // Default to SQL
+	}
+
 	if hasLanguage {
-		return false // Already has language
+		// Function has a language - check if it's correct
+		if languageValue == correctLanguage {
+			// Language is correct, no changes needed
+			fn.logger.Info("Function %s already has correct LANGUAGE %s in options, skipping", funcName, languageValue)
+			return false
+		}
+
+		// Language is INCORRECT - fix it
+		fn.logger.Info("Function %s has incorrect LANGUAGE %s (should be %s), fixing...", funcName, languageValue, correctLanguage)
+
+		// Update the existing language option
+		defElem := funcStmt.Options[languageOptionIndex].GetDefElem()
+		if defElem != nil && defElem.Arg != nil {
+			if strNode := defElem.Arg.GetString_(); strNode != nil {
+				strNode.Sval = correctLanguage
+				fn.logger.Info("Fixed LANGUAGE %s → %s for %s", languageValue, correctLanguage, funcName)
+				return true
+			}
+		}
+
+		// If we couldn't update in place, remove old and add new
+		// Remove old language option
+		newOptions := make([]*pg_query.Node, 0, len(funcStmt.Options))
+		for i, opt := range funcStmt.Options {
+			if i != languageOptionIndex {
+				newOptions = append(newOptions, opt)
+			}
+		}
+		funcStmt.Options = newOptions
+
+		// Add new language option (fall through to code below)
+		hasLanguage = false
 	}
 
-	// Infer language from function body or return type
-	language := fn.inferLanguageFromFunction(funcStmt)
-	if language == "" {
-		language = "sql" // Default to SQL
-	}
+	if !hasLanguage {
+		// Function doesn't have a language or we removed the incorrect one
+		fn.logger.Info("Function %s is missing LANGUAGE in options, adding %s...", funcName, correctLanguage)
 
-	// Add language option
-	languageOpt := &pg_query.Node{
-		Node: &pg_query.Node_DefElem{
-			DefElem: &pg_query.DefElem{
-				Defname: "language",
-				Arg: &pg_query.Node{
-					Node: &pg_query.Node_String_{
-						String_: &pg_query.String{
-							Sval: language,
+		// Add language option
+		languageOpt := &pg_query.Node{
+			Node: &pg_query.Node_DefElem{
+				DefElem: &pg_query.DefElem{
+					Defname: "language",
+					Arg: &pg_query.Node{
+						Node: &pg_query.Node_String_{
+							String_: &pg_query.String{
+								Sval: correctLanguage,
+							},
 						},
 					},
 				},
 			},
-		},
+		}
+
+		// Insert language after RETURNS but before AS (if possible)
+		// For now, append to end
+		funcStmt.Options = append(funcStmt.Options, languageOpt)
+
+		fn.logger.Info("Added LANGUAGE %s to %s", correctLanguage, funcName)
+		return true
 	}
 
-	// Insert language after RETURNS but before AS (if possible)
-	// For now, append to end
-	funcStmt.Options = append(funcStmt.Options, languageOpt)
-
-	fn.logger.Info("Added missing LANGUAGE %s", language)
-	return true
+	return false
 }
 
 // inferLanguageFromFunction infers the appropriate language from function characteristics.
@@ -292,6 +354,27 @@ func (fn *FunctionNormalizer) removeDuplicateOptions(funcStmt *pg_query.CreateFu
 
 // Helper functions
 
+func (fn *FunctionNormalizer) getFunctionName(funcStmt *pg_query.CreateFunctionStmt) string {
+	if funcStmt == nil || len(funcStmt.Funcname) == 0 {
+		return "<unknown>"
+	}
+
+	// Build qualified name from ObjectWithArgs
+	var nameParts []string
+	for _, node := range funcStmt.Funcname {
+		if str := node.GetString_(); str != nil {
+			nameParts = append(nameParts, str.Sval)
+		}
+	}
+
+	if len(nameParts) == 0 {
+		return "<unknown>"
+	}
+
+	// Return the last part (unqualified name) for brevity
+	return nameParts[len(nameParts)-1]
+}
+
 func (fn *FunctionNormalizer) getTypeNameFromTypeName(typeName *pg_query.TypeName) string {
 	if typeName == nil {
 		return ""
@@ -367,4 +450,193 @@ func (fn *FunctionNormalizer) deparseNode(node *pg_query.Node) string {
 	}
 
 	return deparsed
+}
+
+// ensureLanguageClausesPresent fixes pg_query deparser omissions by manually inserting
+// missing LANGUAGE clauses. The deparser inconsistently outputs LANGUAGE options even
+// when they exist in the AST.
+//
+// NOTE: pg_query deparser outputs compressed SQL where functions may appear on single
+// lines or with previous statements (e.g., "$$; CREATE OR REPLACE FUNCTION ...").
+func (fn *FunctionNormalizer) ensureLanguageClausesPresent(parseResult *pg_query.ParseResult, sql string) string {
+	// Build map of function names to their LANGUAGE values from the AST
+	functionLanguages := make(map[string]string)
+
+	for _, stmt := range parseResult.Stmts {
+		funcStmt := stmt.Stmt.GetCreateFunctionStmt()
+		if funcStmt == nil {
+			continue
+		}
+
+		funcName := fn.getFunctionName(funcStmt)
+
+		// Extract LANGUAGE from options
+		for _, opt := range funcStmt.Options {
+			defElem := opt.GetDefElem()
+			if defElem != nil && defElem.Defname == "language" {
+				if strNode := defElem.Arg.GetString_(); strNode != nil {
+					functionLanguages[funcName] = strNode.Sval
+				}
+				break
+			}
+		}
+	}
+
+	if len(functionLanguages) == 0 {
+		return sql // No functions with LANGUAGE to check
+	}
+
+	fixedCount := 0
+
+	// CRITICAL FIX: pg_query deparser bug with RETURNS TABLE
+	// It outputs: ) RETURNS TABLE LANGUAGE plpgsql (columns...)
+	// Correct:     ) RETURNS TABLE (columns...) LANGUAGE plpgsql
+	// Fix this globally before processing individual functions
+	// Pattern handles multiline: closing paren, newline/spaces, RETURNS TABLE, LANGUAGE, opening paren
+	returnsTablePattern := `(?is)(\)\s+RETURNS\s+TABLE)\s+(LANGUAGE\s+\w+)\s+(\()`
+	returnsTableRe := regexp.MustCompile(returnsTablePattern)
+	beforeFix := sql
+	// Remove misplaced LANGUAGE between TABLE and columns
+	sql = returnsTableRe.ReplaceAllString(sql, "$1 $3")
+	if sql != beforeFix {
+		fixCount := len(returnsTableRe.FindAllString(beforeFix, -1))
+		fn.logger.Info("Fixed pg_query deparser bug: removed %d misplaced LANGUAGE clauses from RETURNS TABLE", fixCount)
+	}
+
+	// Use regex to find and fix each function
+	// Pattern matches: CREATE [OR REPLACE] FUNCTION name(...) RETURNS ... [modifiers] AS $$
+	// CRITICAL: LANGUAGE must come BEFORE VOLATILE/STABLE/IMMUTABLE/SECURITY modifiers
+	for funcName, expectedLanguage := range functionLanguages {
+		// Build regex pattern for this specific function
+		// Pattern: CREATE ... FUNCTION funcName(...) RETURNS <type> ... AS $$
+		re := strings.NewReplacer(
+			"(", `\(`,
+			")", `\)`,
+		)
+		escapedName := re.Replace(funcName)
+
+		// Pattern must handle:
+		// 1. RETURNS [SETOF] type AS $$
+		// 2. RETURNS TABLE (...) AS $$ (single or multiline)
+		// 3. RETURNS TABLE(\n  col1 type,\n  col2 type\n) AS $$ (multiline with newlines)
+		//
+		// Strategy: Match up to RETURNS, then non-greedy .*? to AS $$
+		// This captures everything between RETURNS clause and AS $$ as group 2
+		funcPattern := `(?is)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[\w.]+\.)?` + escapedName + `\s*\([^)]*\)\s+RETURNS\s+.+?)(\s+)(AS\s+\$\$)`
+
+		funcRe, err := regexp.Compile(funcPattern)
+		if err != nil {
+			fn.logger.Info("Failed to compile regex for function %s: %v", funcName, err)
+			continue
+		}
+
+		// Check if this function is missing LANGUAGE before AS $$
+		matches := funcRe.FindStringSubmatch(sql)
+		if len(matches) >= 4 {
+			// matches[1]: Everything up to and including RETURNS clause (may be multiline TABLE)
+			// matches[2]: Space/whitespace between RETURNS clause and AS $$
+			// matches[3]: AS $$
+
+			// Check if LANGUAGE appears ANYWHERE between RETURNS and AS $$
+			// Extract the full text between RETURNS and AS to check for LANGUAGE
+			fullSection := matches[0] // The entire matched text
+			upperSection := strings.ToUpper(fullSection)
+
+			// Find where "RETURNS" ends and where "AS $$" begins
+			returnsIdx := strings.Index(upperSection, "RETURNS")
+			asIdx := strings.LastIndex(upperSection, "AS")
+
+			if returnsIdx >= 0 && asIdx > returnsIdx {
+				betweenReturnsAndAs := upperSection[returnsIdx:asIdx]
+
+				// Check if LANGUAGE is missing from the section between RETURNS and AS $$
+				if !strings.Contains(betweenReturnsAndAs, "LANGUAGE") {
+					fn.logger.Info("Adding LANGUAGE %s for function %s (missing between RETURNS and AS)", expectedLanguage, funcName)
+
+					// Insert LANGUAGE right before AS $$
+					// matches[1] = CREATE...RETURNS clause, matches[2] = space, matches[3] = AS $$
+					replacement := "$1 LANGUAGE " + expectedLanguage + "$2$3"
+					sql = funcRe.ReplaceAllString(sql, replacement)
+					fixedCount++
+				}
+			}
+		}
+	}
+
+	if fixedCount > 0 {
+		fn.logger.Info("Fixed %d functions where deparser omitted LANGUAGE clauses", fixedCount)
+	}
+
+	// PHASE 2: Remove trailing function options after closing $$
+	// The deparser sometimes outputs: AS $$ ... $$ LANGUAGE lang VOLATILE/STABLE/IMMUTABLE SECURITY DEFINER;
+	// After we insert options before AS, we need to remove the trailing ones to avoid conflicts
+
+	trailingFixCount := 0
+
+	// Remove LANGUAGE (handle $$LANGUAGE, $$; LANGUAGE, $$ LANGUAGE - all variations)
+	// Replace with $$; to ensure semicolon is always present
+	trailingLangPattern := `(?i)(\$\$);?\s*(LANGUAGE\s+(?:sql|plpgsql|plperl|plpython|c))\s*;?`
+	trailingLangRe := regexp.MustCompile(trailingLangPattern)
+	beforeLang := sql
+	sql = trailingLangRe.ReplaceAllString(sql, "$1;")
+	if sql != beforeLang {
+		trailingFixCount += len(trailingLangRe.FindAllString(beforeLang, -1))
+	}
+
+	// Remove volatility markers (handle $$VOLATILE, $$; VOLATILE, $$ VOLATILE - all variations)
+	// Replace with $$; to ensure semicolon is always present
+	trailingVolatilityPattern := `(?i)(\$\$);?\s*(VOLATILE|STABLE|IMMUTABLE)\s*;?`
+	trailingVolatilityRe := regexp.MustCompile(trailingVolatilityPattern)
+	beforeVol := sql
+	sql = trailingVolatilityRe.ReplaceAllString(sql, "$1;")
+	if sql != beforeVol {
+		trailingFixCount += len(trailingVolatilityRe.FindAllString(beforeVol, -1))
+	}
+
+	// Remove SECURITY DEFINER/INVOKER (handle $$SECURITY, $$; SECURITY, $$ SECURITY - all variations)
+	// Replace with $$; to ensure semicolon is always present
+	trailingSecurityPattern := `(?i)(\$\$);?\s*(SECURITY\s+(?:DEFINER|INVOKER))\s*;?`
+	trailingSecurityRe := regexp.MustCompile(trailingSecurityPattern)
+	beforeSec := sql
+	sql = trailingSecurityRe.ReplaceAllString(sql, "$1;")
+	if sql != beforeSec {
+		trailingFixCount += len(trailingSecurityRe.FindAllString(beforeSec, -1))
+	}
+
+	if trailingFixCount > 0 {
+		fn.logger.Info("Removed %d redundant trailing function options", trailingFixCount)
+	}
+
+	return sql
+}
+
+// extractFunctionNameFromSQL extracts the function name from a CREATE FUNCTION line.
+func (fn *FunctionNormalizer) extractFunctionNameFromSQL(line string) string {
+	// Pattern: CREATE [OR REPLACE] FUNCTION [schema.]name(...)
+	upperLine := strings.ToUpper(line)
+
+	// Find FUNCTION keyword
+	funcIdx := strings.Index(upperLine, "FUNCTION")
+	if funcIdx == -1 {
+		return ""
+	}
+
+	// Get everything after FUNCTION
+	afterFunc := strings.TrimSpace(line[funcIdx+8:])
+
+	// Function name is everything before the opening parenthesis
+	parenIdx := strings.Index(afterFunc, "(")
+	if parenIdx == -1 {
+		return ""
+	}
+
+	funcNameFull := strings.TrimSpace(afterFunc[:parenIdx])
+
+	// If it's schema-qualified (public.func_name), get just the name
+	parts := strings.Split(funcNameFull, ".")
+	if len(parts) > 1 {
+		return parts[len(parts)-1]
+	}
+
+	return funcNameFull
 }
