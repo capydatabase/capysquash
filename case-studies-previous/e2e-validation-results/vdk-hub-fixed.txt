@@ -1,0 +1,43 @@
+VDK HUB E2E VALIDATION - Sun Nov  2 12:36:03 EET 2025
+==========================================
+
+COMMENT
+COMMENT
+INSERT 0 1
+INSERT 0 3
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+INSERT 0 6
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+BEGIN
+UPDATE 0
+INSERT 0 7
+UPDATE 1
+UPDATE 1
+UPDATE 1
+UPDATE 1
+UPDATE 1
+UPDATE 1
+COMMIT
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+INSERT 0 3
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+COMMENT
+NOTICE:  Community Blueprint tables created successfully!
+NOTICE:  Tables: community_blueprints, blueprint_usage, blueprint_votes
+DO
+NOTICE:  Indexes: 32 total indexes created
+NOTICE:  RLS policies: Enabled on all tables
+NOTICE:  Sample data: 2 blueprints, 3 usage records, 3 votes inserted

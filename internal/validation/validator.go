@@ -1739,8 +1739,8 @@ func (sv *SchemaValidator) waitForPostgreSQLReady(ctx context.Context, container
 	}
 	defer func() { _ = db.Close() }()
 
-	// Get timeout from config (default: 60s - longer because package installation may delay startup)
-	timeoutDuration := 60 * time.Second
+	// Get timeout from config (default: 150s - sufficient for heavy extensions like postgis, pgcrypto, cube, earthdistance)
+	timeoutDuration := 150 * time.Second
 	if sv.config != nil && sv.config.ContainerReadyTimeout > 0 {
 		timeoutDuration = time.Duration(sv.config.ContainerReadyTimeout) * time.Second
 	}
@@ -1757,7 +1757,8 @@ func (sv *SchemaValidator) waitForPostgreSQLReady(ctx context.Context, container
 				fmt.Sprintf("timeout waiting for PostgreSQL after %v", timeoutDuration),
 				errors.SeverityError,
 				errors.CategoryValidation,
-			).WithSuggestion("PostgreSQL may have failed to start - check container logs: docker logs " + containerInfo.ID)
+			).WithSuggestion(fmt.Sprintf("Increase container_ready_timeout in config (current: %ds, suggested: %ds+) or check container logs: docker logs %s",
+				int(timeoutDuration.Seconds()), int(timeoutDuration.Seconds())+30, containerInfo.ID))
 		case <-ticker.C:
 			if err := db.PingContext(ctx); err == nil {
 				sv.logInfo("☑ PostgreSQL ready and accepting connections")

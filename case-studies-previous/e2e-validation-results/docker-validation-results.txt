@@ -1,0 +1,57 @@
+===========================================
+DOCKER VALIDATION RESULTS
+Started: Tue Oct 28 21:56:29 EET 2025
+===========================================
+
+Scenario: standard-no-ai
+  Status: PASSED
+  Duration: 6s
+  Original Tables: N/A
+  Squashed Tables: N/A
+  Original Functions: N/A
+  Squashed Functions: N/A
+
+Scenario: standard-ai
+  Status: PASSED
+  Duration: 6s
+  Original Tables: N/A
+  Squashed Tables: N/A
+  Original Functions: N/A
+  Squashed Functions: N/A
+
+Scenario: conservative-no-ai
+  Status: PASSED
+  Duration: 5s
+  Original Tables: N/A
+  Squashed Tables: N/A
+  Original Functions: N/A
+  Squashed Functions: N/A
+
+Scenario: conservative-ai
+  Status: PASSED
+  Duration: 6s
+  Original Tables: N/A
+  Squashed Tables: N/A
+  Original Functions: N/A
+  Squashed Functions: N/A
+
+Scenario: aggressive-no-ai
+  Status: PASSED
+  Duration: 6s
+  Original Tables: N/A
+  Squashed Tables: N/A
+  Original Functions: N/A
+  Squashed Functions: N/A
+
+Scenario: aggressive-ai
+  Status: PASSED
+  Duration: 5s
+  Original Tables: N/A
+  Squashed Tables: N/A
+  Original Functions: N/A
+  Squashed Functions: N/A
+
+===========================================
+Completed: Tue Oct 28 21:57:03 EET 2025
+Summary: 6 passed, 0 failed, 0 skipped
+===========================================

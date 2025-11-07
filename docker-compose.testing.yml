@@ -45,7 +45,7 @@ services:
       - "com.pgsquash.service=postgres-testing"
       - "com.pgsquash.version=17"
 
-  # PostgreSQL 15 (LTS - Current Debian/Ubuntu default)
+  # PostgreSQL 17 (LTS - Current Debian/Ubuntu default)
   postgres-15:
     image: postgres:15
     container_name: pgsquash-postgres-15

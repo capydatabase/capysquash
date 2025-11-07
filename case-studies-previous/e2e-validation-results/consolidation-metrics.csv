@@ -1,0 +1,9 @@
+Scenario,Safety Level,AI Enabled,Files Before,Files After,Lines Before,Lines After,Reduction %,Status,Duration (s)
+paranoid-no-ai,paranoid,enabled,15,2,15696,11153,28.9%,SUCCESS,0
+paranoid-ai,paranoid,enabled,15,2,15696,11208,28.6%,SUCCESS,0
+conservative-no-ai,conservative,enabled,15,2,15696,11138,29.0%,SUCCESS,0
+conservative-ai,conservative,enabled,15,2,15696,11157,28.9%,SUCCESS,0
+standard-no-ai,standard,enabled,15,2,15696,11106,29.2%,SUCCESS,0
+standard-ai,standard,enabled,15,2,15696,11093,29.3%,SUCCESS,0
+aggressive-no-ai,aggressive,enabled,15,2,15696,11108,29.2%,SUCCESS,0
+aggressive-ai,aggressive,enabled,15,2,15696,11162,28.9%,SUCCESS,0

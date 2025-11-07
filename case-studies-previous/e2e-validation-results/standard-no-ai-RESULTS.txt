@@ -1,0 +1,88 @@
+========================================
+E2E VALIDATION - STANDARD NO-AI RESULTS
+========================================
+Configuration: test-configs/standard-no-ai.json
+Safety Level: standard
+AI Enabled: false
+Timestamp: 2025-10-24 10:58
+
+OUTPUT FILES:
+-rw-r--r--  370K  000_baseline.sql
+-rw-r--r--   59K  010_data.sql
+-rw-r--r--   25K  .squashmap.json
+
+LINE COUNT ANALYSIS:
+Original migrations: 15,696 lines (across 15 files)
+Squashed output: 10,999 lines (2 files)
+Lines reduced: 4,697
+Reduction percentage: 29.9%
+
+CONSOLIDATION TARGET:
+Expected for standard: 35-50% reduction
+Actual: 29.9% reduction
+Status: BELOW TARGET ⚠️
+
+SQUASH OPERATION:
+Duration: ~3 seconds
+Status: COMPLETED WITH WARNINGS
+Consolidated objects: 831
+
+KEY WARNINGS:
+1. DDL Cycles detected (LOW, MEDIUM severity)
+   - TRANSIENT cycles: public_roommate_listings (VIEW), buddy_connections (TABLE)
+   - VERSIONING cycles: Multiple indexes, triggers, policies
+
+2. Required extensions detected:
+   - btree_gin, cube, earthdistance, pg_stat_statements, pg_trgm, postgis, uuid-ossp
+
+3. Validation failure:
+   ❌ Automatic validation failed
+   Error: INVALID_SQL - failed to apply squashed migrations
+   Reason: Squashed migrations contain SQL errors
+
+CONSOLIDATION DETAILS:
+- Tables: 117 created
+- Enums: Deduplication applied (verification_status_enum eliminated)
+- Functions: Multiple CREATE statements consolidated
+- Triggers: Malformed DROP TRIGGERs fixed (40 fixes)
+- Indexes: Consolidation applied
+- RLS Policies: Consolidation applied
+- Publication: 12 publication member additions deduplicated
+
+SQL TRANSFORMATIONS APPLIED:
+- Normalized LANGUAGE position in 49 functions
+- Fixed RETURN NEXT with OUT params
+- Fixed 4 missing semicolons
+- Fixed 2 ENUM references to eliminated types
+- 85 total SQL transformations
+
+BUGS IDENTIFIED:
+🐛 BUG #1: Validation Failure - Invalid SQL Generated
+   Severity: HIGH
+   Impact: Squashed migrations cannot be applied to database
+   Details: The automatic validation detected SQL errors in generated files
+   Next steps: Manual SQL inspection needed to identify syntax errors
+
+🐛 BUG #2: Below Target Consolidation
+   Severity: MEDIUM
+   Impact: Standard safety level achieved only 29.9% reduction vs 35-50% target
+   Details: May indicate missed consolidation opportunities or conservative rules
+
+⚠️  CONCERN #1: Numerous DDL Cycle Warnings
+   Impact: Medium/Low severity cycles detected but marked as handled
+   Details: View dependencies, trigger versioning, policy versioning
+   Risk: May cause ordering issues during migration application
+
+ZERO-TOLERANCE VALIDATION:
+Status: PENDING - Cannot validate due to SQL errors
+Required: Compare object counts between original and squashed databases
+Cannot proceed until SQL errors are resolved
+
+PRODUCTION-READINESS:
+Status: NOT READY
+Blockers:
+  1. SQL syntax errors prevent application
+  2. Validation infrastructure fails
+  3. Below consolidation target
+
+Recommendation: Fix SQL generation bugs before production consideration

@@ -1,0 +1,30 @@
+Validating migrations...
+Original: case-studies/vdk hub/migrations
+Squashed: case-studies/vdk hub/e2e-test-standard
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Analyzing 9 migrations for extension requirements
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 0: found extensions []
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 1: found extensions [pg_trgm]
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 2: found extensions []
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 7: found extensions []
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 8: found extensions []
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 3: found extensions []
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 4: found extensions []
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 5: found extensions []
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Migration 6: found extensions []
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Detected Supabase authentication service
+[2025-11-07 12:04:38] [INFO] [EXT-DETECTOR] Extension analysis complete: 1 extensions, auth service: supabase, base image: postgres:15
+🔐 Detected supabase authentication - injecting compatibility layer
+🔍 Using validation mode: TWO_DATABASES
+[VALIDATOR] 🚀 Starting Docker validation with approach: TWO_DATABASES
+[VALIDATOR] 📦 Detected 2 required extensions: [pg_trgm pgcrypto]
+[VALIDATOR] 🔧 Using two-database validation approach
+[VALIDATOR] 🐳 Creating enhanced container with extensions: [pg_trgm pgcrypto]
+[VALIDATOR] 🐘 Using Debian-based PostgreSQL image: postgres:15 (production-grade, fast extensions)
+[VALIDATOR] ☑ Docker image 'postgres:15' found locally
+[VALIDATOR] 📌 Docker assigned port: 55006
+[VALIDATOR] 📦 Installing Debian packages via apt-get: [postgresql-contrib]
+[VALIDATOR] ☑ Successfully installed Debian packages
+[VALIDATOR] 🔄 Restarting PostgreSQL to load extension libraries...
+[VALIDATOR] ☑ Container restarted successfully
+[VALIDATOR] ☑ Successfully cleaned up container ed402acb3cb61b80803ece0197377e8888e123052499391c23508a2e07d76a71
+[2025-11-07 12:07:15] [ERROR] [ERROR:VALIDATION] code:VALIDATION_FAILED file:case-studies/vdk hub/migrations Docker validation failed suggestion: Ensure Docker is running and accessible, or try a different validation mode
