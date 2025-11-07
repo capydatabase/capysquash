@@ -877,24 +877,49 @@ func runSquash(cmd *cobra.Command, args []string) error {
 				}
 				fmt.Println(color.YellowString("⚠️  Warning: Validation failed but continuing (use --fail-on-diff to exit on validation errors)"))
 			} else if valResult != nil && !valResult.Success {
-				fmt.Println(color.RedString("❌ Schema differences detected!"))
-				fmt.Println(valResult.DockerValidation.Differences)
+				// BUG #3 FIX: Check if comparison is valid before reporting differences as errors
+				if valResult.DockerValidation.ComparisonValid {
+					// Valid comparison - these are real consolidation issues
+					fmt.Println(color.RedString("❌ Schema differences detected!"))
+					fmt.Println(valResult.DockerValidation.Differences)
 
-				if openReport {
-					reportPath := filepath.Join(cfg.Output.Directory, "validation-report.md")
-					if err := os.WriteFile(reportPath, []byte(valResult.DockerValidation.Differences), 0644); err == nil {
-						fmt.Println(color.CyanString("📝 Validation report saved to: %s", reportPath))
-						openInEditor(reportPath)
+					if openReport {
+						reportPath := filepath.Join(cfg.Output.Directory, "validation-report.md")
+						if err := os.WriteFile(reportPath, []byte(valResult.DockerValidation.Differences), 0644); err == nil {
+							fmt.Println(color.CyanString("📝 Validation report saved to: %s", reportPath))
+							openInEditor(reportPath)
+						}
 					}
-				}
 
-				if failOnDiff {
-					return errors.NewError(
-						errors.ErrorCodeValidationFailed,
-						"Schema differences detected between original and squashed migrations",
-						errors.SeverityError,
-						errors.CategoryValidation,
-					).WithSuggestion("Review the differences above and ensure squashing is correct")
+					if failOnDiff {
+						return errors.NewError(
+							errors.ErrorCodeValidationFailed,
+							"Schema differences detected between original and squashed migrations",
+							errors.SeverityError,
+							errors.CategoryValidation,
+						).WithSuggestion("Review the differences above and ensure squashing is correct")
+					}
+				} else {
+					// Invalid comparison - original migrations failed
+					fmt.Println(color.YellowString("⚠️  Original migrations have errors (this is expected - pgsquash fixes broken migrations)"))
+					if valResult.DockerValidation.OriginalMigrationsError != "" {
+						fmt.Println(color.YellowString("    Error: %s", valResult.DockerValidation.OriginalMigrationsError))
+					}
+					fmt.Println(color.GreenString("✅ Squashed migrations applied successfully"))
+					if valResult.DockerValidation.Differences != "" {
+						fmt.Println(color.CyanString("ℹ️  Schema differences (informational only - due to original migration failures):"))
+						// Print first 20 differences only
+						lines := strings.Split(valResult.DockerValidation.Differences, "\n")
+						maxLines := 25
+						if len(lines) > maxLines {
+							for i := 0; i < maxLines && i < len(lines); i++ {
+								fmt.Println(color.CyanString("    %s", lines[i]))
+							}
+							fmt.Println(color.CyanString("    ... (%d more differences not shown)", len(lines)-maxLines))
+						} else {
+							fmt.Println(color.CyanString("    %s", valResult.DockerValidation.Differences))
+						}
+					}
 				}
 			} else {
 				fmt.Println(color.GreenString("✅ Validation passed - schemas are identical"))

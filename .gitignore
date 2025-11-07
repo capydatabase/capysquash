@@ -286,3 +286,32 @@ test-configs/standard-ai.json
 test-configs/standard-no-ai.json
 test-results/test1-nami-paranoid.log
 docs/ast-based-postprocessing.md
+ARCHITECTURE-REFACTOR.md
+BUG-FIXES-REPORT.md
+case studies/myroomie/output-fixed/.squashmap.json
+case studies/myroomie/output-fixed/000_baseline.sql
+case studies/myroomie/output-fixed/010_data.sql
+case studies/myroomie/output-refactored/.squashmap.json
+case studies/myroomie/output-refactored/000_baseline.sql
+case studies/myroomie/output-refactored/010_data.sql
+case studies/myroomie/README.md
+case studies/nami ai app/neurodivergent-ai-project-guide.md
+case studies/vdk hub/output-fixed/.squashmap.json
+case studies/vdk hub/output-fixed/000_baseline.sql
+case studies/vdk hub/output-fixed/010_data.sql
+case studies/vdk hub/output-refactored/.squashmap.json
+case studies/vdk hub/output-refactored/000_baseline.sql
+case studies/vdk hub/output-refactored/010_data.sql
+case studies/vdk hub/README.md
+case-study-outputs/myroomie-standard-no-ai/.squashmap.json
+case-study-outputs/myroomie-standard-no-ai/000_baseline.sql
+case-study-outputs/myroomie-standard-no-ai/010_data.sql
+case-study-outputs/myroomie-standard-no-ai/squash.log
+case-study-outputs/nami-ai-standard-no-ai/.squashmap.json
+case-study-outputs/nami-ai-standard-no-ai/000_baseline.sql
+case-study-outputs/nami-ai-standard-no-ai/010_data.sql
+case-study-outputs/nami-ai-standard-no-ai/squash.log
+case-study-outputs/vdk-hub-standard-no-ai/.squashmap.json
+case-study-outputs/vdk-hub-standard-no-ai/000_baseline.sql
+case-study-outputs/vdk-hub-standard-no-ai/010_data.sql
+e2e-validation-results/vdk-hub-fixed.txt

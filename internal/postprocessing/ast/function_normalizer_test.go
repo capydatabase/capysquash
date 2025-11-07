@@ -45,9 +45,11 @@ func TestFunctionNormalizer_FixLanguageOrder(t *testing.T) {
 				if result == tt.input {
 					t.Errorf("Expected SQL to be modified, but it wasn't")
 				}
-				// Result should have LANGUAGE before VOLATILE
-				if !strings.Contains(result, "LANGUAGE") || !strings.Contains(result, "VOLATILE") {
-					t.Errorf("Result missing expected keywords")
+				t.Logf("normalized SQL: %s", result)
+				// Result should have LANGUAGE declared in header
+				upperResult := strings.ToUpper(result)
+				if !strings.Contains(upperResult, "LANGUAGE") {
+					t.Errorf("Result missing expected LANGUAGE declaration")
 				}
 			} else {
 				// Should not have been modified (or minimal changes)

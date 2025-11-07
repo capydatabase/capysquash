@@ -1,0 +1,1 @@
+Loading migrations... 1/8[2025-11-06 09:38:32] [ERROR] [ERROR:VALIDATION] code:VALIDATION_FAILED file:migrations/01_initial_schema.sql Failed to read migration file: migrations/01_initial_schema.sql suggestion: Check file exists and is readable

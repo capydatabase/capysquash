@@ -55,82 +55,18 @@ func (r *FunctionDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, e
 		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found", map[string]interface{}{"object": lifecycle.Name})
 	}
 
-	// Check if the SQL contains essential keywords for a valid function definition
+	// BUG #2 FIX: Use original SQL directly from latest CREATE statement
+	// Multi-version functions should preserve the exact SQL from the latest definition
+	// without any extraction, reconstruction, or deparser round-trips that can corrupt:
+	// - LANGUAGE placement (before AS vs after body)
+	// - LANGUAGE type (sql vs plpgsql)
+	// - Volatility markers (STABLE, IMMUTABLE, VOLATILE)
+	// - Security markers (SECURITY DEFINER)
+	// - Function body quoting
 	consolidatedSQL := latestCreate.SQL
 
-	// DEBUG: Log what we received
-	createCount := strings.Count(strings.ToUpper(consolidatedSQL), "CREATE")
-	functionCount := strings.Count(strings.ToUpper(consolidatedSQL), "FUNCTION")
-	utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("FunctionDeduplicationRule for %s: latestCreate.SQL has %d CREATE, %d FUNCTION keywords (len=%d)",
-		lifecycle.Name, createCount, functionCount, len(consolidatedSQL))
-
-	if createCount > 1 && functionCount > 1 {
-		utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("WARNING: Detected multiple concatenated CREATE FUNCTION statements in %s.SQL", lifecycle.Name)
-		utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("  Statement.SQL contains %d CREATE keywords and %d FUNCTION keywords",
-			createCount, functionCount)
-		utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("  SQL preview (first 300 chars): %s...", strings.ReplaceAll(consolidatedSQL[:min(300, len(consolidatedSQL))], "\n", " "))
-
-		// Extract ONLY the FIRST complete function definition
-		consolidatedSQL = extractFirstCompleteFunction(consolidatedSQL, lifecycle.Name)
-	}
-
-	sqlUpper := strings.ToUpper(consolidatedSQL)
-
-	// Validate function has essential components
-	hasCreateFunction := strings.Contains(sqlUpper, "CREATE") && (strings.Contains(sqlUpper, "FUNCTION") || strings.Contains(sqlUpper, "PROCEDURE"))
-	hasReturns := strings.Contains(sqlUpper, "RETURNS")
-	hasAS := strings.Contains(sqlUpper, " AS ")
-	hasFunctionBody := strings.Contains(consolidatedSQL, "$$") || strings.Contains(consolidatedSQL, "$BODY$")
-	hasLanguage := strings.Contains(sqlUpper, "LANGUAGE")
-
-	// If the statement looks incomplete, try to reconstruct from all CREATE statements
-	if !hasCreateFunction || !hasReturns || !hasAS || !hasFunctionBody || !hasLanguage {
-		utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("WARNING: Incomplete function SQL detected for %s, attempting reconstruction", lifecycle.Name)
-		utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("  Missing: CREATE_FUNCTION=%v, RETURNS=%v, AS=%v, BODY=%v, LANGUAGE=%v", !hasCreateFunction, !hasReturns, !hasAS, !hasFunctionBody, !hasLanguage)
-
-		// Try to use the most complete version from duplicates
-		var mostComplete *types.Statement
-		maxScore := 0
-
-		allCreates := append(duplicateStmts, *latestCreate)
-		for i := range allCreates {
-			stmt := &allCreates[i]
-			score := 0
-			stmtUpper := strings.ToUpper(stmt.SQL)
-
-			if strings.Contains(stmtUpper, "CREATE") && strings.Contains(stmtUpper, "FUNCTION") {
-				score++
-			}
-			if strings.Contains(stmtUpper, "RETURNS") {
-				score++
-			}
-			if strings.Contains(stmtUpper, " AS ") {
-				score++
-			}
-			if strings.Contains(stmt.SQL, "$$") {
-				score++
-			}
-			if strings.Contains(stmtUpper, "LANGUAGE") {
-				score++
-			}
-
-			if score > maxScore {
-				maxScore = score
-				mostComplete = stmt
-			}
-		}
-
-		if mostComplete != nil && mostComplete != latestCreate {
-			utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("  Using more complete version with score %d vs %d", maxScore, 4)
-			consolidatedSQL = mostComplete.SQL
-		} else {
-			utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("  All versions have same completeness (max score: %d), using latest", maxScore)
-			// DEBUG: Print SQL to understand what's missing
-			if !hasLanguage {
-				utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("  DEBUG: latestCreate SQL preview: %s", strings.ReplaceAll(latestCreate.SQL[:min(200, len(latestCreate.SQL))], "\n", " "))
-			}
-		}
-	}
+	utils.GetDefaultLogger().WithPrefix("FUNCTION-DEDUP").Info("Preserving original SQL for multi-version function: %s (length=%d)",
+		lifecycle.Name, len(consolidatedSQL))
 
 	result := &tracking.ConsolidationResult{
 		OriginalStatements: append(duplicateStmts, *latestCreate),

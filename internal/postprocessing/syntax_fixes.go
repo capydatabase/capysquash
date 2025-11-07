@@ -74,8 +74,22 @@ func FixMissingSemicolons(sql string) string {
 			}
 		}
 
-		// Check if this looks like a complete statement that needs a semicolon
+		// Skip lines that end with opening parenthesis (start of multi-line statement)
+		// e.g., CREATE TABLE foo ( or CREATE FUNCTION foo() RETURNS void AS (
+		if strings.HasSuffix(trimmed, "(") {
+			result = append(result, line)
+			continue
+		}
+
+		// Skip CREATE/ALTER FUNCTION lines - they're always multi-line (have RETURNS, LANGUAGE, AS, etc.)
 		upperLine := strings.ToUpper(trimmed)
+		if (strings.HasPrefix(upperLine, "CREATE ") && strings.Contains(upperLine, "FUNCTION")) ||
+			(strings.HasPrefix(upperLine, "ALTER ") && strings.Contains(upperLine, "FUNCTION")) {
+			result = append(result, line)
+			continue
+		}
+
+		// Check if this looks like a complete statement that needs a semicolon
 		needsSemicolon := strings.HasPrefix(upperLine, "CREATE ") ||
 			strings.HasPrefix(upperLine, "ALTER ") ||
 			strings.HasPrefix(upperLine, "DROP ") ||
@@ -124,24 +138,45 @@ func FixMalformedFunctions(sql string) string {
 			continue
 		}
 
-		// Detect orphaned function bodies (bodies without CREATE FUNCTION)
-		// These start with AS $$ or LANGUAGE clauses not preceded by CREATE FUNCTION
+		// CONSERVATIVE orphaned function body detection
+		// Only skip bodies that are truly orphaned (appear after section comments with no CREATE FUNCTION)
+		// This is now VERY conservative to avoid corrupting valid multi-line function definitions
 		if !inOrphanedBody && (strings.HasPrefix(upperLine, "AS $$") || strings.HasPrefix(upperLine, "LANGUAGE ")) {
-			// Check if previous non-empty line was CREATE FUNCTION
+			// Look back to find either:
+			// 1. CREATE FUNCTION (valid function) - keep the line
+			// 2. Section header like "=== FUNCTIONS ===" (orphaned) - skip the line
 			foundCreateFunction := false
-			for j := i - 1; j >= 0; j-- {
+			foundSectionHeader := false
+
+			// Check up to 100 lines back to handle functions with many parameters
+			for j := i - 1; j >= 0 && j >= i-100; j-- {
 				prevTrimmed := strings.TrimSpace(lines[j])
 				if prevTrimmed == "" || strings.HasPrefix(prevTrimmed, "--") {
+					// Check if this is a section header comment
+					if strings.Contains(prevTrimmed, "===") {
+						foundSectionHeader = true
+						break
+					}
 					continue
 				}
+
+				// Found a CREATE FUNCTION - this is valid
 				if strings.Contains(strings.ToUpper(prevTrimmed), "CREATE") && strings.Contains(strings.ToUpper(prevTrimmed), "FUNCTION") {
 					foundCreateFunction = true
+					break
 				}
-				break
+
+				// If we hit another statement keyword, stop looking
+				if strings.HasPrefix(strings.ToUpper(prevTrimmed), "CREATE ") ||
+					strings.HasPrefix(strings.ToUpper(prevTrimmed), "ALTER ") ||
+					strings.HasPrefix(strings.ToUpper(prevTrimmed), "DROP ") {
+					break
+				}
 			}
 
-			if !foundCreateFunction {
-				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Skipping orphaned function body at line %d", i+1)
+			// Only skip if we found a section header AND no CREATE FUNCTION
+			if foundSectionHeader && !foundCreateFunction {
+				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Skipping truly orphaned function body at line %d (after section header)", i+1)
 				inOrphanedBody = true
 				continue
 			}
@@ -168,7 +203,20 @@ func FixMalformedFunctions(sql string) string {
 			}
 		}
 
-		// Fix: Multiple volatility markers in same line
+		// Fix: Volatility marker after $$ (e.g., "$$;STABLE;" or "$$ STABLE;" or "$$;STABLE; CREATE")
+		// This happens when function consolidation adds conflicting markers
+		if strings.Contains(line, "$$;STABLE") || strings.Contains(line, "$$;VOLATILE") ||
+		    strings.Contains(line, "$$;IMMUTABLE") || strings.Contains(line, "$$ STABLE") ||
+		    strings.Contains(line, "$$ VOLATILE") || strings.Contains(line, "$$ IMMUTABLE") {
+			// Remove the orphaned volatility marker after $$
+			// Pattern handles: $$;STABLE; or $$;STABLE; CREATE or $$ STABLE;
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found orphaned volatility marker: %s", line[:min(80, len(line))])
+			fixedLine := regexp.MustCompile(`(?i)\$\$;?\s*(STABLE|VOLATILE|IMMUTABLE);?\s*`).ReplaceAllString(line, "$$;\n")
+			result = append(result, fixedLine)
+			fixedCount++
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Removed orphaned volatility marker after function body")
+			continue
+		}		// Fix: Multiple volatility markers in same line
 		if strings.Contains(upperLine, "STABLE") && strings.Contains(upperLine, "IMMUTABLE") {
 			// Keep IMMUTABLE, remove STABLE (more restrictive)
 			fixedLine := regexp.MustCompile(`(?i)\bSTABLE\b`).ReplaceAllString(line, "")
@@ -189,7 +237,50 @@ func FixMalformedFunctions(sql string) string {
 	return strings.Join(result, "\n")
 }
 
-// RemoveOrphanedAlterStatements removes ALTER statements for objects that don't exist.
+// FixMissingLanguageClauses adds LANGUAGE plpgsql to functions that are missing it.
+// This is critical for PostgreSQL - functions without explicit LANGUAGE will fail.
+func FixMissingLanguageClauses(sql string) string {
+	// First, split any concatenated functions that ended up on the same line
+	// Pattern: $$; followed by volatility marker, then CREATE on same line
+	// Example: END;\n$$;STABLE; CREATE OR REPLACE FUNCTION...
+	// Handles both "$$; STABLE; CREATE" (with space) and "$$;STABLE;CREATE" (no space)
+	pattern := regexp.MustCompile(`(?i)(\$\$;)\s*(STABLE|VOLATILE|IMMUTABLE);?\s*(CREATE\s+)`)
+	matches := pattern.FindAllString(sql, -1)
+	if len(matches) > 0 {
+		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found %d concatenated function patterns to split", len(matches))
+	}
+	sql = pattern.ReplaceAllString(sql, "$1\n\n$3")
+
+	// Pattern: CREATE FUNCTION ... RETURNS ... AS $$
+	// Need to insert LANGUAGE plpgsql before AS $$
+	// This handles both single-line and multiline function definitions
+
+	funcPattern := regexp.MustCompile(`(?is)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+[^;]+?RETURNS\s+[^;]+?)\s+(AS\s+\$\$)`)
+
+	fixed := funcPattern.ReplaceAllStringFunc(sql, func(match string) string {
+		// Check if LANGUAGE already exists in the match
+		if strings.Contains(strings.ToUpper(match), "LANGUAGE") {
+			return match
+		}
+
+		// Find the AS $$ part and insert LANGUAGE before it
+		asIdx := strings.LastIndex(strings.ToUpper(match), "AS")
+		if asIdx < 0 {
+			return match
+		}
+
+		before := match[:asIdx]
+		after := match[asIdx:]
+
+		return before + " LANGUAGE plpgsql " + after
+	})
+
+	if fixed != sql {
+		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Added missing LANGUAGE clauses to functions")
+	}
+
+	return fixed
+}// RemoveOrphanedAlterStatements removes ALTER statements for objects that don't exist.
 // This happens when an object is created and altered in different migrations,
 // but the consolidation removes the CREATE.
 func RemoveOrphanedAlterStatements(sql string) string {
@@ -200,27 +291,39 @@ func RemoveOrphanedAlterStatements(sql string) string {
 	for _, line := range lines {
 		upperLine := strings.ToUpper(strings.TrimSpace(line))
 
-		// Match: CREATE TABLE schema.name or CREATE TABLE name
+		// Match: CREATE TABLE [IF NOT EXISTS] schema.name or CREATE TABLE [IF NOT EXISTS] name
 		if strings.HasPrefix(upperLine, "CREATE TABLE") {
 			parts := strings.Fields(line)
-			if len(parts) >= 3 {
-				objectName := strings.Trim(parts[2], `";,()`)
+			// Handle both "CREATE TABLE name" and "CREATE TABLE IF NOT EXISTS name"
+			nameIndex := 2
+			if len(parts) > 4 && strings.ToUpper(parts[2]) == "IF" && strings.ToUpper(parts[3]) == "NOT" && strings.ToUpper(parts[4]) == "EXISTS" {
+				nameIndex = 5
+			}
+			if len(parts) > nameIndex {
+				objectName := strings.Trim(parts[nameIndex], `";,()`)
 				createdObjects[objectName] = true
 			}
 		}
 
-		// Match: CREATE INDEX, CREATE FUNCTION, etc.
+		// Match: CREATE [UNIQUE] INDEX [IF NOT EXISTS], CREATE FUNCTION, etc.
 		if strings.HasPrefix(upperLine, "CREATE INDEX") ||
 			strings.HasPrefix(upperLine, "CREATE UNIQUE INDEX") ||
 			strings.HasPrefix(upperLine, "CREATE FUNCTION") ||
 			strings.HasPrefix(upperLine, "CREATE TYPE") {
 			parts := strings.Fields(line)
 			for i, part := range parts {
-				if strings.ToUpper(part) == "INDEX" ||
-					strings.ToUpper(part) == "FUNCTION" ||
-					strings.ToUpper(part) == "TYPE" {
-					if i+1 < len(parts) {
-						objectName := strings.Trim(parts[i+1], `";,()`)
+				partUpper := strings.ToUpper(part)
+				if partUpper == "INDEX" || partUpper == "FUNCTION" || partUpper == "TYPE" {
+					// Skip "IF NOT EXISTS" if present
+					nameIndex := i + 1
+					if nameIndex+3 < len(parts) &&
+						strings.ToUpper(parts[nameIndex]) == "IF" &&
+						strings.ToUpper(parts[nameIndex+1]) == "NOT" &&
+						strings.ToUpper(parts[nameIndex+2]) == "EXISTS" {
+						nameIndex += 3
+					}
+					if nameIndex < len(parts) {
+						objectName := strings.Trim(parts[nameIndex], `";,()`)
 						createdObjects[objectName] = true
 					}
 					break
@@ -261,6 +364,13 @@ func RemoveOrphanedAlterStatements(sql string) string {
 
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b

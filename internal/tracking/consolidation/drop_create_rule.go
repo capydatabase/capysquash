@@ -97,32 +97,41 @@ func (r *DropCreateCycleRule) Apply(lifecycle *tracking.ObjectLifecycle, engine 
 			consolidatedSQL = regexp.MustCompile(`(?i)CREATE\s+VIEW`).ReplaceAllString(lastCreate, "CREATE OR REPLACE VIEW")
 			optimizations = append(optimizations, fmt.Sprintf("Merged %d CREATE VIEW statements into CREATE OR REPLACE VIEW", len(allCreateStmts)))
 		} else {
-			return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found for VIEW", map[string]interface{}{"object": lifecycle.Name})
-		}
-
-		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("DropCreateCycleRule: Converted VIEW %s to CREATE OR REPLACE pattern", lifecycle.Name)
-	} else if len(allCreateStmts) > 1 && lifecycle.Type == types.TypeTable {
-		// For TABLES: Merge multiple CREATE statements
-		consolidatedSQL = mergeMultipleCreateStatements(allCreateStmts, lifecycle.Name)
-		optimizations = append(optimizations, fmt.Sprintf("Merged %d CREATE statements for table %s", len(allCreateStmts), lifecycle.Name))
-		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("DropCreateCycleRule: Merged %d CREATE statements for %s", len(allCreateStmts), lifecycle.Name)
-	} else if len(allCreateStmts) == 1 {
-		consolidatedSQL = allCreateStmts[0].SQL
-		optimizations = append(optimizations, "Eliminated DROP operation before CREATE")
-	} else {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found", map[string]interface{}{"object": lifecycle.Name})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found for VIEW", map[string]interface{}{"object": lifecycle.Name})
 	}
 
-	result := &tracking.ConsolidationResult{
+	utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("DropCreateCycleRule: Converted VIEW %s to CREATE OR REPLACE pattern", lifecycle.Name)
+} else if len(allCreateStmts) > 1 && lifecycle.Type == types.TypeTable {
+	// For TABLES: Merge multiple CREATE statements
+	consolidatedSQL = mergeMultipleCreateStatements(allCreateStmts, lifecycle.Name)
+	optimizations = append(optimizations, fmt.Sprintf("Merged %d CREATE statements for table %s", len(allCreateStmts), lifecycle.Name))
+	utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("DropCreateCycleRule: Merged %d CREATE statements for %s", len(allCreateStmts), lifecycle.Name)
+} else if len(allCreateStmts) == 1 {
+	consolidatedSQL = allCreateStmts[0].SQL
+	optimizations = append(optimizations, "Eliminated DROP operation before CREATE")
+} else {
+	return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statements found in lifecycle", map[string]interface{}{"object": lifecycle.Name})
+}
+
+// Track column evolution from multiple CREATEs (e.g., name -> market_name)
+var columnEvolutions map[string]*tracking.ColumnEvolutionInfo
+if len(allCreateStmts) > 1 && lifecycle.Type == types.TypeTable {
+	utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("Extracting column evolutions from %d CREATE statements for %s", len(allCreateStmts), lifecycle.Name)
+	columnEvolutions = extractColumnEvolutionsFromMultipleCreates(lifecycle.Name, allCreateStmts)
+	utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("Found %d column evolutions for %s", len(columnEvolutions), lifecycle.Name)
+}
+
+result := &tracking.ConsolidationResult{
 		OriginalStatements: originalStmts,
 		ConsolidatedSQL:    consolidatedSQL,
 		Optimizations:      optimizations,
-		RiskLevel:          tracking.RiskLevelMedium, // Medium risk due to data implications
+		RiskLevel:          tracking.RiskLevelLow,
 		EstimatedSavings: tracking.SquashSavings{
-			StatementsReduced: len(originalStmts),
-			FilesAffected:     len(originalStmts) + len(allCreateStmts),
-			LinesReduced:      len(originalStmts) * 3,
+			StatementsReduced: len(originalStmts) - 1,
+			FilesAffected:     len(originalStmts),
+			LinesReduced:      (len(originalStmts) - 1) * 5,
 		},
+		ColumnEvolutions: columnEvolutions,
 	}
 
 	return result, nil
@@ -144,6 +153,16 @@ func mergeMultipleCreateStatements(createStmts []types.Statement, tableName stri
 	// Use the LAST CREATE as the base (for DDL cycles: CREATE→DROP→CREATE, we want the final version)
 	baseSQL := createStmts[len(createStmts)-1].SQL
 
+	// BUG-NEW-1 FIX: Extract column evolutions FIRST to identify renamed columns
+	columnEvolutions := extractColumnEvolutionsFromMultipleCreates(tableName, createStmts)
+	supersededColumns := make(map[string]bool) // Track columns that were renamed (old names)
+	for _, evolution := range columnEvolutions {
+		// Mark original name as superseded (should not appear in final CREATE)
+		supersededColumns[strings.ToLower(evolution.OriginalName)] = true
+		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Marking column '%s' as superseded (renamed to '%s')",
+			evolution.OriginalName, evolution.FinalName)
+	}
+
 	// Extract all unique columns from all CREATE statements
 	allColumns := make(map[string]string) // column name -> full definition
 	columnOrder := make([]string, 0)       // maintain order
@@ -152,23 +171,151 @@ func mergeMultipleCreateStatements(createStmts []types.Statement, tableName stri
 		columns := extractColumnsFromCreate(stmt.SQL)
 		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Extracted %d columns from CREATE statement %d", len(columns), i)
 
+		// DEBUG: Log first 5 column names from this statement
+		colNames := make([]string, 0, len(columns))
+		for colName := range columns {
+			colNames = append(colNames, colName)
+			if len(colNames) >= 5 {
+				break
+			}
+		}
+		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("    Sample columns: %v", colNames)
+
 		for colName, colDef := range columns {
+			// BUG-NEW-1 FIX: Skip superseded columns (old column names that were renamed)
+			if supersededColumns[strings.ToLower(colName)] {
+				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Skipping superseded column '%s' (was renamed)", colName)
+				continue
+			}
+
 			// Always update column definition (later statements override earlier ones)
 			// This ensures the LAST CREATE statement's schema is preserved in DDL cycles
 			if _, exists := allColumns[colName]; !exists {
 				columnOrder = append(columnOrder, colName)
+				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Debug("    Adding new column '%s'", colName)
+			} else {
+				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Debug("    Updating existing column '%s'", colName)
 			}
 			allColumns[colName] = colDef
 		}
 	}
 
-	utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Total unique columns across all CREATEs: %d", len(allColumns))
+	utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Total unique columns across all CREATEs (after removing superseded): %d", len(allColumns))
+
+	// DEBUG: Check for specific missing columns in profiles table
+	if strings.ToLower(tableName) == "profiles" {
+		missingCols := []string{"property_management_scope", "managed_properties_count", "portfolio_size_limit", "auth_provider"}
+		for _, col := range missingCols {
+			if _, exists := allColumns[col]; exists {
+				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  ✓ Column '%s' IS present in allColumns", col)
+			} else {
+				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Warn("  ✗ Column '%s' IS MISSING from allColumns!", col)
+			}
+		}
+	}
 
 	// Extract table-level constraints from the LAST CREATE statement (this has the final schema)
 	tableConstraints := extractTableConstraintsFromCreate(baseSQL)
 
 	// Rebuild CREATE statement with all columns and constraints
 	return reconstructCreateWithColumns(baseSQL, allColumns, columnOrder, tableConstraints, tableName)
+}
+
+// extractColumnEvolutionsFromMultipleCreates detects column renames from multiple CREATE statements
+func extractColumnEvolutionsFromMultipleCreates(tableName string, createStmts []types.Statement) map[string]*tracking.ColumnEvolutionInfo {
+	evolutions := make(map[string]*tracking.ColumnEvolutionInfo)
+
+	if len(createStmts) <= 1 {
+		return evolutions // No evolution with single CREATE
+	}
+
+	// Helper to get column names as slice
+	getColumnNames := func(cols map[string]string) []string {
+		keys := make([]string, 0, len(cols))
+		for k := range cols {
+			keys = append(keys, k)
+		}
+		return keys
+	}
+
+	// Extract columns from each CREATE statement
+	columnsByStmt := make([]map[string]string, len(createStmts))
+	for i, stmt := range createStmts {
+		columnsByStmt[i] = extractColumnsFromCreate(stmt.SQL)
+	}
+
+	// Find columns that appear in earlier CREATEs but not in the final one
+	// These are candidates for renames (e.g., 'name' -> 'market_name')
+	finalColumns := columnsByStmt[len(columnsByStmt)-1]
+	utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info("Final CREATE has columns: %v", getColumnNames(finalColumns))
+
+	// ALSO check if columns from middle CREATEs evolved FROM earlier versions
+	// Example: CREATE 0 has 'name', CREATE 1 has 'market_name', CREATE 2 has 'name' again
+	// We need to detect name -> market_name -> name pattern and rewrite data ops from CREATE 0/1
+	allColumns := make(map[string]bool) // Track all column names across all CREATEs
+	for i, cols := range columnsByStmt {
+		utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info("CREATE %d has columns: %v", i, getColumnNames(cols))
+		for colName := range cols {
+			allColumns[colName] = true
+		}
+	}
+
+	// For each CREATE, find columns that don't exist in the final schema
+	for i := 0; i < len(columnsByStmt); i++ {
+		for oldColName := range columnsByStmt[i] {
+			if _, existsInFinal := finalColumns[oldColName]; !existsInFinal {
+				utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info("Column %s disappeared from CREATE %d, checking for renames...", oldColName, i)
+				// This column disappeared - check if a similar column exists in the FINAL or ANY other CREATE
+				// Check final columns first
+				for newColName := range finalColumns {
+					// Check if new column name contains old column name (e.g., market_name contains name)
+					utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Debug("  Checking if '%s' (final) matches pattern for '%s'", newColName, oldColName)
+					if strings.HasSuffix(newColName, "_"+oldColName) ||
+					   (strings.Contains(newColName, oldColName) && len(newColName) > len(oldColName)) {
+						key := fmt.Sprintf("%s.%s", strings.ToLower(tableName), strings.ToLower(oldColName))
+						if _, exists := evolutions[key]; !exists { // Don't override existing mappings
+							evolutions[key] = &tracking.ColumnEvolutionInfo{
+								TableName:    strings.ToLower(tableName),
+								OriginalName: oldColName,
+								FinalName:    newColName,
+								RenameChain:  []string{oldColName, newColName},
+							}
+							utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info(
+								"✓ Detected column evolution in %s: %s -> %s (key: %s)",
+								tableName, oldColName, newColName, key)
+						}
+						break
+					}
+				}
+
+				// IMPORTANT: Also check if this column name CONTAINS another column (reverse direction)
+				// E.g., 'market_name' from CREATE 1 should map to 'name' in final CREATE
+				for finalColName := range finalColumns {
+					utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Debug("  Checking reverse: if '%s' contains '%s'", oldColName, finalColName)
+					if strings.HasSuffix(oldColName, "_"+finalColName) ||
+					   (strings.Contains(oldColName, finalColName) && len(oldColName) > len(finalColName)) {
+						// The disappeared column is MORE SPECIFIC than final column
+						// E.g., 'market_name' (disappeared) -> 'name' (final)
+						key := fmt.Sprintf("%s.%s", strings.ToLower(tableName), strings.ToLower(oldColName))
+						if _, exists := evolutions[key]; !exists {
+							evolutions[key] = &tracking.ColumnEvolutionInfo{
+								TableName:    strings.ToLower(tableName),
+								OriginalName: oldColName,
+								FinalName:    finalColName,
+								RenameChain:  []string{oldColName, finalColName},
+							}
+							utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info(
+								"✓ Detected reverse column evolution in %s: %s -> %s (key: %s)",
+								tableName, oldColName, finalColName, key)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return evolutions
 }
 
 // extractTableConstraintsFromCreate extracts table-level constraints (not column definitions)
@@ -228,7 +375,27 @@ func extractColumnsFromCreate(createSQL string) map[string]string {
 	parts := splitColumnDefinitions(columnList)
 
 	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
+		// BUG-NEW-1 FIX PART 2: Strip inline SQL comments (-- ...) from each column definition
+		// This prevents cases where "price_monthly INTEGER, -- in cents\nprice_annual INTEGER"
+		// gets treated as a comment line and skipped entirely
+		cleanedPart := part
+		if idx := strings.Index(part, "--"); idx != -1 {
+			// Found inline comment - split by newline and reassemble without the comment line
+			lines := strings.Split(part, "\n")
+			var cleanedLines []string
+			for _, line := range lines {
+				if commentIdx := strings.Index(line, "--"); commentIdx != -1 {
+					// Remove everything from -- to end of this line
+					line = line[:commentIdx]
+				}
+				if strings.TrimSpace(line) != "" {
+					cleanedLines = append(cleanedLines, line)
+				}
+			}
+			cleanedPart = strings.Join(cleanedLines, "\n")
+		}
+
+		trimmed := strings.TrimSpace(cleanedPart)
 		if trimmed == "" {
 			continue
 		}

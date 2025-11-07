@@ -19,13 +19,13 @@ import (
 
 // SchemaNormalizer handles normalization of pg_dump output for reliable comparison
 type SchemaNormalizer struct {
-	StripComments      bool
-	SortBlocks         bool
-	CanonicalizeFunc   bool
-	RemoveOIDs         bool
+	StripComments       bool
+	SortBlocks          bool
+	CanonicalizeFunc    bool
+	RemoveOIDs          bool
 	NormalizeWhitespace bool
-	RemoveOwnership    bool
-	RemovePrivileges   bool
+	RemoveOwnership     bool
+	RemovePrivileges    bool
 }
 
 // DefaultSchemaNormalizer returns a normalizer with default settings
@@ -297,24 +297,24 @@ func (sn *SchemaNormalizer) sortBlocks(schema string) string {
 
 	// Group blocks by type
 	typeOrder := map[string]int{
-		"SET":                  0,
-		"CREATE EXTENSION":     1,
-		"CREATE SCHEMA":        2,
-		"CREATE TYPE":          3,
-		"CREATE DOMAIN":        4,
-		"CREATE SEQUENCE":      5,
-		"CREATE TABLE":         6,
-		"ALTER TABLE":          7,
-		"CREATE INDEX":         8,
-		"CREATE UNIQUE INDEX":  8,
-		"CREATE FUNCTION":      9,
-		"CREATE PROCEDURE":     9,
-		"CREATE TRIGGER":       10,
-		"CREATE VIEW":          11,
-		"CREATE MATERIALIZED":  12,
-		"CREATE POLICY":        13,
-		"CREATE RULE":          14,
-		"COMMENT ON":           15,
+		"SET":                 0,
+		"CREATE EXTENSION":    1,
+		"CREATE SCHEMA":       2,
+		"CREATE TYPE":         3,
+		"CREATE DOMAIN":       4,
+		"CREATE SEQUENCE":     5,
+		"CREATE TABLE":        6,
+		"ALTER TABLE":         7,
+		"CREATE INDEX":        8,
+		"CREATE UNIQUE INDEX": 8,
+		"CREATE FUNCTION":     9,
+		"CREATE PROCEDURE":    9,
+		"CREATE TRIGGER":      10,
+		"CREATE VIEW":         11,
+		"CREATE MATERIALIZED": 12,
+		"CREATE POLICY":       13,
+		"CREATE RULE":         14,
+		"COMMENT ON":          15,
 	}
 
 	// Sort blocks by type, then by name
@@ -434,10 +434,20 @@ func (sn *SchemaNormalizer) extractObjectName(block string) string {
 
 // extractObjects extracts categorized object lists from the normalized schema
 func (ns *NormalizedSchema) extractObjects() {
-	blocks := strings.Split(ns.Normalized, ";")
+	cleanNormalized := removeCommentLines(ns.Normalized)
+	blocks := strings.Split(cleanNormalized, ";")
 
 	for _, block := range blocks {
 		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+
+		if block == "" {
+			continue
+		}
+
+		block = stripLeadingComments(block)
 		if block == "" {
 			continue
 		}
@@ -458,6 +468,33 @@ func (ns *NormalizedSchema) extractObjects() {
 			ns.Views = append(ns.Views, block)
 		}
 	}
+}
+
+// stripLeadingComments removes leading SQL comments and blank lines from a block.
+func stripLeadingComments(block string) string {
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		return strings.Join(lines[i:], "\n")
+	}
+	return ""
+}
+
+// removeCommentLines strips full-line comments to avoid semicolon splitting artifacts.
+func removeCommentLines(sql string) string {
+	lines := strings.Split(sql, "\n")
+	clean := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		clean = append(clean, line)
+	}
+	return strings.Join(clean, "\n")
 }
 
 // CompareNormalizedSchemas compares two normalized schemas and returns detailed differences
@@ -492,61 +529,86 @@ type SchemaDiff struct {
 }
 
 // compareObjects compares two lists of objects
+// BUG #1 FIX: Compare by object NAME first, not exact string match
+// This prevents reporting objects as both "only in X" AND "differs"
 func (sd *SchemaDiff) compareObjects(objectType string, list1, list2 []string) {
-	set1 := make(map[string]bool)
+	// Build maps of name -> definition for both schemas
+	nameMap1 := make(map[string]string) // name -> full definition
+	nameMap2 := make(map[string]string)
+
 	for _, obj := range list1 {
-		set1[obj] = true
+		name := extractShortName(obj)
+		nameMap1[name] = obj
 	}
 
-	set2 := make(map[string]bool)
 	for _, obj := range list2 {
-		set2[obj] = true
+		name := extractShortName(obj)
+		nameMap2[name] = obj
 	}
 
-	// Check for objects only in schema1
-	for obj := range set1 {
-		if !set2[obj] {
-			sd.Differences = append(sd.Differences, fmt.Sprintf("%s only in original: %s", objectType, extractShortName(obj)))
-		}
-	}
+	// Check for objects only in schema1 (by name)
+	for name, obj1 := range nameMap1 {
+		obj2, existsInSchema2 := nameMap2[name]
 
-	// Check for objects only in schema2
-	for obj := range set2 {
-		if !set1[obj] {
-			sd.Differences = append(sd.Differences, fmt.Sprintf("%s only in squashed: %s", objectType, extractShortName(obj)))
-		}
-	}
+		if !existsInSchema2 {
+			// Object doesn't exist in schema2 at all
+			sd.Differences = append(sd.Differences, fmt.Sprintf("%s only in original: %s", objectType, name))
+		} else if obj1 != obj2 {
+			// Object exists in both but definitions differ
+			// Normalize for comparison (ignore whitespace/formatting differences)
+			normalized1 := normalizeForComparison(obj1)
+			normalized2 := normalizeForComparison(obj2)
 
-	// Check for objects that differ
-	for obj1 := range set1 {
-		if set2[obj1] {
-			continue // Already checked - they're identical
-		}
-
-		// Look for objects with same name but different definition
-		name1 := extractShortName(obj1)
-		for obj2 := range set2 {
-			name2 := extractShortName(obj2)
-			if name1 == name2 && obj1 != obj2 {
-				sd.Differences = append(sd.Differences, fmt.Sprintf("%s differs: %s", objectType, name1))
-				break
+			if normalized1 != normalized2 {
+				sd.Differences = append(sd.Differences, fmt.Sprintf("%s differs: %s", objectType, name))
 			}
+			// If normalized versions match, they're functionally identical - no diff reported
 		}
+		// If obj1 == obj2 exactly, they're identical - no action needed
 	}
+
+	// Check for objects only in schema2 (by name)
+	for name := range nameMap2 {
+		if _, existsInSchema1 := nameMap1[name]; !existsInSchema1 {
+			// Object doesn't exist in schema1 at all
+			sd.Differences = append(sd.Differences, fmt.Sprintf("%s only in squashed: %s", objectType, name))
+		}
+		// If it exists in schema1, we already checked it in the previous loop
+	}
+}
+
+// normalizeForComparison normalizes SQL for comparison purposes
+// Removes formatting differences that don't affect functionality
+func normalizeForComparison(sql string) string {
+	// Convert to lowercase for case-insensitive comparison
+	normalized := strings.ToLower(sql)
+
+	// Remove excessive whitespace
+	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
+
+	// Remove SQL comments (-- style and /* */ style)
+	normalized = regexp.MustCompile(`--[^\n]*`).ReplaceAllString(normalized, "")
+	normalized = regexp.MustCompile(`/\*.*?\*/`).ReplaceAllString(normalized, "")
+
+	// Trim surrounding whitespace
+	normalized = strings.TrimSpace(normalized)
+
+	return normalized
 }
 
 // extractShortName extracts just the object name from a full definition
 func extractShortName(definition string) string {
-	// Extract name from CREATE statements
+	// Extract name from CREATE statements (case-insensitive). Handle dotted identifiers where each
+	// segment may be individually quoted (e.g. "public"."UserProfile").
 	patterns := []string{
-		`CREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+)?(?:INDEX|TABLE|VIEW|FUNCTION|PROCEDURE|TRIGGER|TYPE|SCHEMA|EXTENSION|SEQUENCE|DOMAIN|POLICY|RULE)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:CONCURRENTLY\s+)?["']?([a-zA-Z0-9_\.]+)["']?`,
+		`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+)?(?:INDEX|TABLE|VIEW|FUNCTION|PROCEDURE|TRIGGER|TYPE|SCHEMA|EXTENSION|SEQUENCE|DOMAIN|POLICY|RULE)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:CONCURRENTLY\s+)?((?:"[^"]+"|[a-zA-Z0-9_]+)(?:\.(?:"[^"]+"|[a-zA-Z0-9_]+))*)`,
 	}
 
 	for _, pattern := range patterns {
 		re := regexp.MustCompile(pattern)
 		matches := re.FindStringSubmatch(definition)
 		if len(matches) > 1 {
-			return matches[1]
+			return cleanIdentifier(matches[1])
 		}
 	}
 
@@ -555,6 +617,19 @@ func extractShortName(definition string) string {
 		return definition[:50] + "..."
 	}
 	return definition
+}
+
+// cleanIdentifier removes redundant quoting around identifier segments while preserving dotted qualifiers.
+func cleanIdentifier(identifier string) string {
+	parts := strings.Split(identifier, ".")
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if len(part) >= 2 && part[0] == '"' && part[len(part)-1] == '"' {
+			part = part[1 : len(part)-1]
+		}
+		parts[i] = part
+	}
+	return strings.Join(parts, ".")
 }
 
 // FormatDiff formats the schema diff for display

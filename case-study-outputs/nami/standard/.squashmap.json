@@ -1,0 +1,39 @@
+{
+  "version": "0.9.5",
+  "timestamp": "2025-11-07T10:45:20.181746+02:00",
+  "safety_mode": "standard",
+  "pg_version": "15",
+  "extensions": [
+    "pg_trgm",
+    "uuid-ossp"
+  ],
+  "content_hash": "sha256:ac3b887c7c227654f767ad95f0a00fd2aaed04e14035b6a92f8a8058d8cd58dd",
+  "inputs": [
+    "migration_6.sql",
+    "migration_7.sql",
+    "migration_0.sql",
+    "migration_1.sql",
+    "migration_2.sql",
+    "migration_3.sql",
+    "migration_4.sql",
+    "migration_5.sql"
+  ],
+  "outputs": [
+    "000_baseline.sql",
+    "010_data.sql"
+  ],
+  "mappings": [],
+  "statistics": {
+    "original_statements": 0,
+    "consolidated_statements": 0,
+    "reduction_rate": 0,
+    "files_processed": 0,
+    "files_generated": 0,
+    "total_lines_original": 0,
+    "total_lines_squashed": 0
+  },
+  "warnings": [
+    "Required extensions: [pg_trgm uuid-ossp]",
+    "Transformation: Updated function names to modern equivalents"
+  ]
+}

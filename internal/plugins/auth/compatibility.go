@@ -78,7 +78,8 @@ END
 $$;
 
 -- Mock Clerk auth.jwt() function
-CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   -- Return a mock Clerk JWT payload for validation purposes
   RETURN jsonb_build_object(
@@ -99,26 +100,28 @@ END;
 $$;
 
 -- Mock current_user_id helper (common in Clerk setups)
-CREATE OR REPLACE FUNCTION current_user_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION current_user_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   RETURN (auth.jwt() ->> 'sub')::text;
 END;
 $$;
 
 -- Mock organization helpers
-CREATE OR REPLACE FUNCTION current_organization_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+-- NOTE: No volatility markers - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION current_organization_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   RETURN (auth.jwt()->'o'->>'id')::text;
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION current_organization_role() RETURNS text LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+CREATE OR REPLACE FUNCTION current_organization_role() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   RETURN (auth.jwt()->'o'->>'role')::text;
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION current_organization_name() RETURNS text LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+CREATE OR REPLACE FUNCTION current_organization_name() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   RETURN (auth.jwt()->'o'->>'name')::text;
 END;
@@ -197,14 +200,16 @@ END
 $$;
 
 -- Mock Supabase auth.uid() function
-CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   RETURN 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid;
 END;
 $$;
 
 -- Mock Supabase auth.jwt() function
-CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   RETURN jsonb_build_object(
     'sub', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
@@ -213,6 +218,22 @@ BEGIN
     'iat', extract(epoch from now()),
     'exp', extract(epoch from now()) + 3600
   );
+END;
+$$;
+
+-- Mock Supabase auth.email() function (commonly used in RLS policies)
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION auth.email() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN (auth.jwt() ->> 'email')::text;
+END;
+$$;
+
+-- Mock Supabase auth.role() function (commonly used in RLS policies)
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN (auth.jwt() ->> 'role')::text;
 END;
 $$;
 
@@ -250,7 +271,17 @@ CREATE TABLE IF NOT EXISTS storage.objects (
     last_accessed_at TIMESTAMPTZ,
     metadata JSONB,
     UNIQUE(bucket_id, name)
-);`
+);
+
+-- Mock Supabase storage.foldername() function (extracts folder path components)
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION storage.foldername(name TEXT) RETURNS TEXT[] LANGUAGE plpgsql AS $$
+BEGIN
+  -- Split path by '/' and return array of folder components
+  -- Example: 'user_id/avatars/image.png' returns ['user_id', 'avatars', 'image.png']
+  RETURN string_to_array(name, '/');
+END;
+$$;`
 }
 
 // GenerateAuth0Compatibility creates Auth0 authentication compatibility layer
@@ -259,7 +290,8 @@ func (g *CompatibilityGenerator) GenerateAuth0Compatibility() string {
 CREATE SCHEMA IF NOT EXISTS auth;
 
 -- Mock Auth0 JWT function
-CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   RETURN jsonb_build_object(
     'sub', 'auth0|mock_user_id',
@@ -325,7 +357,8 @@ func (g *CompatibilityGenerator) GenerateFirebaseCompatibility() string {
 CREATE SCHEMA IF NOT EXISTS auth;
 
 -- Mock Firebase JWT function
-CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER STABLE AS $$
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   RETURN jsonb_build_object(
     'sub', 'mock_firebase_uid',

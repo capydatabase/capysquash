@@ -109,8 +109,18 @@ func (r *ConditionalSchemaRule) analyzeFinalConditionalState(lifecycle *tracking
 			if strings.Contains(sql, "CREATE OR REPLACE") {
 				state.UseReplace = true
 			}
+
+			// Capture dependencies from CREATE statements
+			if len(event.Statement.Dependencies) > 0 {
+				state.Dependencies = event.Statement.Dependencies
+			}
 		case types.OpDrop:
 			state.ShouldExist = false
+
+			// Capture dependencies from DROP statements (needed for DROP POLICY ON tablename)
+			if len(event.Statement.Dependencies) > 0 {
+				state.Dependencies = event.Statement.Dependencies
+			}
 		case types.OpAlter:
 			// ALTER operations indicate the object should exist
 			state.ShouldExist = true
@@ -130,6 +140,19 @@ func (r *ConditionalSchemaRule) generateConditionalSQL(lifecycle *tracking.Objec
 			// This prevents "DROP UNKNOWN IF EXISTS" which is invalid PostgreSQL syntax
 			return fmt.Sprintf("-- WARNING: Cannot generate DROP statement for object '%s' with unknown type\n-- Object lifecycle final state: should not exist\n-- Consider manual cleanup if this object exists in your database",
 				lifecycle.Name)
+		}
+
+		// DROP POLICY requires ON tablename clause
+		if lifecycle.Type == types.TypePolicy {
+			// Extract table name from dependencies (parser extracts it from DROP POLICY ... ON tablename)
+			tableName := ""
+			if len(state.Dependencies) > 0 {
+				tableName = state.Dependencies[0]
+			}
+			if tableName != "" {
+				return fmt.Sprintf("DROP %s IF EXISTS %s ON %s;",
+					strings.ToUpper(string(lifecycle.Type)), lifecycle.Name, tableName)
+			}
 		}
 
 		return fmt.Sprintf("DROP %s IF EXISTS %s;",

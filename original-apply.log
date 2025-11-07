@@ -1,0 +1,276 @@
+Processing: 01_migration.sql
+ERROR:  extension "postgis" is not available
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+Processing: 02_migration.sql
+ERROR:  extension "postgis" is not available
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+Processing: 03_database.sql
+CREATE TABLE
+CREATE TABLE
+INSERT 0 0
+CREATE TABLE
+CREATE TABLE
+Processing: 04_schema_and_seed.sql
+ERROR:  extension "postgis" is not available
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+Processing: 05_core_infrastructure.sql
+ERROR:  relation "storage.buckets" does not exist
+LINE 1: INSERT INTO storage.buckets (
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+Processing: 06_functions_defaults.sql
+INSERT 0 27
+INSERT 0 3
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 07_buddy_system.sql
+CREATE TABLE
+CREATE TABLE
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 08_ai_chat_system.sql
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+ERROR:  relation "storage.buckets" does not exist
+Processing: 09_property_notifications.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 10_final_cleanup_and_subscriptions.sql
+INSERT 0 0
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "anon" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 11_comprehensive_rls.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 12_fix_lifestyle_compatibility_schema.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "anon" does not exist
+ERROR:  role "service_role" does not exist
+Processing: 13_add_computed_full_name_column.sql
+Processing: 14_fix_user_type_validation_constraint.sql
+Processing: 15_add_slug_to_roommate_listings.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 17_fix_log_security_event.sql
+Processing: 18_add_market_analytics_functions.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 19_add_missing_rpc_functions.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 20_ai_platform_core.sql
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+Processing: 21_enterprise_features.sql
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+Processing: 22_missing_columns_and_tables.sql
+CREATE TABLE
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 23_missing_rpc_functions.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 24_ai_advanced_settings.sql
+INSERT 0 17
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 25_unified_compatibility_system.sql
+CREATE TABLE
+ERROR:  role "authenticated" does not exist
+ERROR:  role "service_role" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "service_role" does not exist
+Processing: 26_add_is_active_to_ai_usage_limits.sql
+Processing: 27_reference_data_tables.sql
+CREATE TABLE
+INSERT 0 19
+CREATE TABLE
+INSERT 0 10
+CREATE TABLE
+Processing: 28_seed_mbti_questions.sql
+INSERT 0 6
+INSERT 0 18
+INSERT 0 6
+INSERT 0 18
+INSERT 0 6
+Processing: 29_content_and_templates.sql
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+Processing: 30_seed_content_and_templates.sql
+INSERT 0 5
+INSERT 0 7
+INSERT 0 16
+INSERT 0 78
+INSERT 0 10
+Processing: 31_onboarding_and_ui_content.sql
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+Processing: 32_seed_onboarding_ui_content.sql
+INSERT 0 19
+INSERT 0 30
+INSERT 0 26
+Processing: 33_property_options.sql
+CREATE TABLE
+INSERT 0 5
+INSERT 0 6
+INSERT 0 6
+INSERT 0 10
+Processing: 34_community_categories_report_reasons.sql
+CREATE TABLE
+CREATE TABLE
+INSERT 0 17
+INSERT 0 17
+ERROR:  role "authenticated" does not exist
+Processing: 35_extend_property_options_enterprise.sql
+INSERT 0 10
+INSERT 0 7
+Processing: 36_seed_mbti_compatibility.sql
+INSERT 0 136
+Processing: 37_persona_form_options.sql
+INSERT 0 3
+INSERT 0 6
+INSERT 0 4
+INSERT 0 6
+INSERT 0 4
+Processing: 38_maintenance_filter_options.sql
+INSERT 0 7
+INSERT 0 5
+INSERT 0 7
+INSERT 0 5
+INSERT 0 6
+Processing: 39_matching_filter_options.sql
+INSERT 0 4
+INSERT 0 2
+INSERT 0 6
+INSERT 0 3
+INSERT 0 4
+Processing: 40_comprehensive_filter_options.sql
+INSERT 0 7
+INSERT 0 2
+INSERT 0 2
+INSERT 0 5
+INSERT 0 3
+Processing: 41_add_missing_profile_fields.sql
+Processing: 42_fix_compatibility_system.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 43_fix_profiles_missing_columns.sql
+Processing: 44_remove_redundant_profile_image_url.sql
+Processing: 45_implement_subscription_enforcement.sql
+ERROR:  role "authenticated" does not exist
+Processing: 46_subscription_enforcement_rpc.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "service_role" does not exist
+Processing: 47_fix_buddy_up_view.sql
+ERROR:  role "authenticated" does not exist
+Processing: 48_compatibility_batch_calculation.sql
+ERROR:  role "service_role" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "service_role" does not exist
+ERROR:  role "service_role" does not exist
+ERROR:  role "service_role" does not exist
+Processing: 49_add_property_detail_fields.sql
+Processing: 50_unified_messaging_system.sql
+ERROR:  publication "supabase_realtime" does not exist
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+Processing: 51_fairrent_scores.sql
+CREATE TABLE
+Processing: 52_fairrent_v2_3_5_upgrade.sql
+Processing: 53_add_year_built_to_properties.sql
+Processing: 54_comprehensive_mock_data.sql
+INSERT 0 10
+INSERT 0 6
+INSERT 0 10
+INSERT 0 8
+INSERT 0 3
+Processing: 58_mock_data_user_preferences.sql
+INSERT 0 28
+Processing: 59_mock_data_properties_rooms.sql
+ERROR:  insert or update on table "properties" violates foreign key constraint "fk_properties_market_code"
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+Processing: 60_mock_data_roommate_listings.sql
+INSERT 0 10
+Processing: 61_mock_data_user_subscriptions.sql
+INSERT 0 6
+Processing: 62_mock_data_compatibility_scores.sql
+INSERT 0 10
+Processing: 63_fix_reviews_rls_policy.sql
+Processing: 64_ensure_square_meters_column.sql
+Processing: 65_backfill_square_meters.sql
+Processing: 66_fix_fairrent_rls_caching.sql
+Processing: 67_enforce_fairrent_required_fields.sql
+Processing: 68_add_room_fairrent_support.sql
+CREATE TABLE
+Processing: 69_consolidate_fairrent_to_entities.sql
+Processing: 70_add_slug_to_properties.sql
+ERROR:  role "authenticated" does not exist
+Processing: 71_add_slug_to_profiles.sql
+ERROR:  role "authenticated" does not exist
+Processing: 72_property_short_id_lookup.sql
+ERROR:  role "authenticated" does not exist
+Processing: 73_fix_clerk_admin_auth_functions.sql
+Processing: 74_standardize_org_claim_paths.sql
+Processing: 75_fix_security_definer_views_and_rls.sql
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  role "authenticated" does not exist
+Processing: 76_fix_anonymous_profile_access.sql
+ERROR:  role "anon" does not exist
+ERROR:  policy "profiles_select_anon_active" for table "profiles" does not exist
+ERROR:  role "authenticated" does not exist
+ERROR:  policy "profiles_select_safe" for table "profiles" does not exist
+Processing: 77_remove_admin_email_fallbacks.sql
+Processing: 78_fix_all_legacy_org_claim_paths.sql
+Processing: 79_fix_anonymous_public_access.sql
+ERROR:  schema "auth" does not exist
+ERROR:  policy "properties_select_public" for table "properties" does not exist
+ERROR:  schema "auth" does not exist
+ERROR:  policy "rooms_public_read" for table "rooms" does not exist
+ERROR:  schema "auth" does not exist
+Processing: 80_drop_old_roommate_policy.sql

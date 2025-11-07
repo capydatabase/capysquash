@@ -15,6 +15,7 @@ import (
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/metadata"
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/parser"
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // UnifiedTracker provides comprehensive object lifecycle tracking with advanced metadata integration
@@ -42,6 +43,9 @@ type UnifiedTracker struct {
 
 	// Statement analysis
 	statementAnalyzer *parser.StatementAnalyzer
+
+	// Column type tracking for index optimization
+	columnTypes map[string]map[string]*ColumnTypeInfo // table -> column -> type info
 }
 
 // ObjectLifecycle tracks complete database object lifecycle with advanced metadata integration
@@ -160,6 +164,15 @@ type SourceRange struct {
 	EndCol    int    `json:"end_col"`
 	Text      string `json:"text"`
 	Context   string `json:"context,omitempty"`
+}
+
+// ColumnTypeInfo tracks column types for index optimization
+type ColumnTypeInfo struct {
+	TableName  string
+	ColumnName string
+	DataType   string // Full type name (e.g., "double precision[]", "point", "geometry")
+	IsArray    bool   // True if column is an array type
+	IsSpatial  bool   // True if column is an actual spatial type (point, geography, geometry, etc.)
 }
 
 // ObjectInfo represents information about a database object
@@ -524,6 +537,14 @@ type ObjectMetadata struct {
 	DatabaseMeta interface{} `json:"database_meta"` // From metadata manager
 }
 
+// ColumnEvolutionInfo tracks how a column evolved through its lifecycle
+type ColumnEvolutionInfo struct {
+	TableName    string   `json:"table_name"`
+	OriginalName string   `json:"original_name"`
+	FinalName    string   `json:"final_name"`
+	RenameChain  []string `json:"rename_chain"` // All intermediate names
+}
+
 // ConsolidationResult stores the result of object consolidation
 type ConsolidationResult struct {
 	OriginalStatements []types.Statement `json:"original_statements"`
@@ -532,6 +553,8 @@ type ConsolidationResult struct {
 	Warnings           []string           `json:"warnings"`
 	RiskLevel          RiskLevel          `json:"risk_level"`
 	EstimatedSavings   SquashSavings      `json:"estimated_savings"`
+	// Column evolution tracking for data operation rewriting
+	ColumnEvolutions map[string]*ColumnEvolutionInfo `json:"column_evolutions,omitempty"`
 }
 
 // DependencyGraph manages object dependencies with cycle detection
@@ -629,6 +652,7 @@ func NewUnifiedTracker() *UnifiedTracker {
 		cycleDetector:     NewAdvancedDDLCycleDetector(cycleConfig),
 		detectedCycles:    make([]DDLCycle, 0),
 		statementAnalyzer: parser.NewStatementAnalyzer("15"), // Default to PostgreSQL 15
+		columnTypes:       make(map[string]map[string]*ColumnTypeInfo),
 	}
 }
 
@@ -660,6 +684,158 @@ func NewRiskAssessment() *RiskAssessment {
 	assessment.AddRule(&ProductionUsageRiskRule{})
 
 	return assessment
+}
+
+// IsSpatialDataType determines if a PostgreSQL type is a spatial/geometric type
+func IsSpatialDataType(typeName string) bool {
+	typeName = strings.ToLower(strings.TrimSpace(typeName))
+
+	// PostGIS types
+	if strings.HasPrefix(typeName, "geometry") ||
+		strings.HasPrefix(typeName, "geography") {
+		return true
+	}
+
+	// PostgreSQL built-in geometric types
+	spatialTypes := map[string]bool{
+		"point":   true,
+		"line":    true,
+		"lseg":    true,
+		"box":     true,
+		"path":    true,
+		"polygon": true,
+		"circle":  true,
+	}
+
+	return spatialTypes[typeName]
+}
+
+// IsArrayDataType determines if a type is an array
+func IsArrayDataType(typeName string) bool {
+	return strings.HasSuffix(typeName, "[]")
+}
+
+// GetBaseTypeName extracts the base type from an array type
+// E.g., "double precision[]" -> "double precision"
+func GetBaseTypeName(typeName string) string {
+	return strings.TrimSuffix(typeName, "[]")
+}
+
+// extractTypeName converts a pg_query TypeName to a string representation
+func extractTypeName(typeName *pg_query.TypeName) string {
+	if typeName == nil {
+		return ""
+	}
+
+	// Get the type names array
+	var typeNames []string
+	for _, name := range typeName.Names {
+		if name.GetString_() != nil {
+			typeNames = append(typeNames, name.GetString_().Sval)
+		}
+	}
+
+	// Use the last element for simplicity (e.g., ["pg_catalog", "float8"] -> "float8")
+	var typStr string
+	if len(typeNames) > 0 {
+		typStr = typeNames[len(typeNames)-1]
+	}
+
+	// Handle common PostgreSQL type aliases
+	typeMap := map[string]string{
+		"float8":  "double precision",
+		"float4":  "real",
+		"int4":    "integer",
+		"int8":    "bigint",
+		"int2":    "smallint",
+		"varchar": "character varying",
+	}
+
+	if mapped, ok := typeMap[typStr]; ok {
+		typStr = mapped
+	}
+
+	// Add array suffix if necessary
+	if typeName.ArrayBounds != nil && len(typeName.ArrayBounds) > 0 {
+		typStr += "[]"
+	}
+
+	return typStr
+}
+
+// ExtractColumnTypes extracts column type information from a CREATE TABLE statement
+func (ut *UnifiedTracker) ExtractColumnTypes(tableName string, stmt *types.Statement) {
+	// ParseTree is interface{} but should be *pg_query.ParseResult
+	if stmt.ParseTree == nil {
+		return
+	}
+
+	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
+	if !ok || parseResult == nil || parseResult.Stmts == nil || len(parseResult.Stmts) == 0 {
+		return
+	}
+
+	// Get the first statement
+	stmtNode := parseResult.Stmts[0]
+	if stmtNode.Stmt == nil {
+		return
+	}
+
+	// Check if it's a CREATE TABLE statement
+	createStmt := stmtNode.Stmt.GetCreateStmt()
+	if createStmt == nil {
+		return
+	}
+
+	// Ensure the table entry exists in columnTypes
+	if ut.columnTypes[tableName] == nil {
+		ut.columnTypes[tableName] = make(map[string]*ColumnTypeInfo)
+	}
+
+	// Iterate through table elements to find column definitions
+	for _, element := range createStmt.TableElts {
+		colDef := element.GetColumnDef()
+		if colDef == nil {
+			continue
+		}
+
+		columnName := colDef.Colname
+		if columnName == "" {
+			continue
+		}
+
+		// Extract type name
+		if colDef.TypeName == nil {
+			continue
+		}
+
+		typeName := extractTypeName(colDef.TypeName)
+		isArray := colDef.TypeName.ArrayBounds != nil && len(colDef.TypeName.ArrayBounds) > 0
+
+		// Check if it's a spatial type (but not an array of spatial types)
+		baseTypeName := typeName
+		if isArray {
+			baseTypeName = GetBaseTypeName(typeName)
+		}
+		isSpatial := IsSpatialDataType(baseTypeName) && !isArray
+
+		// Store column type info
+		ut.columnTypes[tableName][columnName] = &ColumnTypeInfo{
+			TableName:  tableName,
+			ColumnName: columnName,
+			DataType:   typeName,
+			IsArray:    isArray,
+			IsSpatial:  isSpatial,
+		}
+	}
+}
+
+// GetColumnType retrieves column type information
+func (ut *UnifiedTracker) GetColumnType(tableName, columnName string) *ColumnTypeInfo {
+	if ut.columnTypes[tableName] == nil {
+		return nil
+	}
+	return ut.columnTypes[tableName][columnName]
 }
 
 // ProcessMigration processes a migration with comprehensive tracking
@@ -695,10 +871,15 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 	}
 
 	for stmtIndex, stmt := range m.Statements {
-		// Process all statements, not just those with ObjectName
-		// Some statements like INSERT/UPDATE/DELETE don't have ObjectName but should be tracked for data operations
-		if stmt.ObjectName == "" && !stmt.IsDataOp {
-			continue // Only skip if it's not a data operation and has no object name
+		// CRITICAL: Skip ALL data operations - they're handled by engine's dataOperationTracker
+		// Data operations should NEVER be added to lifecycles, only to the DataOperationTracker
+		if stmt.IsDataOp {
+			continue
+		}
+
+		// Skip statements without ObjectName
+		if stmt.ObjectName == "" {
+			continue
 		}
 
 		// Analyze pragmas (manual override comments) - CRITICAL for safety
@@ -731,6 +912,11 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 
 			// Add event to object lifecycle
 			lifecycle.History = append(lifecycle.History, *event)
+
+			// Extract column types from CREATE TABLE statements for index optimization
+			if stmt.Operation == types.OpCreate && stmt.ObjectType == types.TypeTable {
+				ut.ExtractColumnTypes(stmt.ObjectName, &stmt)
+			}
 
 			// Debug: track profiles events
 			if strings.ToLower(stmt.ObjectName) == "profiles" {

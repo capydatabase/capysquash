@@ -523,7 +523,29 @@ func (ut *UnifiedTracker) ValidateConsistency() []string {
 				}
 			}
 
-			if _, exists := ut.objects[depKey]; !exists {
+			// BUG FIX: For dependencies with unknown type, try common object types before warning
+			// This handles cases like VIEW joining to another VIEW where only the name is known
+			depExists := false
+			if _, exists := ut.objects[depKey]; exists {
+				depExists = true
+			} else if dep.DependsOn.Type == types.TypeUnknown {
+				// Try common object types: TABLE, VIEW, MATERIALIZED VIEW, TYPE
+				commonTypes := []types.ObjectType{
+					types.TypeTable,
+					types.TypeView,
+					types.TypeType,
+					types.TypeFunction,
+				}
+				for _, tryType := range commonTypes {
+					tryKey := makeKey(dep.DependsOn.Name, tryType)
+					if _, exists := ut.objects[tryKey]; exists {
+						depExists = true
+						break
+					}
+				}
+			}
+
+			if !depExists {
 				// Filter out common false positives
 				depName := strings.ToLower(dep.DependsOn.Name)
 

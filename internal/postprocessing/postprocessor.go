@@ -79,38 +79,12 @@ func (p *Processor) Apply(sql string, enumReplacements map[string]string) (strin
 		}
 	}
 
-	// Fallback to regex-based approach if AST processing is disabled or failed
+	// Regex-based normalization DISABLED: It was creating duplicate LANGUAGE clauses
+	// and corrupting valid SQL. AST-based normalization is preferred.
 	if !p.useASTProcessing {
-		p.logger.Info("=== Using regex-based function normalization ===")
-
-		// CRITICAL FIX ORDER: Remove trailing language clauses BEFORE fixFunctionLanguageConflicts
-		// This allows fixFunctionLanguageConflicts to properly normalize remaining functions
-		p.logger.Info("=== POST-PROCESSING STEP 1: FixRedundantTrailingLanguageClauses ===")
-		sql = FixRedundantTrailingLanguageClauses(sql)
-		if match := jwtPattern.FindString(sql); match != "" {
-			p.logger.Info("AFTER STEP 1 - auth.jwt() signature: %s", match)
-		}
-
-		// Fix incorrect language declarations (SQL → plpgsql for functions with plpgsql constructs)
-		p.logger.Info("=== POST-PROCESSING STEP 2: FixIncorrectLanguageDeclarations ===")
-		sql = FixIncorrectLanguageDeclarations(sql)
-		if match := jwtPattern.FindString(sql); match != "" {
-			p.logger.Info("AFTER STEP 2 - auth.jwt() signature: %s", match)
-		}
-
-		// Add missing language declarations
-		p.logger.Info("=== POST-PROCESSING STEP 3: FixMissingLanguageDeclarations ===")
-		sql = FixMissingLanguageDeclarations(sql)
-		if match := jwtPattern.FindString(sql); match != "" {
-			p.logger.Info("AFTER STEP 3 - auth.jwt() signature: %s", match)
-		}
-
-		// FixFunctionLanguageConflicts() - regex now uses precise matching to avoid matching across function boundaries
-		p.logger.Info("=== POST-PROCESSING STEP 4: FixFunctionLanguageConflicts ===")
-		sql = FixFunctionLanguageConflicts(sql)
-		if match := jwtPattern.FindString(sql); match != "" {
-			p.logger.Info("AFTER STEP 4 - auth.jwt() signature: %s", match)
-		}
+		p.logger.Info("=== Regex-based function normalization DISABLED ===")
+		p.logger.Info("Reason: Creates duplicate LANGUAGE clauses and corrupts valid SQL")
+		p.logger.Info("Recommendation: Use AST-based processing or fix at consolidation layer")
 	}
 
 	// ================================================================
@@ -119,11 +93,30 @@ func (p *Processor) Apply(sql string, enumReplacements map[string]string) (strin
 	p.logger.Info("Phase 3: Function body fixes")
 	sql = FixReturnNextWithOutParams(sql, nil)
 
+	// Remove duplicate trailing LANGUAGE clauses (after $$;)
+	// This happens when AST normalization adds LANGUAGE before AS $$
+	// but the original has language 'plpgsql'; after $$;
+	p.logger.Info("Removing duplicate trailing LANGUAGE clauses")
+	sql = FixRedundantTrailingLanguageClauses(sql)
+
+	// Fix incorrect LANGUAGE declarations (e.g., LANGUAGE SQL for functions with BEGIN/END)
+	// This is critical because AST normalization might add the wrong LANGUAGE
+	p.logger.Info("Fixing incorrect LANGUAGE declarations (SQL → plpgsql for functions with plpgsql constructs)")
+	sql = FixIncorrectLanguageDeclarations(sql)
+
+	// Add missing LANGUAGE declarations
+	// This handles functions where AST normalization didn't add LANGUAGE at all
+	p.logger.Info("Adding missing LANGUAGE declarations (inferred from function body)")
+	sql = FixMissingLanguageDeclarations(sql)
+
 	// ================================================================
 	// PHASE 4: Final Cleanup
 	// ================================================================
 	p.logger.Info("Phase 4: Final cleanup")
-	sql = FixMissingSemicolons(sql)
+	// FixMissingSemicolons DISABLED: SQLBuilder handles semicolons correctly.
+	// This function was too aggressive and corrupted valid SQL.
+	// sql = FixMissingSemicolons(sql)
+	p.logger.Info("FixMissingSemicolons disabled - relying on SQLBuilder for correct semicolons")
 
 	// Handle ENUM reference replacement
 	if len(enumReplacements) > 0 {
@@ -144,6 +137,15 @@ func (p *Processor) Apply(sql string, enumReplacements map[string]string) (strin
 			sql = fixEliminatedEnumReferences(sql, enumReplacements)
 		}
 	}
+
+	// ================================================================
+	// PHASE 5: Statement Formatting (BUG #2 FIX)
+	// ================================================================
+	// Add proper spacing and formatting between statements to fix
+	// Bug #2 where multiple CREATE FUNCTION statements are concatenated
+	// without line breaks, making output unreadable
+	p.logger.Info("Phase 5: Statement formatting (adding proper spacing)")
+	sql = EnsureStatementSpacing(sql)
 
 	p.logger.Info("Post-processing pipeline completed")
 	return sql, nil

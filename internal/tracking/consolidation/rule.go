@@ -106,12 +106,30 @@ func (cre *ConsolidationRuleEngine) ApplyRules(lifecycle *tracking.ObjectLifecyc
 
 // createDefaultConsolidation creates a default consolidation result that preserves the original SQL
 // This ensures objects without matching consolidation rules are still included in output
+// BUG #2 FIX: Single-version objects bypass ALL processing to preserve original SQL exactly
 func createDefaultConsolidation(lifecycle *tracking.ObjectLifecycle) *tracking.ConsolidationResult {
 	if lifecycle == nil || len(lifecycle.History) == 0 {
 		return nil
 	}
 
-	// Get the final state (last CREATE or most recent non-DROP operation)
+	// BUG #2 FIX: For single-version objects, use original SQL directly
+	// This bypasses ALL AST round-tripping (parsing -> deparsing) that can corrupt:
+	// - LANGUAGE placement (trailing -> leading)
+	// - LANGUAGE type (sql <-> plpgsql)
+	// - Volatility/security markers
+	// - Function bodies with complex quoting
+	if len(lifecycle.History) == 1 {
+		originalStmt := lifecycle.History[0].Statement
+		return &tracking.ConsolidationResult{
+			OriginalStatements: []types.Statement{originalStmt},
+			ConsolidatedSQL:    originalStmt.SQL, // Use ORIGINAL SQL directly, no processing
+			Optimizations:      []string{"preserved_single_version_object"},
+			RiskLevel:          tracking.RiskLevelLow, // Low risk - no changes made
+			Warnings:           []string{},
+		}
+	}
+
+	// For multi-version objects, get the final state (may involve processing)
 	finalState := lifecycle.GetFinalState()
 	if finalState == nil {
 		return nil

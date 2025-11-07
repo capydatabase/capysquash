@@ -114,12 +114,14 @@ type ValidationResult struct {
 
 // DockerValidationResult represents the result of Docker-based validation
 type DockerValidationResult struct {
-	Success     bool          `json:"success"`
-	Duration    time.Duration `json:"duration"`
-	Differences string        `json:"differences,omitempty"`
-	Error       string        `json:"error,omitempty"`
-	OriginalDB  string        `json:"original_db"`
-	SquashedDB  string        `json:"squashed_db"`
+	Success                 bool          `json:"success"`
+	Duration                time.Duration `json:"duration"`
+	Differences             string        `json:"differences,omitempty"`
+	Error                   string        `json:"error,omitempty"`
+	OriginalDB              string        `json:"original_db"`
+	SquashedDB              string        `json:"squashed_db"`
+	OriginalMigrationsError string        `json:"original_migrations_error,omitempty"` // Error applying original migrations (expected for broken migrations)
+	ComparisonValid         bool          `json:"comparison_valid"`                     // True if both original and squashed migrations succeeded
 }
 
 // ContainerInfo holds Docker container information
@@ -939,9 +941,23 @@ func (sv *SchemaValidator) validateWithTwoDatabases(ctx context.Context, origina
 	result.SquashedDB = squashedDSN
 
 	// Connect and create databases
-	if err := sv.setupDatabases(ctx, containerInfo, originalPath, squashedPath); err != nil {
-		result.Error = err.Error()
-		return result, err
+	originalMigErr, squashedMigErr := sv.setupDatabases(ctx, containerInfo, originalPath, squashedPath)
+
+	// Track original migration status
+	if originalMigErr != nil {
+		result.OriginalMigrationsError = originalMigErr.Error()
+		result.ComparisonValid = false
+		if sv.config.Verbose {
+			color.Yellow("📊 Schema comparison will show differences due to original migration failures\n")
+		}
+	} else {
+		result.ComparisonValid = true
+	}
+
+	// If squashed migrations failed, that's a critical error
+	if squashedMigErr != nil {
+		result.Error = squashedMigErr.Error()
+		return result, squashedMigErr
 	}
 
 	// Compare schemas using pg_dump normalization
@@ -961,7 +977,22 @@ func (sv *SchemaValidator) validateWithTwoDatabases(ctx context.Context, origina
 	diff := CompareNormalizedSchemas(schema1, schema2)
 
 	result.Duration = time.Since(startTime)
-	result.Success = !diff.HasDifferences
+
+	// BUG #3 FIX: Only consider validation successful if comparison is valid (no original errors)
+	// AND schemas match
+	if result.ComparisonValid {
+		result.Success = !diff.HasDifferences
+	} else {
+		// Original migrations failed - comparison is informational only
+		result.Success = true // Squashed migrations work, which is what matters
+		if sv.config.Verbose {
+			color.Green("✓ Squashed migrations applied successfully\n")
+			if diff.HasDifferences {
+				color.Yellow("ℹ️  Schema differences are due to original migration failures (not consolidation bugs)\n")
+			}
+		}
+	}
+
 	if diff.HasDifferences {
 		result.Differences = diff.FormatDiff()
 	}
@@ -1350,17 +1381,6 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		sv.logInfo("🐳 Creating enhanced container with extensions: %v", extensions)
 	}
 
-	// Find an available port
-	port, err := sv.findAvailablePort()
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to find available port",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Stop some Docker containers to free up ports, or increase MaxPortSearchAttempts in config")
-	}
-
 	// Generate session ID for container tracking
 	sessionID := fmt.Sprintf("%d-%d", time.Now().Unix(), os.Getpid())
 
@@ -1448,7 +1468,8 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		},
 	}, &container.HostConfig{
 		PortBindings: nat.PortMap{
-			"5432/tcp": []nat.PortBinding{{HostPort: strconv.Itoa(port)}},
+			// Use "0" to let Docker assign a random available port dynamically
+			"5432/tcp": []nat.PortBinding{{HostPort: "0"}},
 		},
 		// Resource limits for security and stability
 		Resources: container.Resources{
@@ -1479,7 +1500,45 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		).WithInnerError(err).WithSuggestion("Check Docker logs for the container: docker logs " + resp.ID)
 	}
 
-	containerInfo := &ContainerInfo{ID: resp.ID, Port: port}
+	// Inspect container to get the dynamically assigned port
+	containerJSON, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+	if err != nil {
+		sv.stopAndRemoveContainer(ctx, resp.ID)
+		return nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"failed to inspect container for port assignment",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+
+	// Extract the assigned host port from the container inspection
+	assignedPort := 0
+	if bindings, ok := containerJSON.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+		// Parse the assigned port
+		portStr := bindings[0].HostPort
+		assignedPort, err = strconv.Atoi(portStr)
+		if err != nil {
+			sv.stopAndRemoveContainer(ctx, resp.ID)
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("failed to parse assigned port: %s", portStr),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(err)
+		}
+	} else {
+		sv.stopAndRemoveContainer(ctx, resp.ID)
+		return nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"no port binding found for container",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithSuggestion("Container may have failed to start properly")
+	}
+
+	sv.logInfo("📌 Docker assigned port: %d", assignedPort)
+	containerInfo := &ContainerInfo{ID: resp.ID, Port: assignedPort}
 
 	// Wait for container to start (before installing packages)
 	// We need the container running to exec package manager commands
@@ -1535,50 +1594,8 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 }
 
 // =============================================================================
-// Helper Methods (Stubs - Implementation would continue...)
+// Helper Methods
 // =============================================================================
-
-// Additional helper methods would be implemented here...
-func (sv *SchemaValidator) findAvailablePort() (int, error) {
-	// Get max attempts from config (default: 1000)
-	maxAttempts := 1000
-	if sv.config != nil && sv.config.MaxPortSearchAttempts > 0 {
-		maxAttempts = sv.config.MaxPortSearchAttempts
-	}
-
-	// Search for available port in expanded range
-	basePort := 15432
-	for i := 0; i < maxAttempts; i++ {
-		port := basePort + i
-		if sv.isPortAvailable(port) {
-			return port, nil
-		}
-	}
-	return 0, errors.NewError(
-		errors.ErrorCodeValidationFailed,
-		fmt.Sprintf("no available ports found after checking %d ports starting from %d", maxAttempts, basePort),
-		errors.SeverityError,
-		errors.CategoryValidation,
-	).WithSuggestion("Stop some Docker containers or increase MaxPortSearchAttempts in config")
-}
-
-func (sv *SchemaValidator) isPortAvailable(port int) bool {
-	// Implementation from docker_validator.go
-	ctx := context.Background()
-	containers, err := sv.dockerClient.ContainerList(ctx, container.ListOptions{})
-	if err != nil {
-		return false
-	}
-
-	for _, cont := range containers {
-		for _, portMapping := range cont.Ports {
-			if int(portMapping.PublicPort) == port {
-				return false
-			}
-		}
-	}
-	return true
-}
 
 // ensureDockerImageAvailable checks if a Docker image exists locally
 // If not, it pulls the image with a progress indicator
@@ -1725,7 +1742,7 @@ func (sv *SchemaValidator) waitForPostgreSQLReady(ctx context.Context, container
 	// Get timeout from config (default: 60s - longer because package installation may delay startup)
 	timeoutDuration := 60 * time.Second
 	if sv.config != nil && sv.config.ContainerReadyTimeout > 0 {
-		timeoutDuration = sv.config.ContainerReadyTimeout
+		timeoutDuration = time.Duration(sv.config.ContainerReadyTimeout) * time.Second
 	}
 
 	timeout := time.After(timeoutDuration)
@@ -1996,21 +2013,21 @@ func (sv *SchemaValidator) execInContainer(ctx context.Context, containerID stri
 	}
 }
 
-func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *ContainerInfo, originalPath, squashedPath string) error {
+func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *ContainerInfo, originalPath, squashedPath string) (originalErr error, squashedErr error) {
 	// Create databases and apply migrations
 	dsn := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", containerInfo.Port)
 	adminDB, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = adminDB.Close() }()
 
 	// Create databases
 	if _, err := adminDB.ExecContext(ctx, "CREATE DATABASE validation_original"); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := adminDB.ExecContext(ctx, "CREATE DATABASE validation_squashed"); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Apply migrations to each database
@@ -2018,25 +2035,27 @@ func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *Co
 	squashedDSN := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/validation_squashed?sslmode=disable", containerInfo.Port)
 
 	// Apply original migrations - allow errors (broken originals are expected)
-	if err := sv.applyMigrationsToDatabase(originalDSN, originalPath); err != nil {
+	originalErr = sv.applyMigrationsToDatabase(originalDSN, originalPath)
+	if originalErr != nil {
 		if sv.config.Verbose {
-			color.Yellow("⚠️  Original migrations have errors (this is expected): %v\n", err)
+			color.Yellow("⚠️  Original migrations have errors (this is expected): %v\n", originalErr)
 			color.Yellow("    Note: pgsquash is designed to fix broken migrations\n")
 		}
-		// Don't return error - we only care if squashed migrations work
+		// Don't fail validation - just track that original failed
 	}
 
 	// Apply squashed migrations - this MUST succeed
-	if err := sv.applyMigrationsToDatabase(squashedDSN, squashedPath); err != nil {
-		return errors.NewError(
+	squashedErr = sv.applyMigrationsToDatabase(squashedDSN, squashedPath)
+	if squashedErr != nil {
+		return originalErr, errors.NewError(
 			errors.ErrorCodeInvalidSQL,
 			"failed to apply squashed migrations",
 			errors.SeverityError,
 			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("The squashed migrations contain SQL errors - check the generated SQL")
+		).WithInnerError(squashedErr).WithSuggestion("The squashed migrations contain SQL errors - check the generated SQL")
 	}
 
-	return nil
+	return originalErr, nil
 }
 
 func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) error {

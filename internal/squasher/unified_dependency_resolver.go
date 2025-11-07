@@ -591,6 +591,12 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 		// Type dependencies are already extracted by parser from AST and included in stmt.Dependencies above
 		// CRITICAL: Extract table-to-table dependencies (foreign keys) for correct ordering
 		info.Dependencies = append(info.Dependencies, udr.extractTableDependencies(sql)...)
+		// CRITICAL (Bug #9 Fix): Extract view-to-view dependencies from FROM/JOIN clauses
+		// This ensures views are created in correct order when views depend on other views
+		info.Dependencies = append(info.Dependencies, udr.extractViewDependencies(sql)...)
+		// CRITICAL: Extract function dependencies (e.g., from CHECK constraints calling functions)
+		// This ensures functions used in CHECK constraints are created before the tables
+		info.Dependencies = append(info.Dependencies, udr.extractFunctionDependencies(sql)...)
 		info.Provides = append(info.Provides, udr.extractTableProvisions(sql)...)
 		info.Provides = append(info.Provides, udr.extractSchemaProvisions(sql)...)
 		info.Provides = append(info.Provides, udr.extractTypeProvisions(sql)...)
@@ -733,6 +739,20 @@ func (udr *UnifiedDependencyResolver) topologicalSortSQL(dependencies map[string
 func (udr *UnifiedDependencyResolver) extractTableDependencies(sql string) []string {
 	var deps []string
 
+	// Priority 0: RETURNS SETOF table_name - Functions must be created after the table they return
+	// Match: RETURNS SETOF [schema.]table_name
+	returnsSetofPattern := regexp.MustCompile(`(?i)RETURNS\s+SETOF\s+(?:[\w]+\.)?(\w+)`)
+	returnsMatches := returnsSetofPattern.FindAllStringSubmatch(sql, -1)
+	for _, match := range returnsMatches {
+		if len(match) > 1 {
+			referencedTable := strings.TrimSpace(match[1])
+			if referencedTable != "" {
+				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found RETURNS SETOF dependency: function depends on table %s", referencedTable)
+				deps = append(deps, referencedTable)
+			}
+		}
+	}
+
 	// Priority 1: FOREIGN KEY REFERENCES - These are critical for table creation order
 	// Tables must be created before they can be referenced
 	fkMatches := patterns.ForeignKeyPattern.FindAllStringSubmatch(sql, -1)
@@ -797,6 +817,68 @@ func (udr *UnifiedDependencyResolver) extractTableDependencies(sql string) []str
 	}
 
 	return deps
+}
+
+// extractViewDependencies finds view references in FROM/JOIN clauses
+// CRITICAL FIX (Bug #9): Views can depend on other views, not just tables
+// This method extracts view-to-view dependencies to ensure proper creation order
+func (udr *UnifiedDependencyResolver) extractViewDependencies(sql string) []string {
+	var deps []string
+
+	// Only process if this is a CREATE VIEW statement
+	if !regexp.MustCompile(`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?VIEW`).MatchString(sql) {
+		return deps
+	}
+
+	// Extract the view definition (everything after AS)
+	asPattern := regexp.MustCompile(`(?is)CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+[\w.]+.*?\s+AS\s+(.+)`)
+	asMatch := asPattern.FindStringSubmatch(sql)
+	if len(asMatch) < 2 {
+		return deps
+	}
+
+	viewDef := asMatch[1]
+
+	// Pattern 1: FROM clause - matches "FROM schema.object" or "FROM object"
+	// Captures both tables and views referenced in FROM
+	fromPattern := regexp.MustCompile(`(?i)\bFROM\s+(?:ONLY\s+)?(?:[\w]+\.)?(\w+)`)
+	fromMatches := fromPattern.FindAllStringSubmatch(viewDef, -1)
+	for _, match := range fromMatches {
+		if len(match) > 1 {
+			referencedObject := strings.TrimSpace(match[1])
+			if referencedObject != "" && !isCommonSQLKeyword(referencedObject) {
+				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found view FROM dependency: view depends on %s", referencedObject)
+				deps = append(deps, referencedObject)
+			}
+		}
+	}
+
+	// Pattern 2: JOIN clause - matches "JOIN schema.object" or "JOIN object"
+	// This captures INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL JOIN, CROSS JOIN
+	joinPattern := regexp.MustCompile(`(?i)\b(?:INNER\s+|LEFT\s+OUTER\s+|LEFT\s+|RIGHT\s+OUTER\s+|RIGHT\s+|FULL\s+OUTER\s+|FULL\s+|CROSS\s+)?JOIN\s+(?:[\w]+\.)?(\w+)`)
+	joinMatches := joinPattern.FindAllStringSubmatch(viewDef, -1)
+	for _, match := range joinMatches {
+		if len(match) > 1 {
+			referencedObject := strings.TrimSpace(match[1])
+			if referencedObject != "" && !isCommonSQLKeyword(referencedObject) {
+				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found view JOIN dependency: view depends on %s", referencedObject)
+				deps = append(deps, referencedObject)
+			}
+		}
+	}
+
+	return deps
+}
+
+// isCommonSQLKeyword checks if a string is a common SQL keyword that shouldn't be treated as a table/view name
+func isCommonSQLKeyword(word string) bool {
+	keywords := map[string]bool{
+		"select": true, "where": true, "order": true, "group": true, "having": true,
+		"limit": true, "offset": true, "union": true, "except": true, "intersect": true,
+		"case": true, "when": true, "then": true, "else": true, "end": true,
+		"as": true, "on": true, "using": true, "lateral": true, "unnest": true,
+	}
+	return keywords[strings.ToLower(word)]
 }
 
 // extractSchemaDependencies finds schema references
@@ -1157,8 +1239,32 @@ func (udr *UnifiedDependencyResolver) dependencyMatches(dependency, provision st
 		}
 	}
 
-	// Direct table name match
-	return dependency == provision
+	// Direct table name match (handle schema qualifications)
+	// CRITICAL: Strip schema prefixes for comparison to handle both "blueprints" and "public.blueprints"
+	depName := dependency
+	provName := provision
+
+	// Remove schema prefix if present (e.g., "public.blueprints" -> "blueprints")
+	if strings.Contains(depName, ".") {
+		parts := strings.SplitN(depName, ".", 2)
+		if len(parts) == 2 {
+			depName = parts[1] // Take the table name part
+		}
+	}
+	if strings.Contains(provName, ".") {
+		parts := strings.SplitN(provName, ".", 2)
+		if len(parts) == 2 {
+			provName = parts[1] // Take the table name part
+		}
+	}
+
+	// Match without schema qualifiers
+	// This allows "blueprints" to match "public.blueprints"
+	matched := depName == provName
+	if matched {
+		utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Matched table dependency: %s requires %s (normalized: %s == %s)", dependency, provision, depName, provName)
+	}
+	return matched
 }
 
 // removeDuplicates removes duplicate strings from slice

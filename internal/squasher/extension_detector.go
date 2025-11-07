@@ -131,6 +131,14 @@ func (ed *ExtensionDetector) initializeExtensions() {
 			ValidationSQL:   "SELECT 1;",
 			RequiresCASCADE: false,
 		},
+		{
+			Name:            "pgcrypto",
+			PackageName:     "postgresql-contrib",
+			DockerImage:     "postgres:15",
+			Dependencies:    []string{},
+			ValidationSQL:   "SELECT digest('test', 'sha256');",
+			RequiresCASCADE: false,
+		},
 	}
 
 	for _, ext := range extensions {

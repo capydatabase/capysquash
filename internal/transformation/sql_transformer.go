@@ -145,24 +145,31 @@ func (st *SQLTransformer) Transform(ctx context.Context, sql string) (*Transform
 	}
 
 	transformedSQL := sql
+	var err error // Declare err for use in subsequent steps
 
 	// STEP 0: Plugin Transformations (Pre-Parse, Highest Priority)
-	// Plugins can apply service-specific transformations before core transformations
-	// Examples:
-	//   - Clerk: Add STABLE markers to auth helper functions
-	//   - Supabase: Add STABLE markers to auth.uid(), auth.jwt()
-	//   - Prisma: Convert @@ directives to PostgreSQL equivalents
-	transformedSQL, err := st.applyPluginTransformations(ctx, transformedSQL)
-	if err != nil {
-		// Log warning but continue with core transformations
-		result.Warnings = append(result.Warnings, fmt.Sprintf("Plugin transformations warning: %v", err))
-	}
+	// BUG #2 FIX: DISABLED - Plugin transformations can modify functions
+	// Since we now preserve original SQL in consolidation rules, we must not transform
+	// Original SQL from migrations is correct and should be used as-is
+	//
+	// Previous behavior: Plugins added STABLE markers to auth functions
+	// Problem: This modifies functions when they should be preserved exactly
+	//
+	// transformedSQL, err := st.applyPluginTransformations(ctx, transformedSQL)
+	// if err != nil {
+	// 	result.Warnings = append(result.Warnings, fmt.Sprintf("Plugin transformations warning: %v", err))
+	// } // DISABLED
 
 	// STEP 1: Normalize LANGUAGE Position (Pre-Parse, Critical)
-	// MUST run BEFORE volatility fix to prevent syntax conflicts
-	// Moves "AS $$ ... $$ LANGUAGE plpgsql" → "LANGUAGE plpgsql AS $$ ... $$"
-	// This ensures LANGUAGE is before AS when volatility markers are added
-	transformedSQL = st.normalizeLanguagePosition(transformedSQL)
+	// BUG #2 FIX: DISABLED - This normalization corrupts functions
+	// The original placement of LANGUAGE (before AS or after body) is correct
+	// and should be preserved. Moving it causes syntax errors and breaks validation.
+	//
+	// Previous behavior: Moved "AS $$ ... $$ LANGUAGE plpgsql" → "LANGUAGE plpgsql AS $$ ... $$"
+	// Problem: This breaks functions that have LANGUAGE in trailing position
+	// Since we now preserve original SQL in consolidation rules, we must not normalize
+	//
+	// transformedSQL = st.normalizeLanguagePosition(transformedSQL) // DISABLED
 
 	// STEP 2: Function Volatility Fix (Pre-Parse, Fallback)
 	// CRITICAL: Must run BEFORE pg_query.Parse() because:
@@ -794,30 +801,53 @@ func (st *SQLTransformer) fixFunctionVolatilityMarkers(ctx context.Context, sql 
 		modifiers := transformedSQL[match[4]+offset : match[5]+offset] // LANGUAGE/SECURITY DEFINER/SET
 		asKeyword := transformedSQL[match[6]+offset : match[7]+offset] // " AS "
 
-		// Check if volatility marker already exists
+		// Check if volatility marker already exists (before AS or after body)
 		hasVolatility := st.hasVolatilityMarker(modifiers) || st.hasVolatilityMarker(beforeAS)
+
+		// Also check AFTER the function body (format: AS $$...$$ LANGUAGE SQL STABLE)
+		// Extract text from AS to end of function definition
+		// Increase capture to 500 chars to ensure we catch LANGUAGE clause after body
+		bodyStart := match[7] + offset
+		bodyPattern := regexp.MustCompile(`(?s)\$\$(.+?)\$\$(.{0,500})`)
+		bodyMatch := bodyPattern.FindStringSubmatchIndex(transformedSQL[bodyStart:])
+		if len(bodyMatch) >= 6 {
+			afterBody := transformedSQL[bodyStart+bodyMatch[4] : bodyStart+bodyMatch[5]]
+			fmt.Printf("[VOLATILITY-DEBUG] funcName=%s, afterBody (first 100 chars): '%s'\n", st.extractFunctionName(beforeAS), afterBody[:min(100, len(afterBody))])
+			if st.hasVolatilityMarker(afterBody) {
+				fmt.Printf("[VOLATILITY-DEBUG] ✓ Found volatility marker in afterBody for %s!\n", st.extractFunctionName(beforeAS))
+				hasVolatility = true
+			} else {
+				fmt.Printf("[VOLATILITY-DEBUG] ✗ NO volatility marker found for %s, full afterBody: '%s'\n", st.extractFunctionName(beforeAS), afterBody)
+			}
+		} else {
+			fmt.Printf("[VOLATILITY-DEBUG] bodyMatch length=%d for %s\n", len(bodyMatch), st.extractFunctionName(beforeAS))
+		}
 
 		if hasVolatility {
 			continue // Already has volatility marker, skip
 		}
 
-		funcName := st.extractFunctionName(beforeAS)
+		// BUG #2 FIX: Do NOT automatically add volatility markers to functions.
+		// Only add them if explicitly required for index predicates or other constraints.
+		// For single-version functions, preserve them exactly as written.
+		//
+		// The previous approach (forcing STABLE for auth functions) was too aggressive
+		// and caused schema differences after squashing.
+		//
+		// SKIP: Don't add volatility markers proactively
+		// If a function truly needs a volatility marker for an index predicate,
+		// it should be present in the original SQL or added manually by the developer.
 
-		// Extract function body to determine appropriate volatility
-		bodyStart := match[7] + offset
-		bodyPattern := regexp.MustCompile(`(?s)\$\$(.+?)\$\$`)
-		bodyMatch := bodyPattern.FindStringSubmatchIndex(transformedSQL[bodyStart:])
+		// Skip this function - don't add volatility markers
+		_ = beforeAS    // Suppress unused variable warning
+		_ = modifiers   // Suppress unused variable warning
+		_ = asKeyword   // Suppress unused variable warning
+		continue
 
-		var functionBody string
-		if len(bodyMatch) >= 4 {
-			functionBody = transformedSQL[bodyStart+bodyMatch[2] : bodyStart+bodyMatch[3]]
-		} else {
-			functionBody = "" // Can't determine body, default to STABLE
-		}
-
-		// Determine appropriate volatility based on function body
-		volatility := st.determineVolatility(functionBody)
-
+		// DEAD CODE BELOW - Left for reference but never executed due to continue above
+		// If we decide to re-enable automatic volatility markers in the future,
+		// this code shows how it was done previously.
+		/*
 		// Build new modifiers string
 		// PostgreSQL syntax: CREATE FUNCTION name() RETURNS type [LANGUAGE lang] [SECURITY DEFINER] [VOLATILE|STABLE|IMMUTABLE] AS $$
 		newModifiers := strings.TrimSpace(modifiers)
@@ -846,6 +876,7 @@ func (st *SQLTransformer) fixFunctionVolatilityMarkers(ctx context.Context, sql 
 			Before:      beforeAS + asKeyword,
 			After:       replacement,
 		})
+		*/
 	}
 
 	return transformedSQL, nil
@@ -875,6 +906,42 @@ func (st *SQLTransformer) hasVolatilityMarker(s string) bool {
 		strings.HasPrefix(upper, "STABLE") ||
 		strings.HasPrefix(upper, "VOLATILE")
 	return hasAtStart
+}
+
+// isAuthFunction checks if a function name matches known auth function patterns
+// BUG-003 fix: Auth functions (Clerk, Supabase, etc.) should always be STABLE
+func isAuthFunction(funcName string) bool {
+	lowerName := strings.ToLower(funcName)
+
+	// Clerk auth function patterns
+	clerkPatterns := []string{
+		"current_clerk_",
+		"clerk_user_id",
+		"clerk_is_admin",
+		"clerk_organization",
+		"current_user_id",
+		"current_organization",
+		"validate_jwt",
+		"get_planning_analytics",
+		"set_session_user",
+	}
+
+	// Supabase auth function patterns
+	supabasePatterns := []string{
+		"auth.uid",
+		"auth.jwt",
+		"auth.role",
+	}
+
+	// Check all patterns
+	allPatterns := append(clerkPatterns, supabasePatterns...)
+	for _, pattern := range allPatterns {
+		if strings.Contains(lowerName, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // determineVolatility analyzes a function body to determine appropriate volatility category.

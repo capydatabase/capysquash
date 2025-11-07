@@ -2,6 +2,7 @@ package builder
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
@@ -261,9 +262,19 @@ func (b *SQLBuilder) CreateIndex(index *IndexDefinition) *SQLBuilder {
 
 	b.P("ON").S().Quote(index.Schema).P(".").Quote(index.Table)
 
+	// BUG-001 fix: Only add USING clause when:
+	// 1. Method is non-BTREE (always explicit)
+	// 2. Method is BTREE AND it was explicit in original SQL
+	// This prevents adding "USING btree" to spatial indexes where it would fail
 	if index.Method != "" && index.Method != "BTREE" {
+		// Non-BTREE methods (GIN, GIST, HASH, etc.) are always explicit
 		b.S().P("USING").S().P(index.Method)
+	} else if index.Method == "BTREE" && index.HadExplicitAccessMethod {
+		// BTREE was explicitly specified, preserve it
+		b.S().P("USING").S().P("btree")
 	}
+	// If Method is BTREE but wasn't explicit, omit USING clause entirely
+	// PostgreSQL will choose the correct default based on column type
 
 	b.Wrap(func(inner *SQLBuilder) {
 		for i, col := range index.Columns {
@@ -584,15 +595,16 @@ type ConstraintDefinition struct {
 }
 
 type IndexDefinition struct {
-	Schema      string         `json:"schema"`
-	Table       string         `json:"table"`
-	Name        string         `json:"name,omitempty"`
-	IfNotExists bool           `json:"if_not_exists"`
-	Unique      bool           `json:"unique"`
-	Method      string         `json:"method"` // BTREE, HASH, GIN, GIST, etc.
-	Columns     []*IndexColumn `json:"columns"`
-	Where       string         `json:"where,omitempty"`
-	Comment     string         `json:"comment,omitempty"`
+	Schema                   string         `json:"schema"`
+	Table                    string         `json:"table"`
+	Name                     string         `json:"name,omitempty"`
+	IfNotExists              bool           `json:"if_not_exists"`
+	Unique                   bool           `json:"unique"`
+	Method                   string         `json:"method"` // BTREE, HASH, GIN, GIST, etc.
+	HadExplicitAccessMethod  bool           `json:"had_explicit_access_method"` // BUG-001: Track if USING was explicit
+	Columns                  []*IndexColumn `json:"columns"`
+	Where                    string         `json:"where,omitempty"`
+	Comment                  string         `json:"comment,omitempty"`
 }
 
 type IndexColumn struct {
@@ -670,22 +682,43 @@ func (b *SQLBuilder) FromStatement(stmt types.Statement) *SQLBuilder {
 }
 
 // fromASTStatement converts AST-based statements (CREATE, ALTER) back to SQL
-// using pg_query.Deparse, falling back to original SQL if conversion fails
+// BUG #2 FIX: Prioritize original SQL over deparsing to preserve function syntax
 func (b *SQLBuilder) fromASTStatement(stmt types.Statement) *SQLBuilder {
-	// Use pg_query.Deparse to convert AST back to SQL
+	// BUG #2 FIX: Always use original SQL if available
+	// Deparsing (pg_query.Deparse) corrupts functions by changing:
+	// - LANGUAGE placement (before AS vs after body)
+	// - LANGUAGE type (sql vs plpgsql)
+	// - Volatility markers (STABLE, IMMUTABLE, VOLATILE)
+	// - Security markers (SECURITY DEFINER)
+	//
+	// Since consolidation rules now preserve original SQL (rule.go, function_dedup_rule.go),
+	// we must use that SQL directly instead of deparsing the AST.
+	if stmt.SQL != "" {
+		b.Statement(stmt.SQL)
+		return b
+	}
+
+	// Only deparse if we don't have original SQL
 	if stmt.ParseTree != nil {
 		// The ParseTree is stored as interface{}, try to cast to *pg_query.ParseResult
 		switch parseTree := stmt.ParseTree.(type) {
 		case *pg_query.ParseResult:
 			if deparsed, err := pg_query.Deparse(parseTree); err == nil {
+				// BUG-001 FIX: Remove "USING btree" from spatial indexes
+				// pg_query.Deparse() adds "USING btree" even when it wasn't in the original SQL.
+				// This causes errors for spatial types (point, geography, geometry) which need GIST/SP-GIST.
+				if stmt.ObjectType == types.TypeIndex && !stmt.IndexHadExplicitAccessMethod {
+					// Remove "USING btree" (case-insensitive, preserves spacing)
+					re := regexp.MustCompile(`(?i)\s+USING\s+btree\s*`)
+					deparsed = re.ReplaceAllString(deparsed, " ")
+				}
 				b.Statement(deparsed)
 				return b
 			}
 		}
 	}
 
-	// Fallback to original SQL if AST conversion fails
-	b.Statement(stmt.SQL)
+	// If both original SQL and AST conversion fail, return empty
 	return b
 }
 
@@ -705,6 +738,11 @@ func (b *SQLBuilder) fromDropStatement(stmt types.Statement) *SQLBuilder {
 		b.P("IF EXISTS")
 	}
 	b.S().Quote(stmt.ObjectName)
+
+	// DROP POLICY requires ON table_name clause
+	if stmt.ObjectType == types.TypePolicy && len(stmt.Dependencies) > 0 {
+		b.S().P("ON").S().Quote(stmt.Dependencies[0])
+	}
 	return b
 }
 

@@ -1,6 +1,9 @@
 package postprocessing
 
 import (
+	"regexp"
+	"strings"
+
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/config"
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/postprocessing/ast"
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
@@ -50,6 +53,7 @@ func (p *ProcessorAST) Apply(sql string, enumReplacements map[string]string) (st
 	sql = FixExtensionOrder(sql)
 	sql = RemoveOrphanedAlterStatements(sql)
 	sql = FixMalformedFunctions(sql)
+	sql = FixMissingLanguageClauses(sql) // Add LANGUAGE plpgsql where missing
 
 	// ================================================================
 	// PHASE 2: Function Language Normalization (AST or regex)
@@ -62,6 +66,23 @@ func (p *ProcessorAST) Apply(sql string, enumReplacements map[string]string) (st
 			sql = p.applyRegexFunctionFixes(sql)
 		} else {
 			sql = normalizedSQL
+
+			// DEBUG: Check for concatenated functions after AST normalization
+			pattern := regexp.MustCompile(`\$\$;(?:STABLE|VOLATILE|IMMUTABLE);\s*CREATE`)
+			matches := pattern.FindAllString(sql, -1)
+			if len(matches) > 0 {
+				p.logger.Info("Found %d concatenated function patterns AFTER AST normalization - fixing...", len(matches))
+				sql = FixMissingLanguageClauses(sql) // Re-apply the split fix
+			}
+
+			// AST deparser outputs "language plpgsql" (lowercase) in header
+			// Original migrations may have "$$ language 'plpgsql';" at end
+			// Remove duplicates to avoid "conflicting or redundant options" error
+			p.logger.Info("Removing redundant trailing LANGUAGE clauses (deparser outputs them in header)")
+			sql = FixRedundantTrailingLanguageClauses(sql)
+			// Note: AST normalizer should handle missing LANGUAGE via inferMissingLanguage()
+			// If some edge cases remain (e.g., RETURNS TABLE), we'll address in the AST normalizer
+			// NOT using FixMissingLanguageDeclarations - it has broken regex that corrupts SQL
 		}
 	} else {
 		p.logger.Info("Phase 2: Function language normalization (regex)")
@@ -78,7 +99,10 @@ func (p *ProcessorAST) Apply(sql string, enumReplacements map[string]string) (st
 	// PHASE 4: Final Cleanup
 	// ================================================================
 	p.logger.Info("Phase 4: Final cleanup")
-	sql = FixMissingSemicolons(sql)
+	// FixMissingSemicolons DISABLED: Too aggressive, corrupts valid SQL inside function bodies.
+	// SQLBuilder and AST deparser already handle semicolons correctly.
+	// sql = FixMissingSemicolons(sql)
+	p.logger.Info("FixMissingSemicolons disabled - relying on SQLBuilder and AST deparser for correct semicolons")
 
 	// ENUM replacement (AST or regex)
 	if len(enumReplacements) > 0 {
@@ -97,6 +121,32 @@ func (p *ProcessorAST) Apply(sql string, enumReplacements map[string]string) (st
 			p.logger.Info("Phase 4: ENUM replacement (regex)")
 			sql = fixEliminatedEnumReferences(sql, enumReplacements)
 		}
+	}
+
+	// ================================================================
+	// PHASE 5: Fix pg_query deparser corruption bugs
+	// ================================================================
+	p.logger.Info("Phase 5: Fixing pg_query deparser corruption bugs")
+
+	// CRITICAL FIX: pg_query deparser bug with RETURNS TABLE
+	// It outputs: ) RETURNS TABLE LANGUAGE plpgsql (columns...)
+	// Correct:     ) RETURNS TABLE (columns...) LANGUAGE plpgsql
+	// This causes syntax errors "syntax error at or near LANGUAGE"
+	returnsTablePattern := `(?is)(\)\s+RETURNS\s+TABLE)\s+(LANGUAGE\s+\w+)\s+(\()`
+	returnsTableRe := regexp.MustCompile(returnsTablePattern)
+	beforeFix := sql
+	sql = returnsTableRe.ReplaceAllString(sql, "$1 $3")
+	if sql != beforeFix {
+		fixCount := len(returnsTableRe.FindAllString(beforeFix, -1))
+		p.logger.Info("Fixed pg_query deparser bug: removed %d misplaced LANGUAGE clauses from RETURNS TABLE", fixCount)
+	}
+
+	// CRITICAL FIX: pg_query deparser sometimes duplicates "char_" prefix on char_length function
+	// Example: char_length() becomes char_char_length()
+	// This breaks CHECK constraints that use char_length()
+	if strings.Contains(sql, "char_char_length") {
+		p.logger.Info("Fixing char_char_length corruption (deparser bug)")
+		sql = strings.ReplaceAll(sql, "char_char_length", "char_length")
 	}
 
 	p.logger.Info("AST-based post-processing pipeline completed")

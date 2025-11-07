@@ -145,6 +145,19 @@ func (r *AdvancedColumnLifecycleRule) Apply(lifecycle *tracking.ObjectLifecycle,
 		}
 	}
 
+	// Extract column evolution information for data operation rewriting
+	columnEvolutions := r.extractColumnEvolutions(lifecycle.Name, columnStates)
+
+	// BUG #3 FIX: Identify and warn about orphaned indexes (indexes on dropped columns)
+	orphanedIndexes := r.identifyOrphanedIndexes(lifecycle, columnStates, engine)
+	var warnings []string
+	if len(orphanedIndexes) > 0 {
+		for _, indexName := range orphanedIndexes {
+			warnings = append(warnings, fmt.Sprintf("Index %s references dropped columns and should be removed", indexName))
+		}
+		optimizations = append(optimizations, fmt.Sprintf("Identified %d orphaned indexes on dropped columns", len(orphanedIndexes)))
+	}
+
 	result := &tracking.ConsolidationResult{
 		OriginalStatements: originalStmts,
 		ConsolidatedSQL:    finalSQL,
@@ -155,6 +168,8 @@ func (r *AdvancedColumnLifecycleRule) Apply(lifecycle *tracking.ObjectLifecycle,
 			FilesAffected:     len(originalStmts),
 			LinesReduced:      r.estimateLinesSaved(originalStmts),
 		},
+		ColumnEvolutions: columnEvolutions,
+		Warnings:         warnings,
 	}
 
 	return result, nil
@@ -889,4 +904,116 @@ func (r *AdvancedColumnLifecycleRule) extractTableName(sql string) string {
 
 func (r *AdvancedColumnLifecycleRule) estimateLinesSaved(statements []types.Statement) int {
 	return len(statements) * 3 // Rough estimate
+}
+
+// extractColumnEvolutions extracts column rename mappings from column lifecycle states
+func (r *AdvancedColumnLifecycleRule) extractColumnEvolutions(tableName string, columnStates map[string]*ColumnLifecycleState) map[string]*tracking.ColumnEvolutionInfo {
+	evolutions := make(map[string]*tracking.ColumnEvolutionInfo)
+
+	for _, col := range columnStates {
+		// Only track columns that were renamed or involved in DROP+ADD patterns
+		if col.Status == ColumnStatusRenamed || (col.OriginalName != col.Name) {
+			// Build rename chain from transformations
+			renameChain := []string{col.OriginalName}
+			for _, transform := range col.Transformations {
+				if transform.Operation == ColumnOpRename {
+					renameChain = append(renameChain, transform.NewValue)
+				}
+			}
+
+			// Store evolution info with all intermediate names as keys
+			for _, oldName := range renameChain[:len(renameChain)-1] {
+				key := fmt.Sprintf("%s.%s", strings.ToLower(tableName), strings.ToLower(oldName))
+				evolutions[key] = &tracking.ColumnEvolutionInfo{
+					TableName:    strings.ToLower(tableName),
+					OriginalName: col.OriginalName,
+					FinalName:    col.Name,
+					RenameChain:  renameChain,
+				}
+			}
+		}
+	}
+
+	return evolutions
+}
+
+// identifyOrphanedIndexes finds indexes that reference dropped columns
+// BUG #3 FIX: When columns are dropped, indexes referencing those columns become orphaned
+// and should be excluded from the consolidated output to prevent errors
+func (r *AdvancedColumnLifecycleRule) identifyOrphanedIndexes(
+	tableLifecycle *tracking.ObjectLifecycle,
+	columnStates map[string]*ColumnLifecycleState,
+	engine ConsolidationEngine,
+) []string {
+	if engine == nil {
+		return nil
+	}
+
+	tracker := engine.GetTracker()
+	if tracker == nil {
+		return nil
+	}
+
+	// Collect names of dropped columns
+	droppedColumns := make(map[string]bool)
+	for _, col := range columnStates {
+		if col.Status == ColumnStatusDropped || col.Status == ColumnStatusTransient {
+			// Store both original and current name (in case of renames before drop)
+			droppedColumns[strings.ToLower(col.OriginalName)] = true
+			droppedColumns[strings.ToLower(col.Name)] = true
+		}
+	}
+
+	if len(droppedColumns) == 0 {
+		return nil // No dropped columns, no orphaned indexes
+	}
+
+	// Find all indexes that reference this table
+	tableName := strings.ToLower(tableLifecycle.Name)
+	var orphanedIndexes []string
+
+	// Get all index lifecycles from tracker
+	allLifecycles := tracker.GetObjectsByCategory()
+	for _, categoryObjects := range allLifecycles {
+		for _, indexLifecycle := range categoryObjects {
+			if indexLifecycle.Type != types.TypeIndex {
+				continue
+			}
+
+			// Check if this index references our table
+			// Indexes store their table name in Dependencies
+			indexReferencesTable := false
+			for _, dep := range indexLifecycle.Dependencies {
+				if strings.ToLower(dep.DependsOn.Name) == tableName {
+					indexReferencesTable = true
+					break
+				}
+			}
+
+			if !indexReferencesTable {
+				continue
+			}
+
+			// Check if the index references any dropped columns
+			// Parse the index SQL to extract column names
+			finalState := indexLifecycle.GetFinalState()
+			if finalState == nil {
+				continue
+			}
+
+			indexSQL := strings.ToLower(finalState.SQL)
+			for droppedColumn := range droppedColumns {
+				// Simple check: does the index SQL contain the dropped column name?
+				// This is a heuristic - may produce false positives, but that's safe
+				// We look for column name as a word boundary to avoid partial matches
+				columnPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(droppedColumn) + `\b`)
+				if columnPattern.MatchString(indexSQL) {
+					orphanedIndexes = append(orphanedIndexes, indexLifecycle.Name)
+					break
+				}
+			}
+		}
+	}
+
+	return orphanedIndexes
 }

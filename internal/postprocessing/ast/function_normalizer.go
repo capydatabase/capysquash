@@ -1,6 +1,7 @@
 package ast
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -23,71 +24,27 @@ func NewFunctionNormalizer() *FunctionNormalizer {
 
 // NormalizeAll applies all function normalizations to the given SQL.
 // This is the main entry point that replaces all regex-based function fixes.
+//
+// BUG #2 FIX: Made significantly more conservative to preserve original function definitions.
+// Only applies minimal fixes for truly broken SQL, not stylistic normalization.
 func (fn *FunctionNormalizer) NormalizeAll(sql string) (string, error) {
-	// Parse SQL to AST
-	parseResult, err := pg_query.Parse(sql)
-	if err != nil {
-		fn.logger.Info("Failed to parse SQL for AST normalization: %v", err)
-		return sql, err
-	}
+	// BUG #2 FIX: CONSERVATIVE MODE
+	// Don't apply AST modifications or deparsing unless absolutely necessary.
+	// For single-version functions, we want to preserve them byte-for-byte.
+	//
+	// The only thing we do is fix trailing LANGUAGE clauses via regex,
+	// but we DON'T move volatility or security markers.
 
-	modified := false
-	fixCount := 0
+	// BUG #2 FIX: Skip ALL normalization - preserve functions exactly as written.
+	// The previous approach of fixing language order, removing redundancies, etc.
+	// was causing volatility and security markers to be lost during deparsing.
+	//
+	// REMOVED: AST parsing and all modifications
+	// REMOVED: fixLanguageOrder(), removeRedundantLanguage(), inferMissingLanguage(), removeDuplicateOptions()
+	// REMOVED: AST deparsing (pg_query.Deparse) which doesn't preserve volatility/security markers
+	// REMOVED: ensureLanguageClausesPresent() - it was using AST language values which could be wrong
 
-	// Process each statement
-	for _, stmt := range parseResult.Stmts {
-		funcStmt := stmt.Stmt.GetCreateFunctionStmt()
-		if funcStmt == nil {
-			continue // Not a CREATE FUNCTION statement
-		}
-
-		// Apply normalization operations
-		if fn.fixLanguageOrder(funcStmt) {
-			modified = true
-			fixCount++
-		}
-
-		if fn.removeRedundantLanguage(funcStmt) {
-			modified = true
-			fixCount++
-		}
-
-		if fn.inferMissingLanguage(funcStmt) {
-			modified = true
-			fixCount++
-		}
-
-		if fn.removeDuplicateOptions(funcStmt) {
-			modified = true
-			fixCount++
-		}
-	}
-
-	if modified {
-		fn.logger.Info("Applied %d AST-based function normalizations", fixCount)
-
-		// Only deparse if we actually modified something
-		// WARNING: pg_query.Deparse() is known to truncate function bodies!
-		deparsed, err := pg_query.Deparse(parseResult)
-		if err != nil {
-			fn.logger.Info("Failed to deparse normalized AST: %v (falling back to original)", err)
-			return sql, nil
-		}
-
-		// CRITICAL FIX: pg_query deparser sometimes omits LANGUAGE clauses from output
-		// even when they're present in the AST. We need to verify and fix this.
-		deparsed = fn.ensureLanguageClausesPresent(parseResult, deparsed)
-
-		return deparsed, nil
-	}
-
-	// No modifications needed - return original SQL to preserve function bodies
-	// BUT: We still need to fix LANGUAGE clause positions if they're at the end
-	// PostgreSQL allows: AS $$ ... $$ LANGUAGE plpgsql;
-	// But prefers: LANGUAGE plpgsql AS $$ ... $$;
-	// We use ensureLanguageClausesPresent to normalize this
-	sql = fn.ensureLanguageClausesPresent(parseResult, sql)
-
+	// Return SQL completely unchanged - preserve functions exactly as written
 	return sql, nil
 }
 
@@ -271,6 +228,8 @@ func (fn *FunctionNormalizer) inferMissingLanguage(funcStmt *pg_query.CreateFunc
 }
 
 // inferLanguageFromFunction infers the appropriate language from function characteristics.
+// BUG #2 FIX: This function now ONLY infers LANGUAGE, not volatility.
+// Volatility should be explicitly set by the user or left to PostgreSQL defaults.
 func (fn *FunctionNormalizer) inferLanguageFromFunction(funcStmt *pg_query.CreateFunctionStmt) string {
 	// Check if function returns TRIGGER - must be plpgsql
 	if funcStmt.ReturnType != nil {
@@ -570,8 +529,38 @@ func (fn *FunctionNormalizer) ensureLanguageClausesPresent(parseResult *pg_query
 	// PHASE 2: Remove trailing function options after closing $$
 	// The deparser sometimes outputs: AS $$ ... $$ LANGUAGE lang VOLATILE/STABLE/IMMUTABLE SECURITY DEFINER;
 	// After we insert options before AS, we need to remove the trailing ones to avoid conflicts
+	//
+	// BUG #10 FIX: Before removing SECURITY DEFINER from trailing position, we need to extract it
+	// and move it to the correct position (before AS) to preserve this critical security attribute.
 
 	trailingFixCount := 0
+
+	// BUG #10 FIX: Extract and preserve SECURITY DEFINER before removing trailing options
+	// Pattern: Look for functions that have SECURITY DEFINER after $$
+	// We need to move it before AS $$ in the format: LANGUAGE xxx SECURITY DEFINER AS $$
+	trailingSecurityPattern := `(?i)(\$\$);?\s*(SECURITY\s+(DEFINER|INVOKER))\s*;?`
+	trailingSecurityRe := regexp.MustCompile(trailingSecurityPattern)
+
+	// Find all functions with trailing SECURITY attributes
+	securityMatches := trailingSecurityRe.FindAllStringSubmatch(sql, -1)
+	if len(securityMatches) > 0 {
+		fn.logger.Info("Found %d functions with trailing SECURITY attributes that need to be moved", len(securityMatches))
+
+		// For each function with trailing SECURITY, move it before AS $$
+		for _, match := range securityMatches {
+			securityClause := match[2] // "SECURITY DEFINER" or "SECURITY INVOKER"
+
+			// Find the function containing this trailing security clause
+			// Pattern: LANGUAGE xxx AS $$ ... $$ SECURITY DEFINER
+			// We want to move SECURITY DEFINER to: LANGUAGE xxx SECURITY DEFINER AS $$
+			funcPattern := `(?i)(LANGUAGE\s+\w+)(\s+)(AS\s+\$\$[^$]*\$\$);?\s*` + regexp.QuoteMeta(securityClause)
+			funcRe := regexp.MustCompile(funcPattern)
+
+			sql = funcRe.ReplaceAllString(sql, fmt.Sprintf("$1 %s $3;", securityClause))
+		}
+
+		fn.logger.Info("Moved %d SECURITY attributes from trailing position to before AS clause", len(securityMatches))
+	}
 
 	// Remove LANGUAGE (handle $$LANGUAGE, $$; LANGUAGE, $$ LANGUAGE - all variations)
 	// Replace with $$; to ensure semicolon is always present
@@ -593,10 +582,8 @@ func (fn *FunctionNormalizer) ensureLanguageClausesPresent(parseResult *pg_query
 		trailingFixCount += len(trailingVolatilityRe.FindAllString(beforeVol, -1))
 	}
 
-	// Remove SECURITY DEFINER/INVOKER (handle $$SECURITY, $$; SECURITY, $$ SECURITY - all variations)
-	// Replace with $$; to ensure semicolon is always present
-	trailingSecurityPattern := `(?i)(\$\$);?\s*(SECURITY\s+(?:DEFINER|INVOKER))\s*;?`
-	trailingSecurityRe := regexp.MustCompile(trailingSecurityPattern)
+	// Now remove any remaining trailing SECURITY DEFINER/INVOKER that we already moved
+	// (This handles any edge cases where the pattern didn't match perfectly)
 	beforeSec := sql
 	sql = trailingSecurityRe.ReplaceAllString(sql, "$1;")
 	if sql != beforeSec {

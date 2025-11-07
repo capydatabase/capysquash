@@ -431,6 +431,19 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 			},
 		},
 		{
+			rule: &SeparateAlterRule{},
+			metadata: RuleMetadata{
+				Name:        "separate_alter",
+				Description: "Identifies ALTER statements that must remain separate from CREATE TABLE (RLS, renames, etc.)",
+				Category:    CategoryTableOps,
+				Priority:    95, // Higher priority than CreateAlterConsolidationRule (90)
+				Provider:    "core",
+				Tags:        []string{"safe", "standard", "execution-order"},
+				Enabled:     true,
+				Version:     "0.9.5",
+			},
+		},
+		{
 			rule: &CreateAlterConsolidationRule{},
 			metadata: RuleMetadata{
 				Name:        "create_alter_consolidation",
@@ -525,12 +538,12 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 			rule: &RLSConsolidationRule{},
 			metadata: RuleMetadata{
 				Name:        "rls_consolidation",
-				Description: "Consolidates RLS policy operations",
+				Description: "Consolidates duplicate RLS operations to final state",
 				Category:    CategorySecurity,
-				Priority:    60,
+				Priority:    96, // Higher priority than SeparateAlterRule (95) - must consolidate before separation
 				Provider:    "core",
 				Tags:        []string{"safe", "security", "rls"},
-				Enabled:     true,
+				Enabled:     true, // Re-enabled: Now works with SeparateAlterRule for proper RLS handling
 				Version:     "0.9.5",
 			},
 		},

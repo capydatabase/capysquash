@@ -68,24 +68,25 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 			continue
 		}
 
-		// BUGFIX Bug #4: Extract ALTER TABLE statements from DO blocks BEFORE parsing
-		// DO blocks often wrap ALTER statements in IF NOT EXISTS checks:
+		// BUGFIX Bug #4 & Bug #6: Extract DDL statements from DO blocks BEFORE parsing
+		// DO blocks often wrap DDL in IF NOT EXISTS checks:
 		//   DO $$ BEGIN IF NOT EXISTS (...) THEN ALTER TABLE foo ADD COLUMN bar; END IF; END $$;
-		// We need to extract these ALTER statements and parse them separately
+		//   DO $$ BEGIN IF NOT EXISTS (...) THEN CREATE INDEX idx ON foo(bar); END IF; END $$;
+		// We need to extract these DDL statements and parse them separately
 		// so they can be properly tracked and consolidated
 		if strings.Contains(strings.ToUpper(stmtStr), "DO") && strings.Contains(strings.ToUpper(stmtStr), "$$") {
-			// Check if this DO block contains ALTER TABLE statements
-			alterStmts := extractAlterStatementsFromDoBlock(stmtStr)
+			// Check if this DO block contains DDL statements (ALTER TABLE, CREATE INDEX, etc.)
+			ddlStmts := extractAlterStatementsFromDoBlock(stmtStr)
 
-			if len(alterStmts) > 0 {
+			if len(ddlStmts) > 0 {
 				// Log extraction for debugging
 				utils.GetDefaultLogger().WithPrefix("PARSER").Info(
-					"Extracted %d ALTER TABLE statement(s) from DO block in %s",
-					len(alterStmts), filename)
+					"Extracted %d DDL statement(s) from DO block in %s",
+					len(ddlStmts), filename)
 
-				// Parse and add each extracted ALTER statement
-				for _, alterSQL := range alterStmts {
-					alterStmt, err := parseStatementWithNormalizationAndContext(alterSQL, i, normalizer, errorHandler, filename)
+				// Parse and add each extracted DDL statement
+				for _, ddlSQL := range ddlStmts {
+					ddlStmt, err := parseStatementWithNormalizationAndContext(ddlSQL, i, normalizer, errorHandler, filename)
 					if err != nil {
 						if !errorHandler.ShouldContinue() {
 							break
@@ -94,10 +95,10 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 					}
 
 					// Assign comments and category
-					alterStmt.Comments = getRelevantComments(comments, i)
-					alterStmt.Category = categorizeStatement(*alterStmt)
+					ddlStmt.Comments = getRelevantComments(comments, i)
+					ddlStmt.Category = categorizeStatement(*ddlStmt)
 
-					migration.Statements = append(migration.Statements, *alterStmt)
+					migration.Statements = append(migration.Statements, *ddlStmt)
 				}
 
 				// Skip the original DO block - we've extracted what we need
@@ -239,12 +240,38 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		// Extract constraint information from ALTER TABLE commands
 		stmt.Dependencies = extractAlterTableConstraints(node.AlterTableStmt, normalizer)
 
+	// BUG #1 FIX: Handle RenameStmt for ALTER TABLE RENAME COLUMN operations
+	case *pg_query.Node_RenameStmt:
+		// RenameStmt covers: ALTER TABLE ... RENAME COLUMN, ALTER TABLE ... RENAME TO, etc.
+		renameStmt := node.RenameStmt
+		stmt.Operation = types.OpAlter // RENAME is a type of ALTER operation
+
+		// Extract table name from the Relation
+		if renameStmt.Relation != nil {
+			stmt.ObjectName = getTableNameWithNormalization(renameStmt.Relation, normalizer)
+			stmt.ObjectType = types.TypeTable
+		}
+
+		// No dependencies for RENAME operations
+		stmt.Dependencies = []string{}
+
 	case *pg_query.Node_DropStmt:
 		stmt.Operation = types.OpDrop
 		if len(node.DropStmt.Objects) > 0 {
 			stmt.ObjectType = mapObjectType(node.DropStmt.RemoveType)
-			if list := node.DropStmt.Objects[0]; list != nil {
-				stmt.ObjectName = extractObjectNameWithNormalization(list, normalizer)
+			firstObject := node.DropStmt.Objects[0]
+			if node.DropStmt.RemoveType == pg_query.ObjectType_OBJECT_POLICY {
+				tableName, policyName := extractDropPolicyDetails(firstObject, normalizer)
+				if policyName != "" {
+					stmt.ObjectName = policyName
+				} else {
+					stmt.ObjectName = extractObjectNameWithNormalization(firstObject, normalizer)
+				}
+				if tableName != "" {
+					stmt.Dependencies = append(stmt.Dependencies, tableName)
+				}
+			} else if firstObject != nil {
+				stmt.ObjectName = extractObjectNameWithNormalization(firstObject, normalizer)
 			}
 		}
 
@@ -252,6 +279,12 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		stmt.ObjectType = types.TypeIndex
 		stmt.Operation = types.OpCreate
 		stmt.ObjectName = normalizer.NormalizeIdentifier(node.IndexStmt.Idxname)
+		// BUG-001 fix: Track whether index had explicit USING clause in original SQL
+		// This prevents pg_query.Deparse from adding "USING btree" to spatial indexes
+		// Check the original SQL, not the AST, since pg_query may have normalized it
+		if strings.Contains(strings.ToUpper(stmt.SQL), " USING ") {
+			stmt.IndexHadExplicitAccessMethod = true
+		}
 		if node.IndexStmt.Relation != nil {
 			stmt.Dependencies = []string{getTableNameWithNormalization(node.IndexStmt.Relation, normalizer)}
 		}
@@ -628,6 +661,13 @@ func extractQueryDependencies(queryNode *pg_query.Node, normalizer *ContextualNo
 			if joinExpr := fromClause.GetJoinExpr(); joinExpr != nil {
 				deps = append(deps, extractJoinDependencies(joinExpr, normalizer)...)
 			}
+			// Handle subqueries (RangeSubselect) - Bug #11 fix
+			if rangeSubselect := fromClause.GetRangeSubselect(); rangeSubselect != nil {
+				if rangeSubselect.Subquery != nil {
+					// Recursively extract dependencies from subquery
+					deps = append(deps, extractQueryDependencies(rangeSubselect.Subquery, normalizer)...)
+				}
+			}
 		}
 	}
 
@@ -649,6 +689,12 @@ func extractJoinDependencies(joinExpr *pg_query.JoinExpr, normalizer *Contextual
 		if nestedJoin := joinExpr.Larg.GetJoinExpr(); nestedJoin != nil {
 			deps = append(deps, extractJoinDependencies(nestedJoin, normalizer)...)
 		}
+		// Handle subquery on left side - Bug #11 fix
+		if rangeSubselect := joinExpr.Larg.GetRangeSubselect(); rangeSubselect != nil {
+			if rangeSubselect.Subquery != nil {
+				deps = append(deps, extractQueryDependencies(rangeSubselect.Subquery, normalizer)...)
+			}
+		}
 	}
 
 	// Right side of JOIN
@@ -661,6 +707,12 @@ func extractJoinDependencies(joinExpr *pg_query.JoinExpr, normalizer *Contextual
 		}
 		if nestedJoin := joinExpr.Rarg.GetJoinExpr(); nestedJoin != nil {
 			deps = append(deps, extractJoinDependencies(nestedJoin, normalizer)...)
+		}
+		// Handle subquery on right side - Bug #11 fix
+		if rangeSubselect := joinExpr.Rarg.GetRangeSubselect(); rangeSubselect != nil {
+			if rangeSubselect.Subquery != nil {
+				deps = append(deps, extractQueryDependencies(rangeSubselect.Subquery, normalizer)...)
+			}
 		}
 	}
 
@@ -805,6 +857,8 @@ func mapObjectType(removeType pg_query.ObjectType) types.ObjectType {
 		return types.TypeView
 	case pg_query.ObjectType_OBJECT_SEQUENCE:
 		return types.TypeSequence
+	case pg_query.ObjectType_OBJECT_POLICY:
+		return types.TypePolicy
 	default:
 		return types.TypeUnknown
 	}
@@ -822,6 +876,46 @@ func extractObjectNameWithNormalization(obj *pg_query.Node, normalizer *Contextu
 		return strings.Join(parts, ".")
 	}
 	return ""
+}
+
+// extractDropPolicyDetails returns the associated table (schema-qualified when available)
+// and policy name from a DROP POLICY statement target list.
+func extractDropPolicyDetails(obj *pg_query.Node, normalizer *ContextualNormalizer) (string, string) {
+	if obj == nil {
+		return "", ""
+	}
+
+	list := obj.GetList()
+	if list == nil || len(list.Items) == 0 {
+		return "", ""
+	}
+
+	var tableParts []string
+	var policyName string
+
+	for idx, item := range list.Items {
+		str := item.GetString_()
+		if str == nil {
+			continue
+		}
+
+		name := normalizer.NormalizeIdentifier(str.Sval)
+		if idx == len(list.Items)-1 {
+			policyName = name
+			continue
+		}
+
+		tableParts = append(tableParts, name)
+	}
+
+	var tableName string
+	if len(tableParts) == 1 {
+		tableName = tableParts[0]
+	} else if len(tableParts) > 1 {
+		tableName = strings.Join(tableParts, ".")
+	}
+
+	return tableName, policyName
 }
 
 func extractComments(content string) (string, []string) {
@@ -985,6 +1079,15 @@ func extractSchemaFromAST(rawStmt *pg_query.RawStmt, normalizer *ContextualNorma
 
 	case *pg_query.Node_DropStmt:
 		if len(node.DropStmt.Objects) > 0 {
+			if node.DropStmt.RemoveType == pg_query.ObjectType_OBJECT_POLICY {
+				tableName, _ := extractDropPolicyDetails(node.DropStmt.Objects[0], normalizer)
+				if tableName != "" {
+					if strings.Contains(tableName, ".") {
+						return strings.SplitN(tableName, ".", 2)[0]
+					}
+					return "public"
+				}
+			}
 			return extractSchemaFromObjectList(node.DropStmt.Objects[0], normalizer)
 		}
 
@@ -1281,7 +1384,7 @@ func detectAuthPattern(stmt *types.Statement) types.AuthPatternType {
 
 	// RLS policies (generic)
 	if strings.Contains(sql, "row level security") ||
-	   (strings.Contains(sql, "create policy") && stmt.ObjectType == types.TypePolicy) {
+		(strings.Contains(sql, "create policy") && stmt.ObjectType == types.TypePolicy) {
 		return types.AuthPatternRLS
 	}
 
@@ -1393,27 +1496,140 @@ func extractNestedTypesFromDoBlock(doBlockSQL string) []string {
 	return nestedTypes
 }
 
+// extractDDLFromConditionalBlocks extracts DDL from IF...THEN...END IF blocks
+// BUG #11 FIX: Handles conditional DDL that was previously skipped
+//
+// Pattern: IF EXISTS (...) THEN <DDL> END IF;
+//          IF NOT EXISTS (...) THEN <DDL> END IF;
+//
+// Returns modified SQL with conditional wrappers removed and DDL extracted
+func extractDDLFromConditionalBlocks(doBlockSQL string, ddlStatements *[]string) string {
+	// Pattern to match IF blocks: IF ... THEN ... END IF;
+	// Captures everything between THEN and END IF
+	ifBlockPattern := regexp.MustCompile(`(?is)IF\s+(?:NOT\s+)?EXISTS\s*\([^)]+\)\s+THEN\s+(.*?)\s+END\s+IF\s*;`)
+
+	matches := ifBlockPattern.FindAllStringSubmatch(doBlockSQL, -1)
+
+	for _, match := range matches {
+		if len(match) >= 2 {
+			thenClauseSQL := strings.TrimSpace(match[1])
+
+			// Skip IF blocks that contain EXECUTE statements (dynamic SQL)
+			// These cannot be statically extracted
+			if strings.Contains(strings.ToUpper(thenClauseSQL), "EXECUTE") {
+				utils.GetDefaultLogger().WithPrefix("PARSER").Warn(
+					"⚠️  Skipping IF block with dynamic SQL (EXECUTE) - cannot be statically extracted")
+				continue
+			}
+
+			// The THEN clause may contain multiple DDL statements
+			// Extract each one separately
+
+			// Check for CREATE INDEX
+			indexPattern := regexp.MustCompile(`(?is)(CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+\S+\s+ON\s+[^;]+);`)
+			indexMatches := indexPattern.FindAllStringSubmatch(thenClauseSQL, -1)
+			for _, idxMatch := range indexMatches {
+				if len(idxMatch) >= 2 {
+					indexStmt := strings.TrimSpace(idxMatch[1])
+					indexStmt = regexp.MustCompile(`\s+`).ReplaceAllString(indexStmt, " ")
+					if indexStmt != "" {
+						*ddlStatements = append(*ddlStatements, indexStmt+";")
+						utils.GetDefaultLogger().WithPrefix("PARSER").Info(
+							"BUG #11 FIX: Extracted CREATE INDEX from IF block: %s",
+							truncateForLog(indexStmt, 80))
+					}
+				}
+			}
+
+			// Check for ALTER TABLE
+			alterPattern := regexp.MustCompile(`(?is)(ALTER\s+TABLE\s+[^;]+);`)
+			alterMatches := alterPattern.FindAllStringSubmatch(thenClauseSQL, -1)
+			for _, altMatch := range alterMatches {
+				if len(altMatch) >= 2 {
+					alterStmt := strings.TrimSpace(altMatch[1])
+					alterStmt = regexp.MustCompile(`\s+`).ReplaceAllString(alterStmt, " ")
+					if alterStmt != "" {
+						*ddlStatements = append(*ddlStatements, alterStmt+";")
+						utils.GetDefaultLogger().WithPrefix("PARSER").Info(
+							"BUG #11 FIX: Extracted ALTER TABLE from IF block: %s",
+							truncateForLog(alterStmt, 80))
+					}
+				}
+			}
+
+			// Check for CREATE TYPE
+			typePattern := regexp.MustCompile(`(?is)(CREATE\s+TYPE\s+[^;]+);`)
+			typeMatches := typePattern.FindAllStringSubmatch(thenClauseSQL, -1)
+			for _, typeMatch := range typeMatches {
+				if len(typeMatch) >= 2 {
+					typeStmt := strings.TrimSpace(typeMatch[1])
+					typeStmt = regexp.MustCompile(`\s+`).ReplaceAllString(typeStmt, " ")
+					if typeStmt != "" {
+						*ddlStatements = append(*ddlStatements, typeStmt+";")
+						utils.GetDefaultLogger().WithPrefix("PARSER").Info(
+							"BUG #11 FIX: Extracted CREATE TYPE from IF block: %s",
+							truncateForLog(typeStmt, 80))
+					}
+				}
+			}
+		}
+	}
+
+	// BUG #11: Detect dynamic SQL (EXECUTE format) and warn
+	if strings.Contains(strings.ToUpper(doBlockSQL), "EXECUTE") &&
+		strings.Contains(strings.ToUpper(doBlockSQL), "FORMAT") {
+		utils.GetDefaultLogger().WithPrefix("PARSER").Warn(
+			"⚠️  DO block contains dynamic SQL (EXECUTE format()) which cannot be statically extracted. " +
+				"DDL created dynamically may not appear in squashed output.")
+	}
+
+	// Remove IF blocks from SQL to avoid double-processing
+	modifiedSQL := ifBlockPattern.ReplaceAllString(doBlockSQL, "")
+
+	return modifiedSQL
+}
+
+// truncateForLog truncates a string for logging purposes
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // extractAlterStatementsFromDoBlock extracts ALTER TABLE statements from DO blocks
 // This is critical for handling migrations that wrap ALTER statements in IF NOT EXISTS checks
 // Example:
-//   DO $$ BEGIN
-//     IF NOT EXISTS (...) THEN
-//       ALTER TABLE foo ADD COLUMN bar TEXT;
-//     END IF;
-//   END $$;
+//
+//	DO $$ BEGIN
+//	  IF NOT EXISTS (...) THEN
+//	    ALTER TABLE foo ADD COLUMN bar TEXT;
+//	  END IF;
+//	END $$;
+//
 // Returns: ["ALTER TABLE foo ADD COLUMN bar TEXT;"]
 func extractAlterStatementsFromDoBlock(doBlockSQL string) []string {
-	var alterStatements []string
+	var ddlStatements []string
 
-	// Strategy: Extract complete ALTER TABLE statements from DO blocks
-	// Must handle:
-	// 1. Simple columns: ALTER TABLE foo ADD COLUMN bar TEXT;
-	// 2. Complex columns: ALTER TABLE foo ADD COLUMN bar TEXT GENERATED ALWAYS AS (...) STORED;
-	// 3. Constraints: ALTER TABLE foo ADD CONSTRAINT ...;
-	// 4. RLS: ALTER TABLE foo ENABLE ROW LEVEL SECURITY;
+	// ROBUST SOLUTION: Extract ALL DDL statements from DO blocks using comprehensive patterns
+	// DO blocks wrap DDL in PL/pgSQL IF NOT EXISTS checks, which pg_query cannot parse
+	// We extract the actual DDL statements and parse them individually using AST
+	//
+	// Handles:
+	// 1. ALTER TABLE ADD COLUMN (simple and GENERATED columns)
+	// 2. ALTER TABLE ADD CONSTRAINT (including multi-line CHECK constraints)
+	// 3. ALTER TABLE ENABLE/DISABLE ROW LEVEL SECURITY
+	// 4. CREATE INDEX (BUG #6 FIX - was missing!)
+	// 5. CREATE TYPE
+	// 6. IF EXISTS...THEN...END IF conditional blocks (BUG #11 FIX)
+	// 7. Other DDL that may be wrapped in DO blocks
+
+	// BUG #11 FIX: First, extract DDL from within IF blocks
+	// Pattern: IF EXISTS (...) THEN <DDL statements> END IF;
+	// We need to extract the DDL from inside the THEN clause
+	doBlockSQL = extractDDLFromConditionalBlocks(doBlockSQL, &ddlStatements)
 
 	// Pattern 1: Extract ALTER TABLE ... ADD COLUMN (handles multi-line GENERATED columns)
-	// Captures everything from ALTER TABLE to the semicolon
 	addColumnPattern := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(\S+)\s+ADD\s+COLUMN\s+([^;]+);`)
 	matches := addColumnPattern.FindAllStringSubmatch(doBlockSQL, -1)
 
@@ -1428,7 +1644,7 @@ func extractAlterStatementsFromDoBlock(doBlockSQL string) []string {
 
 			if columnDef != "" {
 				stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s;", tableName, columnDef)
-				alterStatements = append(alterStatements, stmt)
+				ddlStatements = append(ddlStatements, stmt)
 			}
 		}
 	}
@@ -1448,26 +1664,61 @@ func extractAlterStatementsFromDoBlock(doBlockSQL string) []string {
 
 			if constraintDef != "" {
 				stmt := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s;", tableName, constraintDef)
-				alterStatements = append(alterStatements, stmt)
+				ddlStatements = append(ddlStatements, stmt)
 			}
 		}
 	}
 
-	// Pattern 3: Extract other ALTER TABLE operations (ENABLE/DISABLE RLS, etc.)
-	otherAlterPattern := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(\S+)\s+((?:ENABLE|DISABLE)\s+ROW\s+LEVEL\s+SECURITY)\s*;`)
-	otherMatches := otherAlterPattern.FindAllStringSubmatch(doBlockSQL, -1)
+	// Pattern 3: Extract ALTER TABLE ... ENABLE/DISABLE ROW LEVEL SECURITY
+	rlsPattern := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(\S+)\s+((?:ENABLE|DISABLE)\s+ROW\s+LEVEL\s+SECURITY)\s*;`)
+	rlsMatches := rlsPattern.FindAllStringSubmatch(doBlockSQL, -1)
 
-	for _, match := range otherMatches {
+	for _, match := range rlsMatches {
 		if len(match) >= 3 {
 			tableName := strings.TrimSpace(match[1])
 			alterAction := strings.TrimSpace(match[2])
 
 			stmt := fmt.Sprintf("ALTER TABLE %s %s;", tableName, alterAction)
-			alterStatements = append(alterStatements, stmt)
+			ddlStatements = append(ddlStatements, stmt)
 		}
 	}
 
-	return alterStatements
+	// Pattern 4: Extract CREATE INDEX (BUG #6 FIX)
+	// Handles both simple and conditional indexes: CREATE INDEX [IF NOT EXISTS] name ON table ...
+	createIndexPattern := regexp.MustCompile(`(?is)(CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+\S+\s+ON\s+[^;]+);`)
+	indexMatches := createIndexPattern.FindAllStringSubmatch(doBlockSQL, -1)
+
+	for _, match := range indexMatches {
+		if len(match) >= 2 {
+			indexStmt := strings.TrimSpace(match[1])
+			// Normalize whitespace
+			indexStmt = regexp.MustCompile(`\s+`).ReplaceAllString(indexStmt, " ")
+			indexStmt = strings.TrimSpace(indexStmt)
+
+			if indexStmt != "" {
+				ddlStatements = append(ddlStatements, indexStmt+";")
+			}
+		}
+	}
+
+	// Pattern 5: Extract CREATE TYPE (for ENUMs, COMPOSITEs)
+	createTypePattern := regexp.MustCompile(`(?is)(CREATE\s+TYPE\s+[^;]+);`)
+	typeMatches := createTypePattern.FindAllStringSubmatch(doBlockSQL, -1)
+
+	for _, match := range typeMatches {
+		if len(match) >= 2 {
+			typeStmt := strings.TrimSpace(match[1])
+			// Normalize whitespace
+			typeStmt = regexp.MustCompile(`\s+`).ReplaceAllString(typeStmt, " ")
+			typeStmt = strings.TrimSpace(typeStmt)
+
+			if typeStmt != "" {
+				ddlStatements = append(ddlStatements, typeStmt+";")
+			}
+		}
+	}
+
+	return ddlStatements
 }
 
 // enrichStatementWithPlugins calls all active plugins to enrich statement metadata

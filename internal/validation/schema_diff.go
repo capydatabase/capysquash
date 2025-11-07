@@ -62,6 +62,14 @@ func (oid ObjectID) String() string {
 	return fmt.Sprintf("%s::%s", oid.Name, oid.Type)
 }
 
+// QualifiedName returns the schema-qualified name without the type suffix
+func (oid ObjectID) QualifiedName() string {
+	if oid.Schema != "" && oid.Schema != "public" {
+		return fmt.Sprintf("%s.%s", oid.Schema, oid.Name)
+	}
+	return oid.Name
+}
+
 // Schema represents a database schema snapshot
 type Schema struct {
 	Tables      map[ObjectID]*TableDefinition      `json:"tables"`

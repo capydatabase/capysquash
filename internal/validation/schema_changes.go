@@ -405,7 +405,7 @@ func (fcc *FunctionCreateChange) Risk() RiskLevel {
 }
 
 func (fcc *FunctionCreateChange) Description() string {
-	return fmt.Sprintf("Create function %s", fcc.ID.Name)
+	return fmt.Sprintf("Create function %s", fcc.ID.QualifiedName())
 }
 
 func (fcc *FunctionCreateChange) SQL() []string {
@@ -442,11 +442,11 @@ func (fdc *FunctionDropChange) Risk() RiskLevel {
 }
 
 func (fdc *FunctionDropChange) Description() string {
-	return fmt.Sprintf("Drop function %s", fdc.ID.Name)
+	return fmt.Sprintf("Drop function %s", fdc.ID.QualifiedName())
 }
 
 func (fdc *FunctionDropChange) SQL() []string {
-	return []string{fmt.Sprintf("DROP FUNCTION %s", fdc.ID.Name)}
+	return []string{fmt.Sprintf("DROP FUNCTION %s", fdc.ID.QualifiedName())}
 }
 
 func (fdc *FunctionDropChange) ObjectID() ObjectID {
@@ -480,14 +480,14 @@ func (fmc *FunctionModifyChange) Risk() RiskLevel {
 }
 
 func (fmc *FunctionModifyChange) Description() string {
-	return fmt.Sprintf("Recreate function %s", fmc.ID.Name)
+	return fmt.Sprintf("Recreate function %s", fmc.ID.QualifiedName())
 }
 
 func (fmc *FunctionModifyChange) SQL() []string {
 	b := builder.NewSQLBuilder(builder.DefaultBuildOptions())
 	funcDef := convertToBuilderFunctionDef(fmc.ToDefinition)
 	return []string{
-		fmt.Sprintf("DROP FUNCTION %s", fmc.ID.Name),
+		fmt.Sprintf("DROP FUNCTION %s", fmc.ID.QualifiedName()),
 		b.Reset().CreateFunction(funcDef).String(),
 	}
 }

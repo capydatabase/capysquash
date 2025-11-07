@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
@@ -97,8 +98,40 @@ func (rule *ErrorRecoveryRule) attemptConsolidation(lifecycle *tracking.ObjectLi
 		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no final state available for consolidation", map[string]interface{}{"object": lifecycle.Name})
 	}
 
+	// DEBUG: Log SQL for cleanup_expired_memory_cards and current_clerk_org_id
+	if strings.Contains(strings.ToLower(lifecycle.Name), "cleanup_expired") || strings.Contains(strings.ToLower(lifecycle.Name), "current_clerk_org_id") {
+		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("%s finalState.SQL length=%d", lifecycle.Name, len(finalState.SQL))
+		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("  SQL preview (first 300): %s", strings.ReplaceAll(finalState.SQL[:min(300, len(finalState.SQL))], "\n", "\\n"))
+		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("  History count: %d", len(lifecycle.History))
+		for i, event := range lifecycle.History {
+			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("    Event %d: Op=%s, SQL length=%d, SQL preview: %s",
+				i, event.Operation, len(event.Statement.SQL),
+				strings.ReplaceAll(event.Statement.SQL[:min(100, len(event.Statement.SQL))], "\n", "\\n"))
+		}
+	}
+
+	// BUG-001 fix: For indexes without explicit access method, remove "USING btree" from SQL
+	// to prevent spatial index errors. pg_query may have added it during parsing.
+	consolidatedSQL := finalState.SQL
+	if lifecycle.Type == types.TypeIndex && !finalState.IndexHadExplicitAccessMethod {
+		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("INDEX %s: IndexHadExplicitAccessMethod=%v, checking for USING btree",
+			lifecycle.Name, finalState.IndexHadExplicitAccessMethod)
+		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("INDEX %s: SQL = %s", lifecycle.Name, consolidatedSQL)
+		// Check if SQL contains "USING btree" (case-insensitive)
+		if strings.Contains(strings.ToUpper(consolidatedSQL), " USING BTREE") {
+			// Remove "USING btree" - use regex to handle spacing variations
+			re := regexp.MustCompile(`(?i)\s+USING\s+btree\s*`)
+			consolidatedSQL = re.ReplaceAllString(consolidatedSQL, " ")
+			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("Removed implicit USING btree from index %s", lifecycle.Name)
+		} else {
+			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("Index %s has no USING btree in SQL (length=%d)",
+				lifecycle.Name, len(consolidatedSQL))
+		}
+		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("INDEX %s: After check, consolidated SQL = %s", lifecycle.Name, consolidatedSQL)
+	}
+
 	return &tracking.ConsolidationResult{
-		ConsolidatedSQL:    finalState.SQL,
+		ConsolidatedSQL:    consolidatedSQL,
 		OriginalStatements: rule.extractStatements(lifecycle.History),
 		Optimizations:      []string{"error_recovery_applied"},
 		Warnings:           []string{},
@@ -220,4 +253,12 @@ func (rule *ErrorRecoveryRule) extractStatements(history []tracking.LifecycleEve
 		statements = append(statements, event.Statement)
 	}
 	return statements
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
