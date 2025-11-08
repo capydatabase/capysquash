@@ -68,8 +68,8 @@ func (ed *ExtensionDetector) initializeExtensions() {
 	extensions := []ExtensionInfo{
 		{
 			Name:            "postgis",
-			PackageName:     "postgresql-15-postgis-3",
-			DockerImage:     "postgis/postgis:15-3.3", // Debian-based PostGIS image
+			PackageName:     "postgresql-17-postgis-3",
+			DockerImage:     "postgis/postgis:17-3.6", // Debian-based PostGIS image
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT PostGIS_version();",
 			RequiresCASCADE: true,
@@ -77,7 +77,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "earthdistance",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15", // Standard Debian-based postgres
+			DockerImage:     "postgres:17", // Standard Debian-based postgres
 			Dependencies:    []string{"cube"},
 			ValidationSQL:   "SELECT earth_distance(ll_to_earth(0,0), ll_to_earth(0,1));",
 			RequiresCASCADE: true,
@@ -85,7 +85,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "cube",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT cube(array[1,2,3]);",
 			RequiresCASCADE: false,
@@ -93,7 +93,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "uuid-ossp",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT uuid_generate_v4();",
 			RequiresCASCADE: false,
@@ -101,7 +101,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "pg_trgm",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT similarity('hello', 'hallo');",
 			RequiresCASCADE: false,
@@ -109,7 +109,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "pg_stat_statements",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			InstallCommand:  "shared_preload_libraries = 'pg_stat_statements'",
 			ValidationSQL:   "SELECT query FROM pg_stat_statements LIMIT 1;",
@@ -118,7 +118,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "btree_gin",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT 1;", // Simple validation
 			RequiresCASCADE: false,
@@ -126,7 +126,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "plpgsql",
 			PackageName:     "", // Built-in extension
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT 1;",
 			RequiresCASCADE: false,
@@ -134,7 +134,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "pgcrypto",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT digest('test', 'sha256');",
 			RequiresCASCADE: false,
@@ -364,17 +364,17 @@ func CanMergeExtensions(ext1, ext2 ExtensionRef) bool {
 func (ed *ExtensionDetector) selectBestDockerImage(extensionDetails map[string]ExtensionInfo) string {
 	// Priority order for Docker images (Debian-based)
 	imagePriority := map[string]int{
-		"postgis/postgis:15-3.3": 1, // PostGIS (Debian-based, includes most extensions)
-		"postgres:15":            2, // Standard PostgreSQL (Debian-based)
+		"postgis/postgis:17-3.6": 1, // PostGIS (Debian-based, includes most extensions)
+		"postgres:17":            2, // Standard PostgreSQL (Debian-based)
 	}
 
-	bestImage := "postgres:15" // Default (Debian-based)
+	bestImage := "postgres:17" // Default (Debian-based)
 	bestPriority := 999
 
 	// Check if PostGIS is required
 	for _, info := range extensionDetails {
 		if info.RequiresPostGIS || strings.Contains(strings.ToLower(info.Name), "postgis") {
-			return "postgis/postgis:15-3.3" // Debian-based PostGIS image
+			return "postgis/postgis:17-3.6" // Debian-based PostGIS image
 		}
 
 		if priority, exists := imagePriority[info.DockerImage]; exists && priority < bestPriority {

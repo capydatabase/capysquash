@@ -23,7 +23,7 @@ func DefaultNormalizationContext() *NormalizationContext {
 		CaseSensitive:       false, // PostgreSQL folds to lowercase unless quoted
 		PreserveQuotes:      true,
 		MaxIdentifierLength: 63, // PostgreSQL NAMEDATALEN - 1
-		PostgreSQLVersion:   15,
+		PostgreSQLVersion:   17,
 	}
 }
 
@@ -298,9 +298,9 @@ func (vkm *VersionedKeywordManager) loadVersionSpecificKeywords() {
 		})
 	}
 
-	// PostgreSQL 15+ keywords
-	if vkm.version >= 15 {
-		vkm.addVersionKeywords(15, map[string]KeywordType{
+	// PostgreSQL 17+ keywords
+	if vkm.version >= 17 {
+		vkm.addVersionKeywords(17, map[string]KeywordType{
 			"MERGE":  KeywordTypeReserved,
 			"STORED": KeywordTypeNonReserved,
 		})

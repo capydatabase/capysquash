@@ -180,7 +180,7 @@ start_postgres_container() {
     -e POSTGRES_USER=postgres \
     -e POSTGRES_DB=postgres \
     -p 5433:5432 \
-    postgres:15
+    postgres:17
 
   wait_for_container "$container_name" "$TIMEOUT"
 
@@ -387,7 +387,7 @@ version: '3.8'
 
 services:
   postgres-original:
-    image: postgres:15
+    image: postgres:17
     container_name: pgsquash-original
     environment:
       POSTGRES_DB: postgres
@@ -404,7 +404,7 @@ services:
       retries: 5
 
   postgres-squashed:
-    image: postgres:15
+    image: postgres:17
     container_name: pgsquash-squashed
     environment:
       POSTGRES_DB: postgres

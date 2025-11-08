@@ -1,0 +1,46 @@
+Validating migrations...
+Original: migrations
+Squashed: e2e-test-standard
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Analyzing 8 migrations for extension requirements
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Migration 6: found extensions []
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Migration 7: found extensions []
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Migration 0: found extensions [uuid-ossp pg_trgm pgcrypto]
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Migration 1: found extensions []
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Migration 2: found extensions []
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Migration 3: found extensions []
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Migration 4: found extensions []
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Migration 5: found extensions []
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Detected Clerk authentication service
+[2025-11-08 15:13:34] [INFO] [EXT-DETECTOR] Extension analysis complete: 3 extensions, auth service: clerk, base image: postgres:17
+🔐 Detected clerk authentication - injecting compatibility layer
+🔍 Using validation mode: TWO_DATABASES
+[VALIDATOR] 🚀 Starting Docker validation with approach: TWO_DATABASES
+[VALIDATOR] 📦 Detected 4 required extensions: [pg_trgm pgcrypto uuid uuid-ossp]
+[VALIDATOR] 🔧 Using two-database validation approach
+[VALIDATOR] 🐳 Creating enhanced container with extensions: [pg_trgm pgcrypto uuid uuid-ossp]
+[VALIDATOR] 🐘 Using Debian-based PostgreSQL image: postgres:17 (production-grade, fast extensions)
+[VALIDATOR] ☑ Docker image 'postgres:17' found locally
+[VALIDATOR] 📌 Docker assigned port: 55006
+[VALIDATOR] 📦 Installing Debian packages via apt-get: [postgresql-contrib]
+[VALIDATOR] ☑ Successfully installed Debian packages
+[VALIDATOR] 🔄 Restarting PostgreSQL to load extension libraries...
+[VALIDATOR] ☑ Container restarted successfully
+[VALIDATOR] ⏳ Waiting 10 seconds for PostgreSQL to initialize after restart...
+[VALIDATOR] ⚠️  Port changed from 55006 to 55007 after container restart, updating...
+[VALIDATOR] 📊 Using container_ready_timeout from config: 5m0s
+[VALIDATOR] ☑ PostgreSQL ready and accepting connections
+[VALIDATOR] ☑ Installed extension: pg_trgm
+[VALIDATOR] ☑ Installed extension: pgcrypto
+[VALIDATOR] ⚠️  Extension uuid not available in PostgreSQL - may need custom Docker image
+[VALIDATOR] ☑ Installed extension: uuid-ossp
+[VALIDATOR] ⚠️  Warning: Failed to install some extensions: [ERROR:EXTENSION] code:VALIDATION_FAILED failed to install 1 extension(s): [uuid] suggestion: Some extensions may require additional packages or custom Docker images
+🔐 Creating plugin compatibility layers...
+☑ Compatibility layers created successfully
+🔐 Creating plugin compatibility layers...
+☑ Compatibility layers created successfully
+[VALIDATOR] ☑ Successfully cleaned up container fb3f932a6af36deb39173fcc4ba5b30a68430cad3f69f704e0efb849ef3a7936
+✗ Validation failed: Schemas are different.
+Differences found:
+❌ Schema differences detected:
+
+

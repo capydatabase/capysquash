@@ -215,8 +215,8 @@ func parseStatementWithNormalizationAndContext(sql string, line int, normalizer 
 	enrichStatementWithPlugins(context.Background(), stmt)
 
 	// Analyze statement metadata (lock levels, transaction requirements, etc.)
-	// Use PostgreSQL 15 as default version (can be overridden by config later)
-	analyzer := NewStatementAnalyzer("15")
+	// Use PostgreSQL 17 as default version (can be overridden by config later)
+	analyzer := NewStatementAnalyzer("17")
 	analyzer.AnalyzeStatement(stmt)
 	analyzer.AnalyzePragmas(stmt)
 
@@ -264,6 +264,19 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 				tableName, policyName := extractDropPolicyDetails(firstObject, normalizer)
 				if policyName != "" {
 					stmt.ObjectName = policyName
+				} else {
+					stmt.ObjectName = extractObjectNameWithNormalization(firstObject, normalizer)
+				}
+				if tableName != "" {
+					stmt.Dependencies = append(stmt.Dependencies, tableName)
+				}
+			} else if node.DropStmt.RemoveType == pg_query.ObjectType_OBJECT_TRIGGER {
+				// BUG #2 FIX: Handle DROP TRIGGER specially to extract trigger name and table name separately
+				// DROP TRIGGER syntax: DROP TRIGGER [IF EXISTS] trigger_name ON table_name
+				// The pg_query parser returns a list like [schema?, table, trigger]
+				tableName, triggerName := extractDropTriggerDetails(firstObject, normalizer)
+				if triggerName != "" {
+					stmt.ObjectName = triggerName
 				} else {
 					stmt.ObjectName = extractObjectNameWithNormalization(firstObject, normalizer)
 				}
@@ -918,6 +931,50 @@ func extractDropPolicyDetails(obj *pg_query.Node, normalizer *ContextualNormaliz
 	return tableName, policyName
 }
 
+// extractDropTriggerDetails returns the associated table (schema-qualified when available)
+// and trigger name from a DROP TRIGGER statement target list.
+// DROP TRIGGER syntax: DROP TRIGGER [IF EXISTS] trigger_name ON table_name
+// The pg_query parser returns a list like [schema?, table, trigger]
+func extractDropTriggerDetails(obj *pg_query.Node, normalizer *ContextualNormalizer) (string, string) {
+	if obj == nil {
+		return "", ""
+	}
+
+	list := obj.GetList()
+	if list == nil || len(list.Items) == 0 {
+		return "", ""
+	}
+
+	var tableParts []string
+	var triggerName string
+
+	for idx, item := range list.Items {
+		str := item.GetString_()
+		if str == nil {
+			continue
+		}
+
+		name := normalizer.NormalizeIdentifier(str.Sval)
+		if idx == len(list.Items)-1 {
+			// Last element is the trigger name
+			triggerName = name
+			continue
+		}
+
+		// All other elements are part of the table name (schema.table or just table)
+		tableParts = append(tableParts, name)
+	}
+
+	var tableName string
+	if len(tableParts) == 1 {
+		tableName = tableParts[0]
+	} else if len(tableParts) > 1 {
+		tableName = strings.Join(tableParts, ".")
+	}
+
+	return tableName, triggerName
+}
+
 func extractComments(content string) (string, []string) {
 	lines := strings.Split(content, "\n")
 	var cleanLines []string
@@ -1211,7 +1268,7 @@ func validateNamingConventions(stmt *types.Statement, collector *ErrorCollector,
 	}
 
 	// Check for reserved words
-	keywordManager := NewVersionedKeywordManager(15) // PostgreSQL 15
+	keywordManager := NewVersionedKeywordManager(17) // PostgreSQL 17
 	if keywordManager.IsReservedKeyword(objectName) {
 		collector.AddNamingWarning(
 			fmt.Sprintf("Object name '%s' is a PostgreSQL reserved keyword", objectName),

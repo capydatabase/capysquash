@@ -651,7 +651,7 @@ func NewUnifiedTracker() *UnifiedTracker {
 		}),
 		cycleDetector:     NewAdvancedDDLCycleDetector(cycleConfig),
 		detectedCycles:    make([]DDLCycle, 0),
-		statementAnalyzer: parser.NewStatementAnalyzer("15"), // Default to PostgreSQL 15
+		statementAnalyzer: parser.NewStatementAnalyzer("17"), // Default to PostgreSQL 17
 		columnTypes:       make(map[string]map[string]*ColumnTypeInfo),
 	}
 }

@@ -175,6 +175,11 @@ func (e *StructuredError) Error() string {
         parts = append(parts, fmt.Sprintf("suggestion: %s", e.Suggestion))
     }
 
+    // BUG #2 FIX: Include inner error details if present
+    if e.InnerError != nil {
+        parts = append(parts, fmt.Sprintf("\n   Inner error: %v", e.InnerError))
+    }
+
     return strings.Join(parts, " ")
 }
 

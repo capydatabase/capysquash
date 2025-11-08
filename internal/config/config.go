@@ -148,7 +148,7 @@ type ValidationConfig struct {
 	Mode                     string `json:"mode"`                       // Validation approach: TWO_CONTAINERS, TWO_DATABASES, or SCHEMA_DIFF
 	DockerImage              string `json:"docker_image"`               // PostgreSQL Docker image (default: postgres:17)
 	TimeoutSeconds           int    `json:"timeout_seconds"`            // Validation timeout in seconds (default: 120)
-	ContainerReadyTimeout    int    `json:"container_ready_timeout"`    // Container startup timeout in seconds (default: 150)
+	ContainerReadyTimeout    int    `json:"container_ready_timeout"`    // Container startup timeout in seconds (default: 150, recommended for complex migrations with many extensions)
 	EnableExtensionDetection bool   `json:"enable_extension_detection"` // Auto-detect and install extensions (default: true)
 	AutoInstallExtensions    bool   `json:"auto_install_extensions"`    // Automatically install detected extensions (default: true)
 	EnableSQLFixes           bool   `json:"enable_sql_fixes"`           // Apply automatic SQL fixes during validation (default: false)
@@ -217,7 +217,7 @@ func DefaultConfig() *Config {
 			ConflictLogLevel:      "warn",
 		},
 		PostgreSQLFeatures: PostgreSQLFeaturesConfig{
-			TargetVersion:          "15",
+			TargetVersion:          "17",
 			EnabledExtensions:      []string{"vector", "pg_stat_statements", "uuid-ossp"},
 			OptimizeForPerformance: true,
 			UseModernSyntax:        true,
@@ -269,7 +269,7 @@ func DefaultConfig() *Config {
 			Mode:                     "TWO_DATABASES", // Best balance of speed and accuracy
 			DockerImage:              "postgres:17",   // Default PostgreSQL version (latest stable)
 			TimeoutSeconds:           120,             // 2 minute timeout for validation
-			ContainerReadyTimeout:    150,             // 150 second timeout for container startup (sufficient for heavy extensions like postgis)
+			ContainerReadyTimeout:    300,             // 300 second timeout for container startup (sufficient for heavy extensions like postgis)
 			EnableExtensionDetection: true,            // Auto-detect required extensions
 			AutoInstallExtensions:    true,            // Auto-install detected extensions
 			EnableSQLFixes:           false,           // Manual review recommended by default

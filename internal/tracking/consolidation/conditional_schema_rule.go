@@ -155,6 +155,20 @@ func (r *ConditionalSchemaRule) generateConditionalSQL(lifecycle *tracking.Objec
 			}
 		}
 
+		// BUG #2 FIX: DROP TRIGGER also requires ON tablename clause
+		// Syntax: DROP TRIGGER [IF EXISTS] trigger_name ON table_name
+		if lifecycle.Type == types.TypeTrigger {
+			// Extract table name from dependencies (parser now extracts it from DROP TRIGGER ... ON tablename)
+			tableName := ""
+			if len(state.Dependencies) > 0 {
+				tableName = state.Dependencies[0]
+			}
+			if tableName != "" {
+				return fmt.Sprintf("DROP %s IF EXISTS %s ON %s;",
+					strings.ToUpper(string(lifecycle.Type)), lifecycle.Name, tableName)
+			}
+		}
+
 		return fmt.Sprintf("DROP %s IF EXISTS %s;",
 			strings.ToUpper(string(lifecycle.Type)), lifecycle.Name)
 	}

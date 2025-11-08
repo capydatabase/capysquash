@@ -50,7 +50,7 @@
     "conflict_log_level": "warn"
   },
   "postgresql_features": {
-    "target_version": "15",
+    "target_version": "17",
     "enabled_extensions": [
       "vector",
       "pg_stat_statements",
@@ -115,9 +115,9 @@
   },
   "validation": {
     "mode": "TWO_DATABASES",
-    "docker_image": "postgres:15",
+    "docker_image": "postgres:17",
     "timeout_seconds": 120,
-    "container_ready_timeout": 30,
+    "container_ready_timeout": 300,
     "enable_extension_detection": true,
     "auto_install_extensions": true,
     "enable_sql_fixes": false,

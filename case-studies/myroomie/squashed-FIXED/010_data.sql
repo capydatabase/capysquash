@@ -2,7 +2,7 @@
 -- IMPORTANT: These are non-idempotent operations (INSERT/UPDATE/DELETE)
 -- Run these AFTER the baseline schema is applied
 -- Safety level: standard
--- Generated at: 2025-11-08T15:12:11+02:00
+-- Generated at: 2025-11-08T14:03:38+02:00
 
 -- Total data operations: 131 (sorted by dependencies)
 

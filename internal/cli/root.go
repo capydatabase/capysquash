@@ -375,16 +375,8 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 
 	startTime := time.Now()
 
-	// Load configuration
-	_, err := config.LoadConfig(configPath)
-	if err != nil {
-		return errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"Failed to load configuration",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithFile(configPath).WithInnerError(err).WithSuggestion("Check that pgsquash.config.json exists and is valid JSON")
-	}
+	// BUG #7 FIX: Config loading moved to line ~500 where it's actually used
+	// (Removed duplicate config load here - it was shadowing the one below)
 
 	if verbose {
 		fmt.Printf("Loading migrations from %d files...\n", len(args))
@@ -933,26 +925,35 @@ func runSquash(cmd *cobra.Command, args []string) error {
 // runValidationCheck performs validation and returns the result
 func runValidationCheck(cfg *config.Config, originalPath, squashedPath string) (*validation.ValidationResult, error) {
 	// Create validator with config
+	// BUG #6 FIX: Extract PostgreSQL version from docker_image config instead of hardcoding
+	postgresVersion := "17" // Default to 17 if not specified
+	if cfg.Validation.DockerImage != "" {
+		// Parse version from docker image (e.g., "postgres:17" -> "17")
+		parts := strings.Split(cfg.Validation.DockerImage, ":")
+		if len(parts) == 2 {
+			postgresVersion = parts[1]
+		}
+	}
+
 	valConfig := &validation.ValidationConfig{
 		Level:                    validation.ValidationLevelStandard,
 		ValidateExpressions:      true,
 		ValidateConstraints:      true,
 		ValidateDependencies:     true,
 		DockerApproach:           validation.ApproachTwoDatabases,
-		PostgreSQLVersion:        "15",
+		PostgreSQLVersion:        postgresVersion,
 		EnableExtensionDetection: true,
 		AutoInstallExtensions:    true,
 		Verbose:                  verbose,
 	}
 
-	if cfg.Validation.Mode != "" || cfg.Validation.DockerImage != "" {
-		if cfg.Validation.DockerImage != "" {
-			// The validation package doesn't have DockerImage field, so we use the PostgreSQL version
-			// Docker image is handled by the validation package internally
-		}
-		if cfg.Validation.Mode != "" {
-			valConfig.DockerApproach = validation.ValidationApproach(cfg.Validation.Mode)
-		}
+	if cfg.Validation.Mode != "" {
+		valConfig.DockerApproach = validation.ValidationApproach(cfg.Validation.Mode)
+	}
+
+	// Apply container ready timeout from config (convert int seconds to time.Duration)
+	if cfg.Validation.ContainerReadyTimeout > 0 {
+		valConfig.ContainerReadyTimeout = time.Duration(cfg.Validation.ContainerReadyTimeout) * time.Second
 	}
 
 	validator := validation.NewSchemaValidator(valConfig, nil, nil)
@@ -989,7 +990,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Original: %s\n", originalDir)
 	fmt.Printf("Squashed: %s\n", squashedDir)
 
-	// Load config to get validation settings
+	// Load config for validation settings (runValidate is a separate function from runSquash)
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return errors.NewError(
@@ -1022,6 +1023,17 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		// Create validation config with Docker support
 		valConfig := validation.DefaultValidationConfig()
 
+		// BUG #6 FIX: Extract PostgreSQL version from docker_image config
+		postgresVersion := "17" // Default to 17 if not specified
+		if cfg.Validation.DockerImage != "" {
+			// Parse version from docker image (e.g., "postgres:17" -> "17")
+			parts := strings.Split(cfg.Validation.DockerImage, ":")
+			if len(parts) == 2 {
+				postgresVersion = parts[1]
+			}
+		}
+		valConfig.PostgreSQLVersion = postgresVersion
+
 		// Use validation mode from flag, config, or default
 		mode := cfg.Validation.Mode
 		if validationMode != "" {
@@ -1044,6 +1056,11 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		valConfig.EnableSQLFixes = cfg.Validation.EnableSQLFixes
 		valConfig.Verbose = cfg.Validation.Verbose
 		valConfig.AuthCompatibilitySQL = extAnalysis.AuthCompatibilitySQL // Inject auth compatibility
+
+		// Apply container ready timeout from config (convert int seconds to time.Duration)
+		if cfg.Validation.ContainerReadyTimeout > 0 {
+			valConfig.ContainerReadyTimeout = time.Duration(cfg.Validation.ContainerReadyTimeout) * time.Second
+		}
 
 		if mode != "" {
 			color.Cyan("🔍 Using validation mode: %s\n", strings.ToUpper(mode))
@@ -1475,9 +1492,18 @@ func executeSquashWithAIValidation(args []string, cfg *config.Config, validation
 		combinedSQL += mig.Content + "\n"
 	}
 
-	// 1. Detect authentication patterns for extra safety
-	authPatternsResp, err := analyzer.DetectAuthPatterns(context.Background(), combinedSQL)
-	if err == nil && len(authPatternsResp.Patterns) > 0 {
+	// Track if AI is available - fail fast on first error
+	aiAvailable := true
+
+	// 1. Detect authentication patterns for extra safety (with timeout to avoid hanging)
+	authCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	authPatternsResp, err := analyzer.DetectAuthPatterns(authCtx, combinedSQL)
+	if err != nil {
+		color.Yellow("⚠️  AI pre-analysis unavailable: %v\n", err)
+		color.Yellow("   Skipping AI pre-analysis - proceeding with squashing\n")
+		aiAvailable = false
+	} else if len(authPatternsResp.Patterns) > 0 {
 		color.Yellow("🔐 AI detected authentication patterns:\n")
 		for _, pattern := range authPatternsResp.Patterns {
 			color.Yellow("   ► %s\n", pattern)
@@ -1512,39 +1538,54 @@ func executeSquashWithAIValidation(args []string, cfg *config.Config, validation
 
 	// AI Post-squash Safety Analysis (NON-BLOCKING - warnings only)
 	// Docker validation is the source of truth. AI provides additional insights but doesn't block deployment.
-	color.Cyan("🔍 AI Safety Validation...\n")
+
+	// Only run AI validation if AI was available in pre-analysis
+	if !aiAvailable {
+		color.Yellow("⚠️  Skipping AI post-validation (AI unavailable from pre-analysis)\n")
+	} else {
+		color.Cyan("🔍 AI Safety Validation...\n")
+	}
 
 	aiWarningCount := 0
 
-	// 2. Schema consistency validation (warnings only)
-	consistencyResp, err := analyzer.ValidateSchemaConsistency(context.Background(), combinedSQL, finalSQL)
-	if err == nil && len(consistencyResp.Differences) > 0 {
-		color.Yellow("⚠️  AI detected %d potential schema inconsistencies (review recommended):\n", len(consistencyResp.Differences))
-		for i, issue := range consistencyResp.Differences {
-			if i < 3 { // Show first 3 to avoid overwhelming output
-				color.Yellow("   ► %s\n", issue)
+	// 2. Schema consistency validation (warnings only - only if AI is available)
+	if aiAvailable {
+		consistencyResp, err := analyzer.ValidateSchemaConsistency(context.Background(), combinedSQL, finalSQL)
+		if err != nil {
+			// AI validation failed - skip remaining AI calls and continue with Docker validation
+			color.Yellow("⚠️  AI validation unavailable: %v\n", err)
+			color.Yellow("   Skipping AI safety checks - Docker validation will be the sole validation\n")
+			aiAvailable = false
+		} else if len(consistencyResp.Differences) > 0 {
+			color.Yellow("⚠️  AI detected %d potential schema inconsistencies (review recommended):\n", len(consistencyResp.Differences))
+			for i, issue := range consistencyResp.Differences {
+				if i < 3 { // Show first 3 to avoid overwhelming output
+					color.Yellow("   ► %s\n", issue)
+				}
 			}
+			if len(consistencyResp.Differences) > 3 {
+				color.Yellow("   ... and %d more issues\n", len(consistencyResp.Differences)-3)
+			}
+			color.Yellow("   Note: These are AI suggestions - Docker validation is authoritative\n")
+			aiWarningCount += len(consistencyResp.Differences)
 		}
-		if len(consistencyResp.Differences) > 3 {
-			color.Yellow("   ... and %d more issues\n", len(consistencyResp.Differences)-3)
-		}
-		color.Yellow("   Note: These are AI suggestions - Docker validation is authoritative\n")
-		aiWarningCount += len(consistencyResp.Differences)
 	}
 
-	// 3. Conservative dead code detection (warnings only in SAFE mode)
-	functions := extractFunctionsFromSQL(finalSQL)
-	deadCodeCount := 0
-	for _, function := range functions {
-		isDead, _, err := analyzer.IsDeadCode(context.Background(), finalSQL, function)
-		if err == nil && isDead {
-			deadCodeCount++
+	// 3. Conservative dead code detection (warnings only in SAFE mode, and only if AI is available)
+	if aiAvailable {
+		functions := extractFunctionsFromSQL(finalSQL)
+		deadCodeCount := 0
+		for _, function := range functions {
+			isDead, _, err := analyzer.IsDeadCode(context.Background(), finalSQL, function)
+			if err == nil && isDead {
+				deadCodeCount++
+			}
 		}
-	}
-	if deadCodeCount > 0 {
-		color.Yellow("💡 AI detected %d potentially unused functions\n", deadCodeCount)
-		color.Yellow("   Manual review recommended before production deployment\n")
-		aiWarningCount += deadCodeCount
+		if deadCodeCount > 0 {
+			color.Yellow("💡 AI detected %d potentially unused functions\n", deadCodeCount)
+			color.Yellow("   Manual review recommended before production deployment\n")
+			aiWarningCount += deadCodeCount
+		}
 	}
 
 	// Write output files (same as original)
@@ -1666,14 +1707,26 @@ func executeSquashWithAIOptimization(args []string, cfg *config.Config, validati
 	// AI-Powered Optimizations
 	color.Cyan("⚡ AI Optimization Engine...\n")
 
+	aiAvailable := true // Track if AI is working
+
 	// 1. Function semantic analysis for deduplication
 	functions := extractFunctionsFromSQL(finalSQL)
 	equivalentPairs := 0
 	for i, func1 := range functions {
+		if !aiAvailable {
+			break // Stop if AI is unavailable
+		}
 		for j := i + 1; j < len(functions); j++ {
 			func2 := functions[j]
 			isEquivalent, _, err := analyzer.AreFunctionsSemanticallyEquivalent(context.Background(), func1, func2)
-			if err == nil && isEquivalent {
+			if err != nil {
+				// AI failed - skip remaining AI calls
+				color.Yellow("⚠️  AI optimization unavailable: %v\n", err)
+				color.Yellow("   Skipping AI optimizations - proceeding with validation\n")
+				aiAvailable = false
+				break
+			}
+			if isEquivalent {
 				color.Cyan("🔄 AI found equivalent functions: %s ≡ %s\n",
 					extractFunctionName(func1), extractFunctionName(func2))
 				equivalentPairs++
@@ -1681,27 +1734,38 @@ func executeSquashWithAIOptimization(args []string, cfg *config.Config, validati
 		}
 	}
 
-	// 2. Performance optimization suggestions
-	optimizationsResp, err := analyzer.SuggestOptimizations(context.Background(), finalSQL)
-	if err == nil && len(optimizationsResp.Optimizations) > 0 {
-		color.Green("⚡ AI Performance Suggestions:\n")
-		for i, opt := range optimizationsResp.Optimizations {
-			if i < 5 { // Show top 5 suggestions
-				color.Green("   ► %s\n", opt)
+	// 2. Performance optimization suggestions (only if AI is available)
+	var optimizationsResp *ai.OptimizationsResponse
+	if aiAvailable {
+		resp, err := analyzer.SuggestOptimizations(context.Background(), finalSQL)
+		if err != nil {
+			color.Yellow("⚠️  AI optimization suggestions unavailable: %v\n", err)
+			aiAvailable = false
+		} else {
+			optimizationsResp = resp
+			if len(optimizationsResp.Optimizations) > 0 {
+				color.Green("⚡ AI Performance Suggestions:\n")
+				for i, opt := range optimizationsResp.Optimizations {
+					if i < 5 { // Show top 5 suggestions
+						color.Green("   ► %s\n", opt)
+					}
+				}
+				if len(optimizationsResp.Optimizations) > 5 {
+					color.Green("   ... and %d more optimizations\n", len(optimizationsResp.Optimizations)-5)
+				}
 			}
-		}
-		if len(optimizationsResp.Optimizations) > 5 {
-			color.Green("   ... and %d more optimizations\n", len(optimizationsResp.Optimizations)-5)
 		}
 	}
 
-	// 3. Complexity warnings
+	// 3. Complexity warnings (only if AI is available)
 	complexityWarnings := 0
-	for _, mig := range migrations {
-		complexityResp, err := analyzer.AnalyzeFunctionComplexity(context.Background(), mig.Content)
-		if err == nil && strings.Contains(strings.ToLower(complexityResp.Reasoning), "high") {
-			color.Yellow("⚠️  High complexity in %s - consider refactoring\n", mig.FullPath)
-			complexityWarnings++
+	if aiAvailable {
+		for _, mig := range migrations {
+			complexityResp, err := analyzer.AnalyzeFunctionComplexity(context.Background(), mig.Content)
+			if err == nil && strings.Contains(strings.ToLower(complexityResp.Reasoning), "high") {
+				color.Yellow("⚠️  High complexity in %s - consider refactoring\n", mig.FullPath)
+				complexityWarnings++
+			}
 		}
 	}
 
@@ -1758,7 +1822,11 @@ func executeSquashWithAIOptimization(args []string, cfg *config.Config, validati
 	// AI Summary
 	color.Green("⚡ AI Optimization Summary:\n")
 	color.Green("   ► Equivalent function pairs found: %d\n", equivalentPairs)
-	color.Green("   ► Performance optimizations suggested: %d\n", len(optimizationsResp.Optimizations))
+	if optimizationsResp != nil {
+		color.Green("   ► Performance optimizations suggested: %d\n", len(optimizationsResp.Optimizations))
+	} else {
+		color.Yellow("   ► Performance optimizations: AI unavailable\n")
+	}
 	if complexityWarnings > 0 {
 		color.Yellow("   ► High complexity warnings: %d\n", complexityWarnings)
 	}

@@ -1,23 +1,23 @@
 {
   "version": "0.9.5",
-  "timestamp": "2025-11-07T11:58:13.71701+02:00",
+  "timestamp": "2025-11-08T15:12:59.358122+02:00",
   "safety_mode": "standard",
-  "pg_version": "15",
+  "pg_version": "17",
   "extensions": [
     "pg_trgm",
     "pgcrypto",
     "uuid-ossp"
   ],
-  "content_hash": "sha256:437d26a87f9987f8923d196379c1aadcbc3234cb81c62186984d2802153454fb",
+  "content_hash": "sha256:6887f177088c3f314b89bd4160dacf9056c4df4393c1ebb6a2cdf558503c9ace",
   "inputs": [
-    "migration_0.sql",
-    "migration_1.sql",
-    "migration_2.sql",
-    "migration_3.sql",
     "migration_4.sql",
     "migration_5.sql",
     "migration_6.sql",
-    "migration_7.sql"
+    "migration_7.sql",
+    "migration_0.sql",
+    "migration_1.sql",
+    "migration_2.sql",
+    "migration_3.sql"
   ],
   "outputs": [
     "000_baseline.sql",

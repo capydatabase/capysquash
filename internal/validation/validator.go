@@ -63,13 +63,13 @@ type ValidationConfig struct {
 	QueryTimeout         time.Duration   `json:"query_timeout"`
 	// Docker-based validation options
 	DockerApproach           ValidationApproach `json:"docker_approach,omitempty"`
-	PostgreSQLVersion        string             `json:"postgresql_version,omitempty"` // PostgreSQL version for validation containers (default: 15)
+	PostgreSQLVersion        string             `json:"postgresql_version,omitempty"` // PostgreSQL version for validation containers (default: 17)
 	EnableExtensionDetection bool               `json:"enable_extension_detection"`
 	AutoInstallExtensions    bool               `json:"auto_install_extensions"`
 	EnableSQLFixes           bool               `json:"enable_sql_fixes"`
 	CustomExtensions         map[string]string  `json:"custom_extensions,omitempty"`
 	Verbose                  bool               `json:"verbose"`
-	ContainerReadyTimeout    time.Duration      `json:"container_ready_timeout,omitempty"`  // Timeout for container readiness (default: 30s)
+	ContainerReadyTimeout    time.Duration      `json:"container_ready_timeout,omitempty"`  // Timeout for container readiness (default: 150s, recommended for complex migrations with many extensions)
 	MaxPortSearchAttempts    int                `json:"max_port_search_attempts,omitempty"` // Max ports to search (default: 1000)
 	AuthCompatibilitySQL     string             `json:"auth_compatibility_sql,omitempty"`   // Auth compatibility SQL to inject before migrations
 }
@@ -1425,8 +1425,8 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 	// ```
 	// =============================================================================
 
-	// Use configurable PostgreSQL version (default to 15)
-	postgresVersion := "15"
+	// Use configurable PostgreSQL version (default to 17)
+	postgresVersion := "17"
 	if sv.config != nil && sv.config.PostgreSQLVersion != "" {
 		postgresVersion = sv.config.PostgreSQLVersion
 	}
@@ -1540,6 +1540,20 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 	sv.logInfo("📌 Docker assigned port: %d", assignedPort)
 	containerInfo := &ContainerInfo{ID: resp.ID, Port: assignedPort}
 
+	// BUG FIX: Re-inspect after a brief delay to get the actual bound port
+	// Docker may not have fully bound the port when we first inspect
+	time.Sleep(500 * time.Millisecond)
+	containerJSON2, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+	if err == nil {
+		if bindings, ok := containerJSON2.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+			portStr := bindings[0].HostPort
+			if actualPort, err := strconv.Atoi(portStr); err == nil && actualPort != assignedPort {
+				sv.logInfo("⚠️  Port changed from %d to %d after inspection, updating...", assignedPort, actualPort)
+				containerInfo.Port = actualPort
+			}
+		}
+	}
+
 	// Wait for container to start (before installing packages)
 	// We need the container running to exec package manager commands
 	if err := sv.waitForContainerStart(ctx, containerInfo); err != nil {
@@ -1569,6 +1583,23 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 			sv.logInfo("⚠️  Warning: Failed to restart container: %v", err)
 		} else {
 			sv.logInfo("☑ Container restarted successfully")
+			// BUG #5 FIX: Wait a bit after restart for PostgreSQL to begin initialization
+			// Without this, we immediately try to connect before PostgreSQL has started
+			sv.logInfo("⏳ Waiting 10 seconds for PostgreSQL to initialize after restart...")
+			time.Sleep(10 * time.Second)
+
+			// BUG #1 FIX (additional): Re-inspect port after container restart
+			// Docker may reassign the port binding when the container restarts
+			containerJSON3, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+			if err == nil {
+				if bindings, ok := containerJSON3.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+					portStr := bindings[0].HostPort
+					if actualPort, err := strconv.Atoi(portStr); err == nil && actualPort != containerInfo.Port {
+						sv.logInfo("⚠️  Port changed from %d to %d after container restart, updating...", containerInfo.Port, actualPort)
+						containerInfo.Port = actualPort
+					}
+				}
+			}
 		}
 	}
 
@@ -1742,7 +1773,10 @@ func (sv *SchemaValidator) waitForPostgreSQLReady(ctx context.Context, container
 	// Get timeout from config (default: 150s - sufficient for heavy extensions like postgis, pgcrypto, cube, earthdistance)
 	timeoutDuration := 150 * time.Second
 	if sv.config != nil && sv.config.ContainerReadyTimeout > 0 {
-		timeoutDuration = time.Duration(sv.config.ContainerReadyTimeout) * time.Second
+		timeoutDuration = sv.config.ContainerReadyTimeout // Already a time.Duration, no conversion needed
+		sv.logInfo("📊 Using container_ready_timeout from config: %v", timeoutDuration)
+	} else {
+		sv.logInfo("⚠️  Using default container_ready_timeout: %v (config nil=%v, timeout=%v)", timeoutDuration, sv.config == nil, sv.config.ContainerReadyTimeout)
 	}
 
 	timeout := time.After(timeoutDuration)
@@ -1837,23 +1871,23 @@ func (sv *SchemaValidator) installExtensions(ctx context.Context, containerInfo 
 //
 // The image builder would render Dockerfile templates like:
 //
-//	FROM postgres:15
+//	FROM postgres:17
 //	RUN apt-get update && apt-get install -y --no-install-recommends \
-//	    postgresql-15-postgis-3 \
+//	    postgresql-17-postgis-3 \
 //	    postgresql-contrib \
 //	    ...other packages && \
 //	    apt-get clean && rm -rf /var/lib/apt/lists/*
 //
 // And cache with content-based tags like:
 //
-//	pgsquash-postgres:15-debian-sha256-abc123
+//	pgsquash-postgres:17-debian-sha256-abc123
 //
 // This keeps the flexibility of runtime installation while gaining
 // speed benefits of pre-built images for common extension combinations.
 // =============================================================================
 func (sv *SchemaValidator) installExtensionsViaPackageManager(ctx context.Context, containerID string, extensions []string) error {
 	// Get PostgreSQL version from config for version-specific packages
-	postgresVersion := "15"
+	postgresVersion := "17"
 	if sv.config != nil && sv.config.PostgreSQLVersion != "" {
 		postgresVersion = sv.config.PostgreSQLVersion
 	}

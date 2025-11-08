@@ -327,7 +327,7 @@ pull_docker_images() {
     # Pull base images
     local images=(
         "postgres:17"
-        "postgres:15"
+        "postgres:17"
         "redis:7"
         "ghcr.io/capysquash/pgsquash:latest"
     )
