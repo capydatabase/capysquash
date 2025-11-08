@@ -583,6 +583,8 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 	switch category {
 	case types.CategoryExtensions:
 		info.RequiredFirst = true
+		// CRITICAL: Extract extension dependencies (e.g., earthdistance depends on cube)
+		info.Dependencies = append(info.Dependencies, udr.extractExtensionDependencies(sql)...)
 		info.Provides = append(info.Provides, udr.extractExtensionProvisions(sql)...)
 
 	case types.CategoryFoundation:
