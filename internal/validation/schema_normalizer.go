@@ -519,6 +519,18 @@ func CompareNormalizedSchemas(schema1, schema2 *NormalizedSchema) *SchemaDiff {
 	diff.compareObjects("Triggers", schema1.Triggers, schema2.Triggers)
 	diff.compareObjects("Views", schema1.Views, schema2.Views)
 
+	// BUG #3 FIX: If normalized schemas differ but no object-level differences were found,
+	// the differences must be in uncategorized statements (ALTER, GRANT, policies, etc.)
+	// Report this explicitly rather than showing empty diff output
+	if len(diff.Differences) == 0 {
+		// Try to identify what type of statements might be different
+		diff.Differences = append(diff.Differences, "Schemas differ in uncategorized statements (ALTER, GRANT, POLICY, SEQUENCE, or other DDL)")
+		diff.Differences = append(diff.Differences, "Note: Only CREATE statements are categorized for detailed comparison")
+
+		// Provide a hint about where differences might be
+		diff.addUncategorizedDiffHints(schema1.Normalized, schema2.Normalized)
+	}
+
 	return diff
 }
 
@@ -594,6 +606,49 @@ func normalizeForComparison(sql string) string {
 	normalized = strings.TrimSpace(normalized)
 
 	return normalized
+}
+
+// addUncategorizedDiffHints analyzes normalized schemas to provide hints about uncategorized differences
+// BUG #3 FIX: Helper function to identify what types of uncategorized statements differ
+func (sd *SchemaDiff) addUncategorizedDiffHints(norm1, norm2 string) {
+	// Count different statement types in each schema
+	statementTypes := []string{
+		"ALTER TABLE",
+		"ALTER SEQUENCE",
+		"CREATE POLICY",
+		"CREATE SEQUENCE",
+		"GRANT",
+		"REVOKE",
+		"COMMENT ON",
+		"ALTER DEFAULT PRIVILEGES",
+	}
+
+	for _, stmtType := range statementTypes {
+		count1 := strings.Count(strings.ToUpper(norm1), stmtType)
+		count2 := strings.Count(strings.ToUpper(norm2), stmtType)
+
+		if count1 != count2 {
+			sd.Differences = append(sd.Differences,
+				fmt.Sprintf("  - %s statements: %d in original, %d in squashed", stmtType, count1, count2))
+		}
+	}
+
+	// If still no hints, provide line count difference
+	if len(sd.Differences) <= 2 { // Only the initial 2 messages
+		lines1 := strings.Count(norm1, "\n")
+		lines2 := strings.Count(norm2, "\n")
+		sd.Differences = append(sd.Differences,
+			fmt.Sprintf("  - Schema line count: %d in original, %d in squashed (difference: %d lines)",
+				lines1, lines2, abs(lines1-lines2)))
+	}
+}
+
+// abs returns the absolute value of an integer
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // extractShortName extracts just the object name from a full definition
