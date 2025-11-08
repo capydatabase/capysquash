@@ -584,7 +584,9 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 	case types.CategoryExtensions:
 		info.RequiredFirst = true
 		// CRITICAL: Extract extension dependencies (e.g., earthdistance depends on cube)
+		// BUG #1 REGRESSION FIX: Add extension-to-extension dependencies
 		info.Dependencies = append(info.Dependencies, udr.extractExtensionDependencies(sql)...)
+		info.Dependencies = append(info.Dependencies, udr.extractExtensionToExtensionDependencies(sql)...)
 		info.Provides = append(info.Provides, udr.extractExtensionProvisions(sql)...)
 
 	case types.CategoryFoundation:
@@ -922,6 +924,40 @@ func (udr *UnifiedDependencyResolver) extractExtensionDependencies(sql string) [
 			if strings.Contains(lowercaseSQL, indicator) {
 				deps = append(deps, fmt.Sprintf("extension:%s", extension))
 				break
+			}
+		}
+	}
+
+	return deps
+}
+
+// extractExtensionToExtensionDependencies returns dependencies for CREATE EXTENSION statements
+// where the extension itself requires another extension to be installed first.
+// BUG #1 REGRESSION FIX: This ensures correct ordering of extension creation (e.g., cube before earthdistance)
+func (udr *UnifiedDependencyResolver) extractExtensionToExtensionDependencies(sql string) []string {
+	var deps []string
+
+	// Map of extension name -> required extensions
+	// These are hardcoded PostgreSQL extension dependencies
+	extensionRequirements := map[string][]string{
+		"earthdistance": {"cube"},           // earthdistance requires cube
+		"postgis_tiger_geocoder": {"postgis"}, // postgis_tiger_geocoder requires postgis
+		"postgis_topology": {"postgis"},     // postgis_topology requires postgis
+		"postgis_raster": {"postgis"},       // postgis_raster requires postgis
+		"address_standardizer": {"postgis"}, // address_standardizer requires postgis
+	}
+
+	// Extract which extension is being created
+	matches := patterns.CreateExtensionPattern.FindAllStringSubmatch(sql, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			extensionName := strings.ToLower(strings.TrimSpace(match[1]))
+
+			// Check if this extension has dependencies
+			if requiredExtensions, exists := extensionRequirements[extensionName]; exists {
+				for _, required := range requiredExtensions {
+					deps = append(deps, fmt.Sprintf("extension:%s", required))
+				}
 			}
 		}
 	}
