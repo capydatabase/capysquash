@@ -100,8 +100,8 @@ import (
 	"context"
 	"time"
 
-	internal_ai "github.com/CAPYSQUASH/pgsquash-engine/internal/ai"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/ai/providers"
+	internal_ai "github.com/capysquash/pgsquash-engine/internal/ai"
+	"github.com/capysquash/pgsquash-engine/internal/ai/providers"
 )
 
 // Re-export types from internal packages

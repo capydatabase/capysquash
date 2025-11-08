@@ -3,8 +3,8 @@ package tui
 import (
 	"fmt"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/styles"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/views"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/styles"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/views"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )

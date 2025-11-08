@@ -1,8 +1,8 @@
 package consolidation
 
 import (
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // ConsolidationRule interface for consolidation rules used by the squasher

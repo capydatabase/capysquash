@@ -3,7 +3,7 @@ package validation
 import (
 	"testing"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 func TestObjectID_QualifiedName(t *testing.T) {

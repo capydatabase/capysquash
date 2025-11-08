@@ -1,7 +1,7 @@
 package tracking
 
 import (
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // AddNode adds a node to the dependency graph

@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui"
+	"github.com/capysquash/pgsquash-engine/pkg/tui"
 )
 
 func main() {

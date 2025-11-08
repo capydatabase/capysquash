@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // FixCallback is called when a fix is applied, allowing tracking of transformations.

@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // FixFunctionLanguageConflicts fixes functions with conflicting VOLATILE/LANGUAGE placement.

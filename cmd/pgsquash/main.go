@@ -4,13 +4,13 @@ import (
 	"os"
 
 	// Use public API packages
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/cli"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/plugins"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/utils"
+	"github.com/capysquash/pgsquash-engine/pkg/cli"
+	"github.com/capysquash/pgsquash-engine/pkg/plugins"
+	"github.com/capysquash/pgsquash-engine/pkg/utils"
 
 	// Still need internal/errors for structured error handling
 	// This could be exported in the future if needed externally
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // pgsquash: The PostgreSQL migration consolidation engine

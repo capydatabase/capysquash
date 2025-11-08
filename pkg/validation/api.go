@@ -63,7 +63,7 @@ import (
 	"context"
 	"time"
 
-	internal_validation "github.com/CAPYSQUASH/pgsquash-engine/internal/validation"
+	internal_validation "github.com/capysquash/pgsquash-engine/internal/validation"
 )
 
 // Re-export types from internal package

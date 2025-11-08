@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/patterns"
+	"github.com/capysquash/pgsquash-engine/internal/patterns"
 )
 
 // deduplicatePublicationStatements removes duplicate ALTER PUBLICATION ADD TABLE statements from SQL

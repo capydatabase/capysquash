@@ -3,7 +3,7 @@ package utils
 import (
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/patterns"
+	"github.com/capysquash/pgsquash-engine/internal/patterns"
 )
 
 // ExtractPolicyTargetTable extracts the target table name from a CREATE POLICY statement.

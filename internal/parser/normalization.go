@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // NormalizationContext provides context for PostgreSQL identifier normalization

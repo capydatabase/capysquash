@@ -1,7 +1,7 @@
 package tracking
 
 import (
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/metadata"
+	"github.com/capysquash/pgsquash-engine/internal/metadata"
 )
 
 // Tracker is an alias for UnifiedTracker to maintain API compatibility

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 	"github.com/google/go-github/v57/github"
 	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v3"

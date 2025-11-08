@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+	"github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {

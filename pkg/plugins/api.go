@@ -62,11 +62,11 @@
 package plugins
 
 import (
-	internal_plugins "github.com/CAPYSQUASH/pgsquash-engine/internal/plugins"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins/clerk"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins/drizzle"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins/prisma"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins/supabase"
+	internal_plugins "github.com/capysquash/pgsquash-engine/internal/plugins"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/clerk"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/drizzle"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/prisma"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/supabase"
 )
 
 // RegisterDefault registers all built-in pgsquash plugins.
@@ -108,4 +108,4 @@ func RegisterDefault() error {
 // Note: Custom plugin registration is not exposed in the public API.
 // The Plugin interface is complex and considered internal.
 // If you need custom plugin support, please file an issue at:
-// https://github.com/CAPYSQUASH/pgsquash-engine/issues
+// https://github.com/capysquash/pgsquash-engine/issues

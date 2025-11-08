@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // SchemaNormalizer handles normalization of pg_dump output for reliable comparison

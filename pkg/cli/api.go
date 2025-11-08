@@ -5,7 +5,7 @@
 package cli
 
 import (
-	internal_cli "github.com/CAPYSQUASH/pgsquash-engine/internal/cli"
+	internal_cli "github.com/capysquash/pgsquash-engine/internal/cli"
 )
 
 // Execute runs the pgsquash CLI.

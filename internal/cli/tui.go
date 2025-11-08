@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui"
+	"github.com/capysquash/pgsquash-engine/pkg/tui"
 	"github.com/spf13/cobra"
 )
 

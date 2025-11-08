@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/viewtypes"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/viewtypes"
 )
 
 // Re-export types for convenience

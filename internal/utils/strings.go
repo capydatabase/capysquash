@@ -4,7 +4,7 @@ package utils
 import (
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/patterns"
+	"github.com/capysquash/pgsquash-engine/internal/patterns"
 )
 
 // NormalizeObjectName normalizes database object names (tables, columns, functions)

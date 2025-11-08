@@ -51,12 +51,12 @@ import (
 	"strings"
 	"time"
 
-	internal_config "github.com/CAPYSQUASH/pgsquash-engine/internal/config"
-	internal_parser "github.com/CAPYSQUASH/pgsquash-engine/internal/parser"
-	internal_squasher "github.com/CAPYSQUASH/pgsquash-engine/internal/squasher"
-	internal_tracking "github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	internal_types "github.com/CAPYSQUASH/pgsquash-engine/internal/types"
-	internal_utils "github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	internal_config "github.com/capysquash/pgsquash-engine/internal/config"
+	internal_parser "github.com/capysquash/pgsquash-engine/internal/parser"
+	internal_squasher "github.com/capysquash/pgsquash-engine/internal/squasher"
+	internal_tracking "github.com/capysquash/pgsquash-engine/internal/tracking"
+	internal_types "github.com/capysquash/pgsquash-engine/internal/types"
+	internal_utils "github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // SafetyLevel determines how aggressively migrations are consolidated.

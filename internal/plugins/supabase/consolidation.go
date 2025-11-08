@@ -1,8 +1,8 @@
 package supabase
 
 import (
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/plugins"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // GetConsolidationRules returns Supabase-specific consolidation rules

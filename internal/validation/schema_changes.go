@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/builder"
+	"github.com/capysquash/pgsquash-engine/internal/builder"
 )
 
 // TableCreateChange represents a table creation

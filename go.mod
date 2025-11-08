@@ -1,4 +1,4 @@
-module github.com/CAPYSQUASH/pgsquash-engine
+module github.com/capysquash/pgsquash-engine
 
 go 1.25.4
 

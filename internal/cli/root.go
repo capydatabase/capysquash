@@ -13,16 +13,16 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/ai"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/config"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/parser"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/squasher"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/transformation"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/validation"
+	"github.com/capysquash/pgsquash-engine/internal/ai"
+	"github.com/capysquash/pgsquash-engine/internal/config"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
+	"github.com/capysquash/pgsquash-engine/internal/squasher"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/internal/transformation"
+	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/validation"
 )
 
 var (

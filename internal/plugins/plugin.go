@@ -7,7 +7,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // Plugin represents a third-party service integration that can hook into

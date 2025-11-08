@@ -3,7 +3,7 @@ package postprocessing
 import (
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // FixExtensionOrder ensures extensions are in correct dependency order.

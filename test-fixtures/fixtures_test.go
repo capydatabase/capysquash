@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+	"github.com/capysquash/pgsquash-engine/pkg/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
