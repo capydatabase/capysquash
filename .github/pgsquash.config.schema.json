@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "pgsquash Repository Configuration",
+  "description": "Configuration for pgsquash migration analysis and consolidation behavior",
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable/disable pgsquash for this repository"
+    },
+    "auto_analyze": {
+      "type": "boolean",
+      "default": true,
+      "description": "Automatically analyze migrations when PRs are opened or updated"
+    },
+    "auto_pr": {
+      "type": "boolean",
+      "default": false,
+      "description": "Automatically create consolidation PRs when threshold is met"
+    },
+    "migration_threshold": {
+      "type": "integer",
+      "default": 15,
+      "minimum": 1,
+      "description": "Minimum number of migration files to trigger auto-consolidation"
+    },
+    "consolidation_ratio": {
+      "type": "number",
+      "default": 0.7,
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Maximum ratio (optimized/original) to trigger consolidation. Lower = more aggressive"
+    },
+    "safety_level": {
+      "type": "string",
+      "enum": ["paranoid", "conservative", "standard", "aggressive"],
+      "default": "standard",
+      "description": "Safety level for consolidation operations"
+    },
+    "migrations_dir": {
+      "type": "string",
+      "default": "migrations",
+      "description": "Path to migration directory (relative to repository root)"
+    },
+    "patterns": {
+      "type": "object",
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/*.sql"],
+          "description": "Glob patterns for files to include"
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/archive/**", "**/*.bak.sql", "**/*_test.sql"],
+          "description": "Glob patterns for files to exclude"
+        }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "properties": {
+        "enable_ai": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable AI-powered semantic analysis (requires API key)"
+        },
+        "show_cycle_details": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show detailed cycle detection information in analysis"
+        },
+        "cycle_depth": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Maximum depth for cycle detection"
+        }
+      }
+    },
+    "consolidation": {
+      "type": "object",
+      "properties": {
+        "output_dir": {
+          "type": "string",
+          "default": "migrations/consolidated",
+          "description": "Output directory for consolidated migrations"
+        },
+        "file_pattern": {
+          "type": "string",
+          "default": "{timestamp}_consolidated_{type}.sql",
+          "description": "File naming pattern. Variables: {timestamp}, {count}, {type}"
+        },
+        "group_by_type": {
+          "type": "boolean",
+          "default": true,
+          "description": "Group migrations by type (schema, data, etc.)"
+        },
+        "include_rollback": {
+          "type": "boolean",
+          "default": false,
+          "description": "Generate rollback scripts"
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "enable_docker": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Docker-based validation"
+        },
+        "docker_approach": {
+          "type": "string",
+          "enum": ["TWO_CONTAINERS", "TWO_DATABASES", "SCHEMA_DIFF"],
+          "default": "TWO_DATABASES",
+          "description": "Docker validation strategy"
+        },
+        "auto_fix_sql": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically fix common SQL issues"
+        },
+        "detect_extensions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically detect and install PostgreSQL extensions"
+        }
+      }
+    },
+    "comments": {
+      "type": "object",
+      "properties": {
+        "post_analysis": {
+          "type": "boolean",
+          "default": true,
+          "description": "Post analysis results as PR comments"
+        },
+        "show_redundancies": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include redundancy details in comments"
+        },
+        "show_suggestions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show optimization suggestions"
+        },
+        "max_redundancies_shown": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 1,
+          "description": "Maximum redundancies to display (rest collapsed)"
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "properties": {
+        "enable_streaming": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable streaming mode for large migration sets"
+        },
+        "batch_size": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "description": "Batch size for streaming processing"
+        },
+        "memory_limit_mb": {
+          "type": "integer",
+          "default": 256,
+          "minimum": 64,
+          "description": "Memory limit in MB"
+        }
+      }
+    },
+    "triggers": {
+      "type": "object",
+      "properties": {
+        "watch_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [
+            "migrations/**/*.sql",
+            "db/migrations/**/*.sql",
+            "supabase/migrations/**/*.sql"
+          ],
+          "description": "Paths to watch for migration files (for GitHub Actions/webhooks)"
+        },
+        "ignore_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [
+            "migrations/archive/**",
+            "**/*.bak.sql"
+          ],
+          "description": "Paths to ignore"
+        },
+        "required_labels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Required PR labels before auto-consolidation"
+        },
+        "blocking_labels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["do-not-consolidate", "wip"],
+          "description": "Labels that block auto-consolidation"
+        }
+      }
+    },
+    "team": {
+      "type": "object",
+      "properties": {
+        "require_approval": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require approval before consolidation"
+        },
+        "auto_assign_reviewers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Reviewers to auto-assign on consolidation PRs"
+        },
+        "notify_on_consolidation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send notifications when consolidation PRs are created"
+        },
+        "notification_webhook": {
+          "type": "string",
+          "default": "",
+          "description": "Webhook URL for notifications (Slack, Discord, etc.)"
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "properties": {
+        "enable_transformations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable SQL transformations and modernization"
+        },
+        "enable_backups": {
+          "type": "boolean",
+          "default": false,
+          "description": "Generate backup files before consolidation"
+        },
+        "enable_cycle_detection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable advanced DDL cycle detection"
+        },
+        "enable_function_dedup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable function deduplication"
+        },
+        "enable_dead_code_detection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable dead code detection"
+        }
+      }
+    }
+  },
+  "required": []
+}

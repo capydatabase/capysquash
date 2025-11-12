@@ -1,0 +1,120 @@
+# .capysquash.yml
+# CAPYSQUASH GitHub Integration Configuration
+# This file configures how CAPYSQUASH analyzes migrations in your repository
+
+# Enable/disable CAPYSQUASH for this repository
+enabled: true
+
+# Safety level for analysis: paranoid | conservative | standard | aggressive
+safety_level: standard
+
+# Minimum number of files to trigger consolidation suggestions
+migration_threshold: 15
+
+# File patterns to analyze
+include:
+  - "migrations/**/*.sql"
+  - "db/migrate/*.sql"
+  - "db/migrations/*.sql"
+  - "supabase/migrations/*.sql"
+  - "prisma/migrations/*.sql"
+
+# File patterns to exclude
+exclude:
+  - "**/seeds/**"
+  - "**/fixtures/**"
+  - "**/*_rollback.sql"
+  - "**/*_test.sql"
+
+# PR comment settings
+pr_comment:
+  enabled: true
+  update_existing: true
+  include_stats: true
+  include_warnings: true
+  include_recommendations: true
+
+# Pass/fail thresholds for GitHub checks
+checks:
+  # Fail PR if warnings exceed this number (0 = unlimited)
+  max_warnings: 5
+
+  # Fail PR if critical warnings found
+  fail_on_critical: true
+
+  # Fail PR on any warnings (strict mode)
+  fail_on_warnings: false
+
+  # Fail PR if data loss operations detected
+  fail_on_data_loss: true
+
+  # Require minimum file reduction percentage (0 = no requirement)
+  min_reduction_percent: 0
+
+  # Require at least some optimization
+  require_optimization: false
+
+  # Require specific indexes to exist
+  required_indexes:
+    # - table: "users"
+    #   column: "email"
+    # - table: "posts"
+    #   column: "author_id"
+
+# Notification settings
+notifications:
+  # GitHub users to notify (@username)
+  notify_users: []
+    # - "@tech-lead"
+    # - "@database-admin"
+
+  # Slack channel to post to (requires Slack integration)
+  slack_channel: ""
+    # slack_channel: "#migrations"
+
+# Auto-apply settings (⚠️ use with caution in production!)
+auto_apply:
+  enabled: false
+
+  # Only auto-apply for certain branches
+  branches: []
+    # - "development"
+    # - "staging"
+
+  # Never auto-apply for these branches
+  exclude_branches:
+    - "main"
+    - "master"
+    - "production"
+
+  # Require approval from these users before auto-applying
+  require_approval_from: []
+    # - "@tech-lead"
+
+# Monorepo support (optional)
+# Configure different settings for different services
+# projects:
+#   - name: "API Service"
+#     include:
+#       - "services/api/migrations/**/*.sql"
+#     safety_level: conservative
+#
+#   - name: "Auth Service"
+#     include:
+#       - "services/auth/db/migrations/**/*.sql"
+#     safety_level: standard
+#
+#   - name: "Analytics Service"
+#     include:
+#       - "services/analytics/migrations/**/*.sql"
+#     safety_level: aggressive
+
+# Branch-specific settings (optional)
+# Override settings for specific branches
+# branches:
+#   main:
+#     safety_level: conservative
+#     fail_on_warnings: true
+#   development:
+#     safety_level: aggressive
+#     fail_on_warnings: false

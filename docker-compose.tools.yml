@@ -1,0 +1,59 @@
+# pgsquash Development Tools
+# Optional tools for database management and file browsing
+# Extends docker-compose.yml
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.tools.yml up -d
+
+services:
+  # pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgsquash-pgadmin
+    restart: unless-stopped
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL:-admin@pgsquash.localhost}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD:-pgsquash_pgadmin}
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    networks:
+      - pgsquash-net
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    depends_on:
+      - postgres-primary
+    labels:
+      - "com.pgsquash.service=tools"
+      - "com.pgsquash.tool=pgadmin"
+
+  # File browser for managing migration files
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: pgsquash-filebrowser
+    restart: unless-stopped
+    volumes:
+      - ./:/srv
+      - filebrowser-data:/database
+    networks:
+      - pgsquash-net
+    ports:
+      - "${FILEBROWSER_PORT:-8081}:80"
+    environment:
+      - FB_DATABASE=/database/filebrowser.db
+      - FB_ROOT=/srv
+    labels:
+      - "com.pgsquash.service=tools"
+      - "com.pgsquash.tool=filebrowser"
+
+# Tool data volumes
+volumes:
+  pgadmin-data:
+    driver: local
+    labels:
+      - "com.pgsquash.volume=pgadmin-data"
+  filebrowser-data:
+    driver: local
+    labels:
+      - "com.pgsquash.volume=filebrowser-data"

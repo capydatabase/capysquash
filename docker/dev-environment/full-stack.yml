@@ -1,0 +1,118 @@
+version: '3.8'
+
+# Full Stack - Complete development environment
+# Includes: pgsquash + PostgreSQL + pgAdmin (optional)
+
+services:
+  pgsquash:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: pgsquash:latest
+    container_name: pgsquash-dev
+    restart: unless-stopped
+    environment:
+      - PGSQUASH_SAFETY_LEVEL=${PGSQUASH_SAFETY_LEVEL:-standard}
+      - PGSQUASH_LOG_LEVEL=${PGSQUASH_LOG_LEVEL:-info}
+      - PGSQUASH_DOCKER_ENABLED=true
+      - DATABASE_URL=${DATABASE_URL:-postgresql://pgsquash:pgsquash@postgres:5432/pgsquash}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - ${MIGRATIONS_DIR:-./migrations}:/app/migrations
+      - ${OUTPUT_DIR:-./output}:/app/output
+      - ${CONFIG_DIR:-./config}:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock
+      - pgsquash-logs:/app/logs
+    networks:
+      - pgsquash-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+
+  postgres:
+    image: postgres:17
+    container_name: pgsquash-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-pgsquash}
+      - POSTGRES_USER=${POSTGRES_USER:-pgsquash}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pgsquash}
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
+      - ../init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+    networks:
+      - pgsquash-net
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgsquash -d pgsquash"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgsquash-pgadmin
+    restart: unless-stopped
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL:-admin@pgsquash.local}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD:-admin}
+      - PGADMIN_LISTEN_PORT=80
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - pgsquash-net
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    profiles:
+      - "management"
+
+volumes:
+  postgres-data:
+    driver: local
+    labels:
+      - "pgsquash.volume=postgres"
+  pgsquash-logs:
+    driver: local
+    labels:
+      - "pgsquash.volume=logs"
+  pgadmin-data:
+    driver: local
+    labels:
+      - "pgsquash.volume=pgadmin"
+
+networks:
+  pgsquash-net:
+    driver: bridge
+    labels:
+      - "pgsquash.network=main"
+
+# Usage Examples:
+#
+# 1. Start core services (pgsquash + PostgreSQL):
+#    docker compose -f docker/dev-environment/full-stack.yml up -d
+#
+# 2. With management tools (pgAdmin):
+#    docker compose -f docker/dev-environment/full-stack.yml --profile management up -d
+#
+# 3. Run pgsquash command:
+#    docker compose -f docker/dev-environment/full-stack.yml exec pgsquash squash /app/migrations/*.sql
+#
+# 4. Access services:
+#    - pgAdmin: http://localhost:5050
+#    - PostgreSQL: localhost:5432
+#
+# 5. Stop all:
+#    docker compose -f docker/dev-environment/full-stack.yml down

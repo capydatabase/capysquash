@@ -1,0 +1,138 @@
+{
+  "safety_level": "standard",
+  "prod_db_dsn": "",
+  "output": {
+    "format": "organized",
+    "preserve_comments": true,
+    "add_consolidation_comments": true,
+    "file_naming": "semantic",
+    "directory": "squashed"
+  },
+  "rules": {
+    "table_operations": {
+      "consolidate_create_alter": true,
+      "remove_drop_create_cycles": true,
+      "preserve_data_operations": true
+    },
+    "index_operations": {
+      "consolidate_recreations": true,
+      "preserve_unique_constraints": true
+    },
+    "function_operations": {
+      "remove_duplicate_definitions": true,
+      "preserve_signature_changes": false
+    }
+  },
+  "exclude_patterns": [
+    "auth.*",
+    "extensions.*"
+  ],
+  "include_schemas": [
+    "public"
+  ],
+  "performance": {
+    "streaming_threshold_mb": 5,
+    "parallel_processing": true,
+    "show_progress": true
+  },
+  "modern_features": {
+    "enable_vector_support": true,
+    "enable_generated_columns": true,
+    "enable_event_sourcing": true,
+    "enable_merge_statements": true,
+    "enable_multirange_types": true,
+    "enable_advanced_rls": true
+  },
+  "conflict_resolution": {
+    "enable_priority_system": true,
+    "strict_mode_enabled": false,
+    "allow_overlapping_rules": false,
+    "conflict_log_level": "warn"
+  },
+  "postgresql_features": {
+    "target_version": "17",
+    "enabled_extensions": [
+      "vector",
+      "pg_stat_statements",
+      "uuid-ossp"
+    ],
+    "optimize_for_performance": true,
+    "use_modern_syntax": true,
+    "validate_compatibility": true
+  },
+  "third_party_integrations": {
+    "auth0_integration": {
+      "enabled": false,
+      "domain": "",
+      "custom_claims": [
+        "permissions",
+        "role"
+      ],
+      "role_claim_path": "https://myapp.com/role"
+    },
+    "nextauth_integration": {
+      "enabled": false,
+      "session_strategy": "database",
+      "database_tables": [
+        "accounts",
+        "sessions",
+        "users"
+      ]
+    },
+    "supabase_integration": {
+      "enabled": true,
+      "jwt_secret": "",
+      "enable_rls": true,
+      "storage_integration": true
+    },
+    "clerk_integration": {
+      "enabled": false,
+      "jwt_version": "v2",
+      "organization_support": true,
+      "public_metadata_support": true
+    },
+    "vector_integration": {
+      "enabled": true,
+      "default_index_type": "ivfflat",
+      "optimize_queries": true,
+      "supported_ops": [
+        "vector_cosine_ops",
+        "vector_l2_ops",
+        "vector_ip_ops"
+      ]
+    },
+    "planetscale_integration": {
+      "enabled": false,
+      "disable_foreign_keys": true,
+      "optimize_for_replication": true
+    }
+  },
+  "plugins": {
+    "auto_detect": true,
+    "enabled_plugins": [],
+    "disabled_plugins": [],
+    "verbose": false
+  },
+  "validation": {
+    "mode": "TWO_DATABASES",
+    "docker_image": "postgres:17",
+    "timeout_seconds": 120,
+    "container_ready_timeout": 300,
+    "enable_extension_detection": true,
+    "auto_install_extensions": true,
+    "enable_sql_fixes": false,
+    "verbose": true
+  },
+  "ai": {
+    "enabled": false,
+    "provider": "auto",
+    "max_retries": 3,
+    "timeout_seconds": 60,
+    "enable_semantic_analysis": false,
+    "enable_dead_code_detection": false,
+    "enable_auth_pattern_detection": true,
+    "enable_post_processing_validation": false,
+    "enable_auto_repair": false,
+    "confidence_threshold": 0.85
+  }
+}

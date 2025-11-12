@@ -1,0 +1,346 @@
+package plugins
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/capysquash/pgsquash-engine/internal/types"
+)
+
+// PluginInfo contains metadata about a plugin
+type PluginInfo struct {
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Description string   `json:"description"`
+	Provider    string   `json:"provider"`
+	Detected    bool     `json:"detected"`
+	Patterns    []string `json:"patterns"`
+}
+
+// DetectionResult contains the results of plugin detection
+type DetectionResult struct {
+	Detected []PluginInfo          `json:"detected"`
+	Count    int                   `json:"count"`
+	Details  map[string][]string   `json:"details"` // Plugin name -> detected patterns
+}
+
+// CompatibilityMatrix describes plugin compatibility
+type CompatibilityMatrix struct {
+	Compatible   []string          `json:"compatible"`
+	Incompatible []string          `json:"incompatible"`
+	Warnings     []string          `json:"warnings"`
+	Details      map[string]string `json:"details"` // Plugin name -> compatibility note
+}
+
+// GetAvailablePlugins returns information about all available plugins
+func GetAvailablePlugins() []PluginInfo {
+	return []PluginInfo{
+		{
+			Name:        "supabase",
+			Version:     "1.0.0",
+			Description: "Supabase integration with RLS policy optimization, auth schema handling, and storage integration",
+			Provider:    "supabase",
+			Patterns: []string{
+				"auth.users",
+				"storage.objects",
+				"storage.buckets",
+				"RLS policies",
+				"supabase_realtime.*",
+			},
+		},
+		{
+			Name:        "clerk",
+			Version:     "1.0.0",
+			Description: "Clerk authentication integration with JWT v2 support and organization handling",
+			Provider:    "clerk",
+			Patterns: []string{
+				"clerk_user_id columns",
+				"clerk_org_id columns",
+				"Clerk JWT patterns",
+			},
+		},
+		{
+			Name:        "prisma",
+			Version:     "1.0.0",
+			Description: "Prisma ORM integration with migration table handling and shadow database optimizations",
+			Provider:    "prisma",
+			Patterns: []string{
+				"_prisma_migrations table",
+				"@@map, @@index directives",
+				"Prisma-specific naming",
+			},
+		},
+		{
+			Name:        "drizzle",
+			Version:     "1.0.0",
+			Description: "Drizzle ORM integration with identity column preference and sequence optimization",
+			Provider:    "drizzle",
+			Patterns: []string{
+				"drizzle schema patterns",
+				"Identity columns",
+				"Drizzle-style migrations",
+			},
+		},
+	}
+}
+
+// GetPluginInfo returns information about a specific plugin
+func GetPluginInfo(name string) (*PluginInfo, error) {
+	plugins := GetAvailablePlugins()
+	for _, plugin := range plugins {
+		if plugin.Name == name {
+			return &plugin, nil
+		}
+	}
+	return nil, fmt.Errorf("plugin not found: %s", name)
+}
+
+// DetectPlugins analyzes SQL migrations and detects which plugins are applicable
+func DetectPlugins(ctx context.Context, migrations []string) (*DetectionResult, error) {
+	result := &DetectionResult{
+		Detected: []PluginInfo{},
+		Details:  make(map[string][]string),
+	}
+
+	// Combine all migrations into one string for pattern matching
+	combinedSQL := strings.Join(migrations, "\n")
+
+	// Detect each plugin using pattern matching
+	availablePlugins := GetAvailablePlugins()
+
+	for _, info := range availablePlugins {
+		detected := detectPluginPatterns(combinedSQL, info.Name)
+		if detected {
+			info.Detected = true
+			result.Detected = append(result.Detected, info)
+			result.Details[info.Name] = detectPatterns(combinedSQL, info.Name)
+		}
+	}
+
+	result.Count = len(result.Detected)
+	return result, nil
+}
+
+// detectPatterns finds which specific patterns were detected for a plugin
+func detectPatterns(sql, pluginName string) []string {
+	patterns := []string{}
+	sqlLower := strings.ToLower(sql)
+
+	switch pluginName {
+	case "supabase":
+		if strings.Contains(sqlLower, "auth.users") {
+			patterns = append(patterns, "auth.users table")
+		}
+		if strings.Contains(sqlLower, "storage.objects") {
+			patterns = append(patterns, "storage.objects table")
+		}
+		if strings.Contains(sqlLower, "storage.buckets") {
+			patterns = append(patterns, "storage.buckets table")
+		}
+		if strings.Contains(sqlLower, "enable row level security") || strings.Contains(sqlLower, "create policy") {
+			patterns = append(patterns, "RLS policies")
+		}
+		if strings.Contains(sqlLower, "supabase_realtime") {
+			patterns = append(patterns, "Realtime schema")
+		}
+
+	case "clerk":
+		if strings.Contains(sqlLower, "clerk_user_id") {
+			patterns = append(patterns, "clerk_user_id columns")
+		}
+		if strings.Contains(sqlLower, "clerk_org_id") {
+			patterns = append(patterns, "clerk_org_id columns")
+		}
+
+	case "prisma":
+		if strings.Contains(sqlLower, "_prisma_migrations") {
+			patterns = append(patterns, "_prisma_migrations table")
+		}
+
+	case "drizzle":
+		if strings.Contains(sqlLower, "generated always as identity") ||
+			strings.Contains(sqlLower, "generated by default as identity") {
+			patterns = append(patterns, "Identity columns")
+		}
+	}
+
+	return patterns
+}
+
+// detectPluginPatterns checks if a plugin's patterns are present in SQL
+func detectPluginPatterns(sql, pluginName string) bool {
+	sqlLower := strings.ToLower(sql)
+
+	switch pluginName {
+	case "supabase":
+		return strings.Contains(sqlLower, "auth.users") ||
+			strings.Contains(sqlLower, "storage.objects") ||
+			strings.Contains(sqlLower, "storage.buckets") ||
+			strings.Contains(sqlLower, "enable row level security") ||
+			strings.Contains(sqlLower, "create policy")
+
+	case "clerk":
+		return strings.Contains(sqlLower, "clerk_user_id") ||
+			strings.Contains(sqlLower, "clerk_org_id")
+
+	case "prisma":
+		return strings.Contains(sqlLower, "_prisma_migrations")
+
+	case "drizzle":
+		return strings.Contains(sqlLower, "generated always as identity") ||
+			strings.Contains(sqlLower, "generated by default as identity")
+	}
+
+	return false
+}
+
+// DetectFromTypes detects plugins from parsed migration types
+func DetectFromTypes(ctx context.Context, migrations []*types.Migration) (*DetectionResult, error) {
+	// Extract SQL from migrations
+	sqlStrings := make([]string, len(migrations))
+	for i, migration := range migrations {
+		// Concatenate statement SQL from migration
+		if len(migration.Statements) > 0 {
+			for _, stmt := range migration.Statements {
+				sqlStrings[i] += stmt.SQL + ";\n"
+			}
+		}
+	}
+
+	return DetectPlugins(ctx, sqlStrings)
+}
+
+// CheckCompatibility checks compatibility between multiple detected plugins
+func CheckCompatibility(pluginNames []string) (*CompatibilityMatrix, error) {
+	matrix := &CompatibilityMatrix{
+		Compatible:   []string{},
+		Incompatible: []string{},
+		Warnings:     []string{},
+		Details:      make(map[string]string),
+	}
+
+	// All current plugins are compatible with each other
+	for _, name := range pluginNames {
+		matrix.Compatible = append(matrix.Compatible, name)
+		matrix.Details[name] = "Compatible with all other detected plugins"
+	}
+
+	// Add specific compatibility notes
+	hasSupabase := contains(pluginNames, "supabase")
+	hasClerk := contains(pluginNames, "clerk")
+	hasPrisma := contains(pluginNames, "prisma")
+	hasDrizzle := contains(pluginNames, "drizzle")
+
+	if hasSupabase && hasClerk {
+		matrix.Warnings = append(matrix.Warnings,
+			"Both Supabase and Clerk auth detected - ensure only one is actively used for authentication")
+	}
+
+	if hasPrisma && hasDrizzle {
+		matrix.Warnings = append(matrix.Warnings,
+			"Both Prisma and Drizzle ORMs detected - using multiple ORMs may cause conflicts")
+	}
+
+	if hasSupabase {
+		matrix.Details["supabase"] = "Supabase auth/storage schemas will be preserved and optimized"
+	}
+
+	if hasClerk {
+		matrix.Details["clerk"] = "Clerk user/org ID columns will be preserved"
+	}
+
+	if hasPrisma {
+		matrix.Details["prisma"] = "Prisma migration history will be preserved"
+	}
+
+	if hasDrizzle {
+		matrix.Details["drizzle"] = "Identity columns will be preferred over sequences"
+	}
+
+	return matrix, nil
+}
+
+// contains checks if a slice contains a string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// GetOptimizations returns available optimizations for detected plugins
+func GetOptimizations(pluginNames []string) map[string][]string {
+	optimizations := make(map[string][]string)
+
+	for _, name := range pluginNames {
+		switch name {
+		case "supabase":
+			optimizations["supabase"] = []string{
+				"Consolidate RLS policies",
+				"Optimize auth schema references",
+				"Preserve storage triggers",
+				"Handle realtime schema correctly",
+			}
+		case "clerk":
+			optimizations["clerk"] = []string{
+				"Preserve Clerk user/org ID columns",
+				"Optimize JWT v2 patterns",
+				"Handle organization relationships",
+			}
+		case "prisma":
+			optimizations["prisma"] = []string{
+				"Preserve _prisma_migrations table",
+				"Optimize shadow database operations",
+				"Handle Prisma-specific naming conventions",
+			}
+		case "drizzle":
+			optimizations["drizzle"] = []string{
+				"Prefer identity columns over sequences",
+				"Optimize Drizzle migration patterns",
+				"Preserve drizzle schema metadata",
+			}
+		}
+	}
+
+	return optimizations
+}
+
+// ValidatePluginConfiguration validates plugin-specific configuration
+func ValidatePluginConfiguration(pluginName string, config map[string]interface{}) error {
+	// Get plugin info to validate it exists
+	_, err := GetPluginInfo(pluginName)
+	if err != nil {
+		return err
+	}
+
+	// Basic validation - ensure config is not nil if provided
+	if config == nil {
+		return nil // nil config is valid (uses defaults)
+	}
+
+	// Plugin-specific validation
+	switch pluginName {
+	case "supabase":
+		// Validate Supabase config
+		if _, ok := config["enabled"].(bool); !ok && config["enabled"] != nil {
+			return fmt.Errorf("supabase config 'enabled' must be boolean")
+		}
+	case "clerk":
+		// Validate Clerk config
+		if version, ok := config["jwt_version"].(string); ok {
+			if version != "v1" && version != "v2" {
+				return fmt.Errorf("clerk jwt_version must be 'v1' or 'v2'")
+			}
+		}
+	case "prisma", "drizzle":
+		// Basic validation for ORM plugins
+		if _, ok := config["enabled"].(bool); !ok && config["enabled"] != nil {
+			return fmt.Errorf("%s config 'enabled' must be boolean", pluginName)
+		}
+	}
+
+	return nil
+}

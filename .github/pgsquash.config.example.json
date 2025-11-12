@@ -1,0 +1,68 @@
+{
+  "$schema": "./pgsquash.config.schema.json",
+  "enabled": true,
+  "auto_analyze": true,
+  "auto_pr": false,
+  "migration_threshold": 15,
+  "consolidation_ratio": 0.7,
+  "safety_level": "standard",
+  "migrations_dir": "migrations",
+  "patterns": {
+    "include": ["**/*.sql"],
+    "exclude": ["**/archive/**", "**/*.bak.sql", "**/*_test.sql"]
+  },
+  "analysis": {
+    "enable_ai": false,
+    "show_cycle_details": true,
+    "cycle_depth": 10
+  },
+  "consolidation": {
+    "output_dir": "migrations/consolidated",
+    "file_pattern": "{timestamp}_consolidated_{type}.sql",
+    "group_by_type": true,
+    "include_rollback": false
+  },
+  "validation": {
+    "enable_docker": true,
+    "docker_approach": "TWO_DATABASES",
+    "auto_fix_sql": false,
+    "detect_extensions": true
+  },
+  "comments": {
+    "post_analysis": true,
+    "show_redundancies": true,
+    "show_suggestions": true,
+    "max_redundancies_shown": 5
+  },
+  "performance": {
+    "enable_streaming": true,
+    "batch_size": 50,
+    "memory_limit_mb": 256
+  },
+  "triggers": {
+    "watch_paths": [
+      "migrations/**/*.sql",
+      "db/migrations/**/*.sql",
+      "supabase/migrations/**/*.sql"
+    ],
+    "ignore_paths": [
+      "migrations/archive/**",
+      "**/*.bak.sql"
+    ],
+    "required_labels": [],
+    "blocking_labels": ["do-not-consolidate", "wip"]
+  },
+  "team": {
+    "require_approval": false,
+    "auto_assign_reviewers": [],
+    "notify_on_consolidation": false,
+    "notification_webhook": ""
+  },
+  "features": {
+    "enable_transformations": true,
+    "enable_backups": false,
+    "enable_cycle_detection": true,
+    "enable_function_dedup": true,
+    "enable_dead_code_detection": true
+  }
+}
