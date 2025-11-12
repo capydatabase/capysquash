@@ -599,118 +599,11 @@ func (st *SQLTransformer) fixCommentSyntax(sql string, result *TransformationRes
 	return sql
 }
 
-// normalizeLanguagePosition moves LANGUAGE clauses from after-body to before-AS position.
-// This standardizes function syntax before adding volatility markers.
+// fixFunctionVolatilityMarkers checks for the presence of volatility markers in functions.
 //
-// Problem:
-// pg_query.Deparse() preserves original function syntax, which may have:
-//   Format A: CREATE FUNCTION foo() RETURNS text AS $$ ... $$ LANGUAGE plpgsql;
-//   Format B: CREATE FUNCTION foo() RETURNS text LANGUAGE plpgsql AS $$ ... $$;
-//
-// When we add VOLATILE markers (before AS), Format A creates invalid syntax:
-//   Invalid: CREATE FUNCTION foo() RETURNS text VOLATILE AS $$ ... $$ LANGUAGE plpgsql;
-//   (VOLATILE before AS conflicts with LANGUAGE after body)
-//
-// Solution:
-// Normalize all functions to Format B BEFORE adding volatility markers:
-//   Format A → Format B: Move LANGUAGE from after-body to before-AS
-//   Then adding VOLATILE works: LANGUAGE plpgsql VOLATILE AS $$ ... $$
-//
-// PostgreSQL Rule:
-// When volatility markers (VOLATILE/STABLE/IMMUTABLE) appear before AS $$,
-// the LANGUAGE clause must also appear before AS $$, not after the function body.
-func (st *SQLTransformer) normalizeLanguagePosition(sql string) string {
-	// Match ONE function at a time using terminating semicolon
-	// Pattern: CREATE FUNCTION ... AS $$ body $$ LANGUAGE plpgsql ... ;
-	//
-	// We match up to the FIRST semicolon after LANGUAGE clause to avoid
-	// matching multiple functions as one and corrupting the output.
-	//
-	// Group 1: CREATE [OR REPLACE] FUNCTION [schema.]name(...) RETURNS type
-	// Group 2: Optional modifiers before AS (SECURITY DEFINER, etc.) - but NOT LANGUAGE
-	// Group 3: AS $$
-	// Group 4: Function body
-	// Group 5: $$
-	// Group 6: LANGUAGE clause (e.g., "LANGUAGE plpgsql")
-	// Group 7: Optional modifiers after LANGUAGE (SECURITY DEFINER, VOLATILE, etc.)
-	// Group 8: Terminating semicolon
-	pattern := regexp.MustCompile(
-		`(?ims)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[a-z_][a-z0-9_]*\.)?[a-z_][a-z0-9_]*\s*\([^)]*\)\s*RETURNS\s+(?:TABLE\s*\([^)]+\)|SETOF\s+[^\s]+|[^\s]+))((?:\s+(?:SECURITY\s+DEFINER|SET\s+[^\s]+\s*=\s*[^\s]+|VOLATILE|STABLE|IMMUTABLE))*?)(\s+AS\s+\$\$)([\s\S]*?)(\$\$)\s+(LANGUAGE\s+[a-z]+)((?:\s+(?:SECURITY\s+DEFINER|VOLATILE|STABLE|IMMUTABLE))*?)\s*;`,
-	)
-
-	matches := pattern.FindAllStringSubmatchIndex(sql, -1)
-	if len(matches) == 0 {
-		return sql // No functions with post-body LANGUAGE found
-	}
-
-	transformedSQL := sql
-	offset := 0
-	fixedCount := 0
-
-	for _, match := range matches {
-		if len(match) < 16 {
-			continue
-		}
-
-		// Extract parts from capture groups
-		signature := transformedSQL[match[2]+offset : match[3]+offset]           // Group 1: CREATE FUNCTION...RETURNS type
-		preModifiers := transformedSQL[match[4]+offset : match[5]+offset]        // Group 2: Existing modifiers before AS
-		asKeyword := transformedSQL[match[6]+offset : match[7]+offset]           // Group 3: AS $$
-		body := transformedSQL[match[8]+offset : match[9]+offset]                // Group 4: function body
-		closingDelim := transformedSQL[match[10]+offset : match[11]+offset]      // Group 5: $$
-		languageClause := transformedSQL[match[12]+offset : match[13]+offset]    // Group 6: LANGUAGE plpgsql
-		postModifiers := transformedSQL[match[14]+offset : match[15]+offset]     // Group 7: Modifiers after LANGUAGE
-
-		// Build normalized function:
-		// signature + preModifiers + LANGUAGE + postModifiers + AS $$ + body + $$;
-		normalizedPreMods := strings.TrimSpace(preModifiers)
-		normalizedLang := strings.TrimSpace(languageClause)
-		normalizedPostMods := strings.TrimSpace(postModifiers)
-
-		// Combine all modifiers in correct order: pre + LANGUAGE + post
-		var allModifiers string
-		if normalizedPreMods != "" {
-			allModifiers = normalizedPreMods
-		}
-		if normalizedLang != "" {
-			if allModifiers != "" {
-				allModifiers += " "
-			}
-			allModifiers += normalizedLang
-		}
-		if normalizedPostMods != "" {
-			if allModifiers != "" {
-				allModifiers += " "
-			}
-			allModifiers += normalizedPostMods
-		}
-
-		// Reconstruct: signature + " " + allModifiers + AS $$ + body + $$;
-		var normalizedFunction string
-		if allModifiers != "" {
-			normalizedFunction = signature + " " + allModifiers + asKeyword + body + closingDelim + ";"
-		} else {
-			normalizedFunction = signature + asKeyword + body + closingDelim + ";"
-		}
-
-		// Replace the entire matched function (from CREATE to semicolon)
-		oldFunctionStart := match[0] + offset
-		oldFunctionEnd := match[1] + offset // Includes the semicolon
-		oldFunction := transformedSQL[oldFunctionStart:oldFunctionEnd]
-
-		transformedSQL = transformedSQL[:oldFunctionStart] + normalizedFunction + transformedSQL[oldFunctionEnd:]
-		offset += len(normalizedFunction) - len(oldFunction)
-		fixedCount++
-	}
-
-	if fixedCount > 0 {
-		utils.GetDefaultLogger().WithPrefix("SQL-TRANSFORM").Info("Normalized LANGUAGE position in %d functions (moved from after-body to before-AS)", fixedCount)
-	}
-
-	return transformedSQL
-}
-
-// fixFunctionVolatilityMarkers adds STABLE/IMMUTABLE/VOLATILE markers to functions without them.
+// NOTE: This function currently performs read-only validation and logging.
+// It does NOT automatically add volatility markers. The previous approach of automatically
+// adding volatility markers was too aggressive and caused schema differences after squashing.
 //
 // PostgreSQL Requirement:
 // Functions used in index predicates (CREATE INDEX ... WHERE function(...)) MUST have
@@ -722,22 +615,12 @@ func (st *SQLTransformer) normalizeLanguagePosition(sql string) string {
 // - STABLE: Reads database/session state but doesn't modify it (e.g., auth.jwt(), current_user)
 // - VOLATILE: Modifies data or has side effects (e.g., INSERT, UPDATE, nextval())
 //
-// This transformation:
-// 1. Finds all CREATE FUNCTION statements without volatility markers
-// 2. Analyzes function body to determine appropriate volatility
-// 3. Injects marker before AS keyword
-//
-// Common Use Cases:
-// - Clerk/Supabase auth functions (clerk_user_id, clerk_is_admin) → STABLE
-// - Trigger functions with INSERT/UPDATE → VOLATILE
-// - Calculation functions → IMMUTABLE
+// If a function needs a volatility marker, it should be present in the original SQL
+// or added manually by the developer.
 //
 // Implementation Note:
 // This runs BEFORE pg_query.Parse() because the parser can fail on complex migrations.
 // Uses regex-based detection instead of AST analysis.
-//
-// IMPORTANT: Call normalizeLanguagePosition() BEFORE this function to ensure
-// LANGUAGE clauses are in the correct position (before AS, not after body).
 func (st *SQLTransformer) fixFunctionVolatilityMarkers(ctx context.Context, sql string, result *TransformationResult) (string, error) {
 	// Regex Pattern Explanation:
 	// (?ims) - Case insensitive, multiline, dot matches newline
