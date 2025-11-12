@@ -76,7 +76,6 @@ func (r *CreateAlterConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle
 	// Build consolidated CREATE statement by actually integrating ALTER operations
 	consolidatedSQL := integrateAlterIntoCreate(createStmt, alterStmts)
 
-	// CRITICAL FIX: pg_query deparser sometimes corrupts char_length() to char_char_length()
 	// This happens when deparsing CHECK constraints with char_length() function calls
 	// Fix it immediately after consolidation to prevent corruption in output
 	if strings.Contains(consolidatedSQL, "char_char_length") {
@@ -84,8 +83,6 @@ func (r *CreateAlterConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle
 		consolidatedSQL = strings.ReplaceAll(consolidatedSQL, "char_char_length", "char_length")
 	}
 
-	// BUGFIX Bug #5: Ensure consolidated SQL always ends with semicolon
-	// This is critical for when separate ALTER statements (like RLS) are appended later by the engine
 	consolidatedSQL = strings.TrimRight(consolidatedSQL, " \t\n")
 	if !strings.HasSuffix(consolidatedSQL, ";") {
 		consolidatedSQL += ";"
@@ -136,7 +133,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 		return integrateAlterTypeIntoCreate(createSQL, alterStmts)
 	}
 
-	// BUG FIX #5b: Extract existing columns from base CREATE to avoid duplicates
+	// Extract existing columns from base CREATE to avoid duplicates
 	existingColumns := extractColumnsFromCreate(createSQL)
 
 	// Extract column additions and constraints from ALTER statements
@@ -157,7 +154,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 		}
 
 		if strings.Contains(strings.ToUpper(alterSQL), "ADD COLUMN") {
-			// BUG FIX #5c: Handle ALTER statements with multiple ADD COLUMN operations
+			// Handle ALTER statements with multiple ADD COLUMN operations
 			// Example: ALTER TABLE foo ADD COLUMN a TEXT, ADD COLUMN b INT;
 			// We need to extract each column separately
 			columns := extractMultipleAddColumnsFromAlter(alterSQL)
@@ -170,7 +167,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 				// Extract column name (first word of the definition)
 				columnName := extractColumnName(columnDef)
 
-				// BUG FIX #5b: Skip if column already exists in base CREATE
+				// Skip if column already exists in base CREATE
 				if _, existsInCreate := existingColumns[columnName]; existsInCreate {
 					utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Info(
 						"Skipping duplicate column '%s' - already exists in base CREATE for %s",
@@ -194,7 +191,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 				columnDefinitions[columnName] = columnDef
 			}
 		} else if strings.Contains(strings.ToUpper(alterSQL), "ADD CONSTRAINT") {
-			// BUG FIX #5d: Skip constraints inside DO blocks (they have conditional logic)
+			// Skip constraints inside DO blocks (they have conditional logic)
 			if strings.Contains(strings.ToUpper(alterSQL), "DO $$") || strings.Contains(strings.ToUpper(alterSQL), "DO $BODY$") {
 				utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Info(
 					"Skipping constraint in DO block for %s - preserving conditional logic",
@@ -203,9 +200,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 			}
 			// Extract constraint definition from ADD CONSTRAINT statement
 			if constraintDef := extractConstraintFromAddStatement(alterSQL); constraintDef != "" {
-				// BUG FIX #9 (myroomie duplicate constraint): Check if constraint already exists inline in CREATE statement
-				// Example: portfolio_size INTEGER CHECK (portfolio_size >= 0) creates inline constraint
-				// that conflicts with: CONSTRAINT profiles_portfolio_size_check CHECK (...)
+				// Check if constraint already exists inline in CREATE statement
 				if !constraintExistsInline(createSQL, constraintDef) {
 					addedConstraints = append(addedConstraints, constraintDef)
 				} else {
@@ -241,7 +236,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 		createSQL = integrateColumnsAndConstraintsIntoCreate(createSQL, addedColumns, addedConstraints)
 	}
 
-	// BUGFIX Bug #1: Ensure CREATE TABLE always ends with semicolon
+	// Ensure CREATE TABLE always ends with semicolon
 	// Even if no columns/constraints were added, we still need a semicolon
 	// because pg_query.SplitWithScanner strips semicolons during parsing
 	createSQL = strings.TrimRight(createSQL, " \t\n")
@@ -257,40 +252,6 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 	}
 
 	return createSQL
-}
-
-// extractColumnFromAddStatement extracts the column definition from ALTER TABLE ADD COLUMN
-func extractColumnFromAddStatement(alterSQL string) string {
-	upperSQL := strings.ToUpper(alterSQL)
-	addColIndex := strings.Index(upperSQL, "ADD COLUMN")
-	if addColIndex == -1 {
-		return ""
-	}
-
-	// Extract everything after "ADD COLUMN"
-	afterAddCol := strings.TrimSpace(alterSQL[addColIndex+len("ADD COLUMN"):])
-
-	// Remove trailing semicolon
-	afterAddCol = strings.TrimRight(afterAddCol, ";")
-
-	// Strip "IF NOT EXISTS" clause - it's not valid inside CREATE TABLE column definitions
-	// We need to preserve case-sensitive column names, so use regex to strip only the IF NOT EXISTS part
-	upperAfterCol := strings.ToUpper(afterAddCol)
-	if strings.HasPrefix(upperAfterCol, "IF NOT EXISTS ") {
-		// Remove the first "IF NOT EXISTS " (case-insensitive)
-		afterAddCol = strings.TrimSpace(afterAddCol[len("IF NOT EXISTS "):])
-	}
-
-	// Normalize multi-line column definitions (e.g., when CHECK is on next line)
-	// Replace newlines with spaces to keep the column definition on one logical line
-	afterAddCol = strings.ReplaceAll(afterAddCol, "\n", " ")
-	// Clean up multiple consecutive spaces
-	for strings.Contains(afterAddCol, "  ") {
-		afterAddCol = strings.ReplaceAll(afterAddCol, "  ", " ")
-	}
-	afterAddCol = strings.TrimSpace(afterAddCol)
-
-	return afterAddCol
 }
 
 // extractMultipleAddColumnsFromAlter extracts multiple column definitions from a single ALTER statement
@@ -372,7 +333,7 @@ func extractConstraintFromAddStatement(alterSQL string) string {
 
 		if strings.Contains(upperLine, "ADD CONSTRAINT") {
 			inConstraint = true
-			// BUG FIX #5e: Find position in original line (case-insensitive)
+			// Find position in original line (case-insensitive)
 			// Use case-insensitive search to find the actual position
 			addConstIndex := strings.Index(upperLine, "ADD CONSTRAINT")
 			// Calculate the position in the trimmed line
@@ -418,7 +379,6 @@ func extractColumnName(columnDef string) string {
 // constraintExistsInline checks if a constraint condition already exists inline in the CREATE statement
 // Example: CREATE TABLE t (col INTEGER CHECK (col >= 0)) has inline constraint
 // that would conflict with: CONSTRAINT t_col_check CHECK (col IS NULL OR col >= 0)
-// BUG FIX #9 (myroomie duplicate constraint)
 func constraintExistsInline(createSQL string, constraintDef string) bool {
 	// Extract the constraint condition (the CHECK part)
 	upperConstraint := strings.ToUpper(constraintDef)
