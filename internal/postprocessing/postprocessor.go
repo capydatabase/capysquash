@@ -99,8 +99,6 @@ func (p *Processor) Apply(sql string, enumReplacements map[string]string) (strin
 	p.logger.Info("Removing duplicate trailing LANGUAGE clauses")
 	sql = FixRedundantTrailingLanguageClauses(sql)
 
-	// Fix incorrect LANGUAGE declarations (e.g., LANGUAGE SQL for functions with BEGIN/END)
-	// This is critical because AST normalization might add the wrong LANGUAGE
 	p.logger.Info("Fixing incorrect LANGUAGE declarations (SQL → plpgsql for functions with plpgsql constructs)")
 	sql = FixIncorrectLanguageDeclarations(sql)
 
@@ -139,11 +137,8 @@ func (p *Processor) Apply(sql string, enumReplacements map[string]string) (strin
 	}
 
 	// ================================================================
-	// PHASE 5: Statement Formatting (BUG #2 FIX)
+	// PHASE 5: Statement Formatting
 	// ================================================================
-	// Add proper spacing and formatting between statements to fix
-	// Bug #2 where multiple CREATE FUNCTION statements are concatenated
-	// without line breaks, making output unreadable
 	p.logger.Info("Phase 5: Statement formatting (adding proper spacing)")
 	sql = EnsureStatementSpacing(sql)
 

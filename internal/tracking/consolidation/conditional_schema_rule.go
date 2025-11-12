@@ -133,7 +133,6 @@ func (r *ConditionalSchemaRule) analyzeFinalConditionalState(lifecycle *tracking
 func (r *ConditionalSchemaRule) generateConditionalSQL(lifecycle *tracking.ObjectLifecycle, state *ConditionalState) string {
 	if !state.ShouldExist {
 		// If final state is that object shouldn't exist, use DROP IF EXISTS
-		// CRITICAL FIX: Check for UNKNOWN type to prevent invalid SQL generation
 		if lifecycle.Type == types.TypeUnknown || lifecycle.Type == "" {
 			// Cannot generate valid DROP statement for unknown object types
 			// Log warning and skip DROP statement
@@ -155,7 +154,7 @@ func (r *ConditionalSchemaRule) generateConditionalSQL(lifecycle *tracking.Objec
 			}
 		}
 
-		// BUG #2 FIX: DROP TRIGGER also requires ON tablename clause
+		// DROP TRIGGER also requires ON tablename clause
 		// Syntax: DROP TRIGGER [IF EXISTS] trigger_name ON table_name
 		if lifecycle.Type == types.TypeTrigger {
 			// Extract table name from dependencies (parser now extracts it from DROP TRIGGER ... ON tablename)

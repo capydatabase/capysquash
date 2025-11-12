@@ -63,7 +63,6 @@ func (r *DropCreateCycleRule) Apply(lifecycle *tracking.ObjectLifecycle, engine 
 	}
 
 	// Collect ALL CREATE statements (not just the one after DROP)
-	// CRITICAL: We MUST include CREATE statements in originalStmts because they contain
 	// dependency information (extracted by parser from AST) that's needed for proper ordering
 	var allCreateStmts []types.Statement
 	for _, event := range lifecycle.History {
@@ -153,7 +152,7 @@ func mergeMultipleCreateStatements(createStmts []types.Statement, tableName stri
 	// Use the LAST CREATE as the base (for DDL cycles: CREATE→DROP→CREATE, we want the final version)
 	baseSQL := createStmts[len(createStmts)-1].SQL
 
-	// BUG-NEW-1 FIX: Extract column evolutions FIRST to identify renamed columns
+	//  Extract column evolutions FIRST to identify renamed columns
 	columnEvolutions := extractColumnEvolutionsFromMultipleCreates(tableName, createStmts)
 	supersededColumns := make(map[string]bool) // Track columns that were renamed (old names)
 	for _, evolution := range columnEvolutions {
@@ -182,7 +181,7 @@ func mergeMultipleCreateStatements(createStmts []types.Statement, tableName stri
 		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("    Sample columns: %v", colNames)
 
 		for colName, colDef := range columns {
-			// BUG-NEW-1 FIX: Skip superseded columns (old column names that were renamed)
+			// Skip superseded columns (old column names that were renamed)
 			if supersededColumns[strings.ToLower(colName)] {
 				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Skipping superseded column '%s' (was renamed)", colName)
 				continue
@@ -375,9 +374,6 @@ func extractColumnsFromCreate(createSQL string) map[string]string {
 	parts := splitColumnDefinitions(columnList)
 
 	for _, part := range parts {
-		// BUG-NEW-1 FIX PART 2: Strip inline SQL comments (-- ...) from each column definition
-		// This prevents cases where "price_monthly INTEGER, -- in cents\nprice_annual INTEGER"
-		// gets treated as a comment line and skipped entirely
 		cleanedPart := part
 		if idx := strings.Index(part, "--"); idx != -1 {
 			// Found inline comment - split by newline and reassemble without the comment line

@@ -122,13 +122,8 @@ func (p *ProcessorAST) Apply(sql string, enumReplacements map[string]string) (st
 			sql = fixEliminatedEnumReferences(sql, enumReplacements)
 		}
 	}
-
-	// ================================================================
-	// PHASE 5: Fix pg_query deparser corruption bugs
-	// ================================================================
 	p.logger.Info("Phase 5: Fixing pg_query deparser corruption bugs")
 
-	// CRITICAL FIX: pg_query deparser bug with RETURNS TABLE
 	// It outputs: ) RETURNS TABLE LANGUAGE plpgsql (columns...)
 	// Correct:     ) RETURNS TABLE (columns...) LANGUAGE plpgsql
 	// This causes syntax errors "syntax error at or near LANGUAGE"
@@ -141,7 +136,6 @@ func (p *ProcessorAST) Apply(sql string, enumReplacements map[string]string) (st
 		p.logger.Info("Fixed pg_query deparser bug: removed %d misplaced LANGUAGE clauses from RETURNS TABLE", fixCount)
 	}
 
-	// CRITICAL FIX: pg_query deparser sometimes duplicates "char_" prefix on char_length function
 	// Example: char_length() becomes char_char_length()
 	// This breaks CHECK constraints that use char_length()
 	if strings.Contains(sql, "char_char_length") {

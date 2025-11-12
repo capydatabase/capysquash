@@ -398,7 +398,7 @@ Potential acquisition target for database/platform companies
 ## 📊 Appendix: Technical Validation Details
 
 ### Test Environment
-- **Tool Version**: pgsquash 0.9.5
+- **Tool Version**: pgsquash 0.9.6
 - **Safety Level**: Standard
 - **Validation Mode**: TWO_DATABASES (Docker-based)
 - **Container Timeout**: 180 seconds

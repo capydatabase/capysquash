@@ -262,7 +262,6 @@ func (b *SQLBuilder) CreateIndex(index *IndexDefinition) *SQLBuilder {
 
 	b.P("ON").S().Quote(index.Schema).P(".").Quote(index.Table)
 
-	// BUG-001 fix: Only add USING clause when:
 	// 1. Method is non-BTREE (always explicit)
 	// 2. Method is BTREE AND it was explicit in original SQL
 	// This prevents adding "USING btree" to spatial indexes where it would fail
@@ -682,9 +681,7 @@ func (b *SQLBuilder) FromStatement(stmt types.Statement) *SQLBuilder {
 }
 
 // fromASTStatement converts AST-based statements (CREATE, ALTER) back to SQL
-// BUG #2 FIX: Prioritize original SQL over deparsing to preserve function syntax
 func (b *SQLBuilder) fromASTStatement(stmt types.Statement) *SQLBuilder {
-	// BUG #2 FIX: Always use original SQL if available
 	// Deparsing (pg_query.Deparse) corrupts functions by changing:
 	// - LANGUAGE placement (before AS vs after body)
 	// - LANGUAGE type (sql vs plpgsql)
@@ -704,7 +701,6 @@ func (b *SQLBuilder) fromASTStatement(stmt types.Statement) *SQLBuilder {
 		switch parseTree := stmt.ParseTree.(type) {
 		case *pg_query.ParseResult:
 			if deparsed, err := pg_query.Deparse(parseTree); err == nil {
-				// BUG-001 FIX: Remove "USING btree" from spatial indexes
 				// pg_query.Deparse() adds "USING btree" even when it wasn't in the original SQL.
 				// This causes errors for spatial types (point, geography, geometry) which need GIST/SP-GIST.
 				if stmt.ObjectType == types.TypeIndex && !stmt.IndexHadExplicitAccessMethod {
@@ -723,7 +719,6 @@ func (b *SQLBuilder) fromASTStatement(stmt types.Statement) *SQLBuilder {
 }
 
 func (b *SQLBuilder) fromDropStatement(stmt types.Statement) *SQLBuilder {
-	// CRITICAL FIX: Check for UNKNOWN type to prevent invalid SQL generation
 	if stmt.ObjectType == types.TypeUnknown || stmt.ObjectType == "" {
 		// Cannot generate valid DROP statement for unknown object types
 		// Generate a comment instead

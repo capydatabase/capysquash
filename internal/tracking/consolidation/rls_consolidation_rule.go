@@ -41,7 +41,7 @@ func (r *RLSConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine
 		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "RLSConsolidationRule"})
 	}
 
-	// BUG FIX #6: When consolidating RLS operations, we must also handle other ALTER operations
+	// When consolidating RLS operations, we must also handle other ALTER operations
 	// (like ADD COLUMN) that may exist in the same lifecycle. Otherwise, we lose those ALTER statements.
 	//
 	// Example: collection_items has:

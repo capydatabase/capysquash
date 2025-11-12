@@ -20,9 +20,6 @@ func NewStatementFormatter() *StatementFormatter {
 	}
 }
 
-// FormatSQL adds proper spacing and newlines between SQL statements
-// This fixes Bug #2 where multiple CREATE FUNCTION statements are concatenated
-// without proper formatting, making output unreadable
 func (f *StatementFormatter) FormatSQL(sql string) string {
 	if sql == "" {
 		return sql
@@ -39,7 +36,7 @@ func (f *StatementFormatter) FormatSQL(sql string) string {
 
 // formatWithAST uses PostgreSQL parser to properly format statements
 func (f *StatementFormatter) formatWithAST(sql string) (string, error) {
-	// BUG #2 FIX: DO NOT use formatWithAST - it calls pg_query.Deparse() which corrupts functions
+	// DO NOT use formatWithAST - it calls pg_query.Deparse() which corrupts functions
 	// Instead, fall back to regex-based formatting which preserves original SQL
 	//
 	// The issue: pg_query.Deparse() doesn't preserve:

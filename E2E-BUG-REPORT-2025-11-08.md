@@ -1,5 +1,5 @@
 # E2E Testing Bug Report - November 8, 2025
-## pgsquash-engine v0.9.5
+## pgsquash-engine v0.9.6
 
 ---
 
@@ -215,7 +215,7 @@ This validates that the core consolidation engine works correctly when:
 ## Technical Details
 
 ### Environment
-- **Tool Version**: pgsquash 0.9.5
+- **Tool Version**: pgsquash 0.9.6
 - **Safety Level**: Standard
 - **Validation Mode**: TWO_DATABASES (Docker-based)
 - **Container Timeout**: 180 seconds

@@ -519,7 +519,7 @@ func CompareNormalizedSchemas(schema1, schema2 *NormalizedSchema) *SchemaDiff {
 	diff.compareObjects("Triggers", schema1.Triggers, schema2.Triggers)
 	diff.compareObjects("Views", schema1.Views, schema2.Views)
 
-	// BUG #3 FIX: If normalized schemas differ but no object-level differences were found,
+	//  If normalized schemas differ but no object-level differences were found,
 	// the differences must be in uncategorized statements (ALTER, GRANT, policies, etc.)
 	// Report this explicitly rather than showing empty diff output
 	if len(diff.Differences) == 0 {
@@ -541,7 +541,7 @@ type SchemaDiff struct {
 }
 
 // compareObjects compares two lists of objects
-// BUG #1 FIX: Compare by object NAME first, not exact string match
+// Compare by object NAME first, not exact string match
 // This prevents reporting objects as both "only in X" AND "differs"
 func (sd *SchemaDiff) compareObjects(objectType string, list1, list2 []string) {
 	// Build maps of name -> definition for both schemas
@@ -609,7 +609,7 @@ func normalizeForComparison(sql string) string {
 }
 
 // addUncategorizedDiffHints analyzes normalized schemas to provide hints about uncategorized differences
-// BUG #3 FIX: Helper function to identify what types of uncategorized statements differ
+// Helper function to identify what types of uncategorized statements differ
 func (sd *SchemaDiff) addUncategorizedDiffHints(norm1, norm2 string) {
 	// Count different statement types in each schema
 	statementTypes := []string{

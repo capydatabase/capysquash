@@ -1,12 +1,12 @@
 # Public API Alignment - pkg/ vs internal/
 
 **Date**: 2025-11-08
-**Version**: 0.9.5
+**Version**: 0.9.6
 **Status**: ✅ Complete
 
 ## Overview
 
-This document describes the comprehensive alignment performed between the public `pkg/` API and the internal implementations after extensive refactoring and bug fixes in v0.9.5.
+This document describes the comprehensive alignment performed between the public `pkg/` API and the internal implementations after extensive refactoring and bug fixes in v0.9.6.
 
 ## Changes Made
 
@@ -314,7 +314,7 @@ go build -o /tmp/pgsquash-test ./cmd/pgsquash
 
 # Verify binary works
 /tmp/pgsquash-test --version
-✅ 0.9.5
+✅ 0.9.6
 ```
 
 ## Documentation
@@ -422,7 +422,7 @@ if result.DetailedMetrics != nil {
 ## Version Compatibility
 
 - **Minimum Go Version**: 1.21
-- **Current Version**: 0.9.5
+- **Current Version**: 0.9.6
 - **API Stability**: All `pkg/` exports are considered stable
 - **Breaking Changes**: None (additive changes only)
 

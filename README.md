@@ -4,7 +4,7 @@
 
 **Catalog-proven equivalence** via double-build validation. Intelligently reorganizes your migration history into clean, production-ready SQL—without breaking anything.
 
-**Current version:** 0.9.5 (Production Ready) ✅
+**Current version:** 0.9.6 (Production Ready) ✅
 
 ## What is this?
 

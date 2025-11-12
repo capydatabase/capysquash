@@ -12,7 +12,7 @@ Programmatically run the pgsquash CLI from Go code.
 import "github.com/CAPYSQUASH/pgsquash-engine/pkg/cli"
 
 // Execute the CLI
-cli.SetVersionInfo("0.9.5", "2025-10-21", "abc123")
+cli.SetVersionInfo("0.9.6", "2025-10-21", "abc123")
 cli.SetBrandName("capysquash")
 plugins.RegisterDefault()
 
@@ -240,7 +240,7 @@ func main() {
     utils.SetDefaultLogger(logger)
 
     // Configure
-    cli.SetVersionInfo("0.9.5", "2025-10-21", "abc123")
+    cli.SetVersionInfo("0.9.6", "2025-10-21", "abc123")
     cli.SetBrandName("myapp")
 
     // Register plugins
@@ -374,7 +374,7 @@ The public API follows semantic versioning:
 - **Minor** version: New features, backward compatible
 - **Patch** version: Bug fixes
 
-Current version: `v0.9.5`
+Current version: `v0.9.6`
 
 ## Support
 

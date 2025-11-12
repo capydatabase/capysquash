@@ -15,7 +15,7 @@ docs/internal/decisions
 docs/internal/deployments
 docs/internal/refactors
 docs/internal/COMPREHENSIVE_TEST_SCENARIOS.md
-docs/internal/PGSQUASH_ENGINE_RELEASE_NOTES_v0.9.5.md
+docs/internal/PGSQUASH_ENGINE_RELEASE_NOTES_v0.9.6.md
 # Output of the go coverage tool
 *.out
 
@@ -117,7 +117,7 @@ docs/github-and-deployment/DEPLOYMENT.md
 docs/github-and-deployment/GITHUB_INTEGRATION.md
 docs/pgsql-migration-cases.md
 docs/release/BETA_RELEASE_SUMMARY.md
-docs/release/RELEASE_NOTES_v0.9.5.md
+docs/release/RELEASE_NOTES_v0.9.6.md
 docs/todo/PHASE_4_5_ROADMAP.md
 docs/todo/ROADMAP.md
 docs/user-journey-mapping.md

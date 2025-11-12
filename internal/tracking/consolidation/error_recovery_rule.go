@@ -110,7 +110,7 @@ func (rule *ErrorRecoveryRule) attemptConsolidation(lifecycle *tracking.ObjectLi
 		}
 	}
 
-	// BUG-001 fix: For indexes without explicit access method, remove "USING btree" from SQL
+	// For indexes without explicit access method, remove "USING btree" from SQL
 	// to prevent spatial index errors. pg_query may have added it during parsing.
 	consolidatedSQL := finalState.SQL
 	if lifecycle.Type == types.TypeIndex && !finalState.IndexHadExplicitAccessMethod {

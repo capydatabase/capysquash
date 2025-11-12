@@ -1,6 +1,6 @@
 # pgsquash Plugin Architecture
 
-**Version**: 0.9.5
+**Version**: 0.9.6
 **Status**: Production Ready ✅
 
 This directory contains the unified plugin system for third-party integrations (auth providers, ORMs, Platforms).
@@ -450,7 +450,7 @@ go build -o pgsquash cmd/pgsquash/main.go
 
 ## 📊 Implementation Status
 
-### ✅ Completed (v0.9.5)
+### ✅ Completed (v0.9.6)
 
 - [x] **Core Infrastructure**
   - [x] Plugin interface (12 lifecycle hooks)
@@ -590,5 +590,5 @@ func TestMyPluginWorkflow(t *testing.T) {
 ---
 
 _Last Updated: 2025-10-06_
-_Version: 0.9.5_
+_Version: 0.9.6_
 _Plugins: 4 production-ready (Clerk, Supabase, Prisma, Drizzle)_

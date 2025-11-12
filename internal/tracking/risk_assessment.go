@@ -523,7 +523,7 @@ func (ut *UnifiedTracker) ValidateConsistency() []string {
 				}
 			}
 
-			// BUG FIX: For dependencies with unknown type, try common object types before warning
+			// For dependencies with unknown type, try common object types before warning
 			// This handles cases like VIEW joining to another VIEW where only the name is known
 			depExists := false
 			if _, exists := ut.objects[depKey]; exists {

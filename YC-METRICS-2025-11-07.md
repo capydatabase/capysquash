@@ -1,6 +1,6 @@
 # YC Application Metrics - pgsquash-engine E2E Case Studies
 **Date**: 2025-11-07
-**Version**: 0.9.5
+**Version**: 0.9.6
 **Test Environment**: macOS, Docker Desktop
 
 ## Executive Summary
@@ -136,5 +136,5 @@ Intelligent migration consolidation:
 ---
 
 **Generated**: 2025-11-07
-**Tool Version**: pgsquash-engine 0.9.5
+**Tool Version**: pgsquash-engine 0.9.6
 **Test Data**: 3 production codebases (99 total migrations)

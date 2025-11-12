@@ -41,7 +41,7 @@ type Statement struct {
 	AlterTypeNewValue string // New ENUM value being added via ALTER TYPE ADD VALUE
 
 	// Index specific fields
-	IndexHadExplicitAccessMethod bool // Whether CREATE INDEX had explicit USING clause (BUG-001 fix)
+	IndexHadExplicitAccessMethod bool // Whether CREATE INDEX had explicit USING clause
 
 	// Statement metadata for transaction and lock analysis
 	Metadata StatementMetadata

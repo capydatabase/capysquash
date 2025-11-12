@@ -2,7 +2,7 @@
 
 **Project Type**: Real Estate/Roommate Matching Platform
 **Date**: November 8, 2025
-**Tool Version**: pgsquash 0.9.5
+**Tool Version**: pgsquash 0.9.6
 
 ---
 

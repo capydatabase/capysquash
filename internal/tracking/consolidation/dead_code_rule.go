@@ -327,7 +327,6 @@ func (r *DeadCodeRemovalRule) isFunctionReferenced(lifecycle *tracking.ObjectLif
 		}
 	}
 
-	// CRITICAL FIX for Bug #3: Also scan ALL processed events to catch function calls in
 	// SELECT statements and other statements that don't create tracked object lifecycles.
 	// This ensures we detect function usage in:
 	// - SELECT statements (e.g., "SELECT my_function();")

@@ -871,7 +871,6 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 	}
 
 	for stmtIndex, stmt := range m.Statements {
-		// CRITICAL: Skip ALL data operations - they're handled by engine's dataOperationTracker
 		// Data operations should NEVER be added to lifecycles, only to the DataOperationTracker
 		if stmt.IsDataOp {
 			continue
@@ -1146,7 +1145,6 @@ func (ut *UnifiedTracker) parseObjectID(identifier string) ObjectID {
 					return ObjectID{Name: tableParts[0], Type: types.TypeTable}
 				}
 				return ObjectID{Name: actualIdentifier, Type: types.TypeTable} // Assume table reference
-		// CRITICAL FIX (Bug #5): Handle COMMENT ON dependencies with explicit types
 		// These come from extractCommentDependenciesWithNormalization in parser
 		case "TABLE":
 			return ObjectID{Name: actualIdentifier, Type: types.TypeTable}
@@ -1179,7 +1177,7 @@ func (ut *UnifiedTracker) parseObjectID(identifier string) ObjectID {
 	parts := strings.Split(identifier, ".")
 	switch len(parts) {
 	case 1:
-		// BUGFIX Bug #3: Check if this is a custom type (enum) before defaulting to table
+		// Check if this is a custom type (enum) before defaulting to table
 		// Enum types often end with _enum, _status, _type suffixes
 		// Also check if this identifier exists as an enum in our tracked lifecycles
 		objType := types.TypeTable // Default assumption
@@ -1295,7 +1293,6 @@ func (ut *UnifiedTracker) extractDatabaseMetadata(dbMeta *metadata.DatabaseMetad
 }
 
 // makeKey creates a unique key for an object
-// CRITICAL FIX: Strips schema qualifiers for ALL object types to ensure consistent lookups
 // This prevents false "never created" warnings when objects are referenced with/without schema
 func makeKey(name string, objType types.ObjectType) string {
 	normalizedName := strings.ToLower(name)

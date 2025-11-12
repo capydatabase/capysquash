@@ -148,7 +148,7 @@ func (r *AdvancedColumnLifecycleRule) Apply(lifecycle *tracking.ObjectLifecycle,
 	// Extract column evolution information for data operation rewriting
 	columnEvolutions := r.extractColumnEvolutions(lifecycle.Name, columnStates)
 
-	// BUG #3 FIX: Identify and warn about orphaned indexes (indexes on dropped columns)
+	// Identify and warn about orphaned indexes (indexes on dropped columns)
 	orphanedIndexes := r.identifyOrphanedIndexes(lifecycle, columnStates, engine)
 	var warnings []string
 	if len(orphanedIndexes) > 0 {
@@ -938,7 +938,7 @@ func (r *AdvancedColumnLifecycleRule) extractColumnEvolutions(tableName string, 
 }
 
 // identifyOrphanedIndexes finds indexes that reference dropped columns
-// BUG #3 FIX: When columns are dropped, indexes referencing those columns become orphaned
+// When columns are dropped, indexes referencing those columns become orphaned
 // and should be excluded from the consolidated output to prevent errors
 func (r *AdvancedColumnLifecycleRule) identifyOrphanedIndexes(
 	tableLifecycle *tracking.ObjectLifecycle,

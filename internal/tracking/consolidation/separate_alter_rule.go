@@ -105,7 +105,7 @@ func (r *SeparateAlterRule) Apply(lifecycle *tracking.ObjectLifecycle, engine Co
 	originalStmts := []types.Statement{*createStmt}
 	originalStmts = append(originalStmts, separateAlters...)
 
-	// BUG #1 FIX: Track column renames for view rewriting
+	// Track column renames for view rewriting
 	// Even though RENAMEs are kept separate, we need to track them so views can be rewritten
 	columnEvolutions := trackColumnRenamesFromLifecycle(lifecycle)
 
@@ -119,7 +119,7 @@ func (r *SeparateAlterRule) Apply(lifecycle *tracking.ObjectLifecycle, engine Co
 			FilesAffected:     len(originalStmts),
 			LinesReduced:      0,
 		},
-		// BUG #1 FIX: Populate column evolutions for view rewriting
+		// Populate column evolutions for view rewriting
 		ColumnEvolutions: columnEvolutions,
 	}
 
@@ -228,8 +228,6 @@ func (r *SeparateAlterRule) categorizeAlters(alters []types.Statement) []string 
 
 	return types
 }
-
-// BUG #1 FIX: Shared function to track column renames from lifecycle
 // This is used by both SeparateAlterRule and ColumnEvolutionRule
 func trackColumnRenamesFromLifecycle(lifecycle *tracking.ObjectLifecycle) map[string]*tracking.ColumnEvolutionInfo {
 	evolutions := make(map[string]*tracking.ColumnEvolutionInfo)

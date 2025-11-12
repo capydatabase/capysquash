@@ -2,7 +2,7 @@
 
 **Project Type**: Developer Toolkit/Blueprint Platform
 **Date**: November 8, 2025
-**Tool Version**: pgsquash 0.9.5
+**Tool Version**: pgsquash 0.9.6
 
 ---
 

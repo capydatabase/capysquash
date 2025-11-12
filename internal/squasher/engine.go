@@ -19,6 +19,7 @@ import (
 	"github.com/capysquash/pgsquash-engine/internal/performance"
 	"github.com/capysquash/pgsquash-engine/internal/plugins"
 	"github.com/capysquash/pgsquash-engine/internal/plugins/auth"
+
 	// "github.com/capysquash/pgsquash-engine/internal/postprocessing" // DISABLED - corrupts functions
 	"github.com/capysquash/pgsquash-engine/internal/tracking"
 	"github.com/capysquash/pgsquash-engine/internal/tracking/consolidation"
@@ -1238,7 +1239,7 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 				consolidatedSQL = sqlBuilder.FromStatement(*finalState).String()
 			}
 
-			// BUGFIX Bug #5: Ensure SQL always ends with semicolon before appending separate statements
+			// Ensure SQL always ends with semicolon before appending separate statements
 			consolidatedSQL = strings.TrimRight(consolidatedSQL, " \t\n")
 			if !strings.HasSuffix(consolidatedSQL, ";") {
 				consolidatedSQL += ";"
@@ -1290,7 +1291,7 @@ func (e *Engine) generateOptimizedSQL(ctx context.Context, consolidatedObjects m
 	e.sqlBuilder.Comment(fmt.Sprintf("Generated at: %s", time.Now().Format(time.RFC3339)))
 	e.sqlBuilder.NL()
 
-	// Inject auth compatibility layer if needed (BUG #4 FIX)
+	// Inject auth compatibility layer if needed
 	// Check if any migration uses auth.jwt(), Supabase roles, or storage schema
 	needsAuthCompat := false
 	needsSupabaseCompat := false
@@ -1332,7 +1333,7 @@ func (e *Engine) generateOptimizedSQL(ctx context.Context, consolidatedObjects m
 		e.sqlBuilder.NL().NL()
 	}
 
-	// BUG #5 FIX: Detect role references in policies and grants
+	// Detect role references in policies and grants
 	// The previous detection only looked for "role authenticated" but policies use "TO authenticated"
 	// This caused missing role creation in output, breaking deployments
 	needsRoleCreation := false
@@ -1385,7 +1386,7 @@ $$`)
 		e.sqlBuilder.NL().NL()
 	}
 
-	// BUG #1 FIX: Inject storage schema when storage.objects/buckets are referenced
+	// Inject storage schema when storage.objects/buckets are referenced
 	// Detect references to storage.objects or storage.buckets and inject schema creation
 	needsStorageSchema := false
 	for _, result := range consolidatedObjects {
@@ -1405,12 +1406,12 @@ $$`)
 		e.sqlBuilder.NL().NL()
 	}
 
-	// BUG #1 FIX: Build column evolution map for VIEW rewriting
+	// Build column evolution map for VIEW rewriting
 	// This map tracks column renames across consolidation (e.g., rooms.size -> rooms.size_sqm)
 	// Used to rewrite VIEW SELECT clauses when underlying table columns are renamed
 	columnEvolutions := e.buildColumnEvolutionMap()
 	if len(columnEvolutions) > 0 {
-		e.logger.Info("[BUG-1-FIX] Built column evolution map with %d tables having column changes", len(columnEvolutions))
+		e.logger.Info("Built column evolution map with %d tables having column changes", len(columnEvolutions))
 		for tableName, evolutions := range columnEvolutions {
 			e.logger.Info("  Table %s: %d column evolutions", tableName, len(evolutions))
 		}
@@ -1418,7 +1419,7 @@ $$`)
 
 	// Group by category for organized output - CRITICAL: Order must ensure dependencies are created first
 	// Standard PostgreSQL DDL order: Extensions -> Tables -> Functions -> Triggers -> etc.
-	// BUG FIX #7: Functions that RETURN SETOF table_name must come after tables
+	// Functions that RETURN SETOF table_name must come after tables
 	categories := []types.Category{
 		types.CategoryExtensions,  // 1. Extensions first (CREATE EXTENSION)
 		types.CategoryFoundation,  // 2. Tables, views, sequences (CREATE TABLE) - must exist before functions that return them
@@ -1484,7 +1485,6 @@ $$`)
 				e.warnings = append(e.warnings, fmt.Sprintf("Circular FK handling warning: %v", err))
 			} else {
 				// Update consolidation results with modified table statements
-				// CRITICAL: Update both foundationObjects AND consolidatedObjects to ensure changes persist
 				for tableName, modifiedStmt := range modifiedTables {
 					// Find the consolidation result for this table
 					for key := range foundationObjects {
@@ -1560,7 +1560,7 @@ $$`)
 				e.logger.Info("[OUTPUT-DEBUG-CATEGORIZED] ConsolidatedSQL = %s", sql)
 			}
 
-			// BUG #1 FIX: Rewrite VIEW column references if columns were renamed during consolidation
+			// Rewrite VIEW column references if columns were renamed during consolidation
 			// This fixes the issue where VIEWs reference old column names after table consolidation
 			if category == types.CategoryFoundation && len(columnEvolutions) > 0 {
 				// Check if this SQL is a CREATE VIEW statement
@@ -1569,7 +1569,7 @@ $$`)
 					// Apply column evolution rewrites to this view
 					rewrittenSQL := e.rewriteViewColumnReferences(sql, columnEvolutions)
 					if rewrittenSQL != sql {
-						e.logger.Info("[BUG-1-FIX] Applied column evolution rewrites to view")
+						e.logger.Info("Applied column evolution rewrites to view")
 						sql = rewrittenSQL
 					}
 				}
@@ -1708,7 +1708,7 @@ $$`)
 	// Build enum replacements map
 	// enumReplacements := e.buildEnumReplacementsMap() // DISABLED - not needed without postprocessor
 
-	// BUG #2 FIX: DISABLED - Postprocessor corrupts functions
+	// DISABLED - Postprocessor corrupts functions
 	// The postprocessor calls FixMissingLanguageClauses() which:
 	// - Adds "LANGUAGE plpgsql" when LANGUAGE is already at the end
 	// - Changes LANGUAGE type from "sql" to "plpgsql"
@@ -1726,7 +1726,6 @@ $$`)
 	// Note: enum replacements are not critical for function preservation,
 	// so we can safely skip the entire postprocessor
 
-	// CRITICAL SAFETY NET: Fix pg_query deparser corruption bugs that slip through post-processing
 	// The deparser sometimes duplicates "char_" prefix on char_length() function calls
 	// This happens during deparsing and can corrupt CHECK constraints
 	if strings.Contains(finalSQL, "char_char_length") {
@@ -1734,12 +1733,12 @@ $$`)
 		finalSQL = strings.ReplaceAll(finalSQL, "char_char_length", "char_length")
 	}
 
-	// AST-BASED INDEX TYPE OPTIMIZATION (Bug #6 Fix)
+	// AST-BASED INDEX TYPE OPTIMIZATION
 	// Use actual column types from tracker to set appropriate index access methods
 	// Replaces broken regex-based "safety net" that guessed types from column names
 	finalSQL = e.optimizeIndexTypes(finalSQL)
 
-	// BUG #3 FIX: Rewrite views with renamed columns from schema evolution
+	// Rewrite views with renamed columns from schema evolution
 	// When tables evolve via multiple CREATE TABLE IF NOT EXISTS with changing column names,
 	// views may reference old or new column names inconsistently.
 	// Strategy: Detect which column name actually exists in the rooms table, then rewrite views
@@ -1773,7 +1772,7 @@ $$`)
 		e.logger.Info("SAFETY NET: rooms table has ambiguous size columns (size=%v, size_sqm=%v), skipping view rewrite", hasSize, hasSizeSqm)
 	}
 
-	// BUG #4 FIX: Remove invalid CHECK constraints from buddy_connections
+	// Remove invalid CHECK constraints from buddy_connections
 	// When tables evolve via multiple CREATE TABLE IF NOT EXISTS with conflicting schemas,
 	// CHECK constraints may reference columns inconsistently.
 	// Example: buddy_connections has complex schema evolution with buddyup_name/name column
@@ -1791,7 +1790,7 @@ $$`)
 		e.logger.Info("SAFETY NET: Removed problematic CHECK constraint from buddy_connections")
 	}
 
-	// BUG #7 FIX: Rewrite function bodies referencing buddy_connections.buddyup_name -> buddy_connections.name
+	// Rewrite function bodies referencing buddy_connections.buddyup_name -> buddy_connections.name
 	// The buddy_connections table evolved: buddyup_name -> name -> buddyup_name across migrations
 	// After consolidation, table has "name" column, but functions may reference "buddyup_name"
 	//
@@ -1873,9 +1872,7 @@ func (e *Engine) generateDataOperationsSQL() (string, error) {
 		//    not for one-time data mutations
 		// 4. Data operations should be preserved exactly as written to maintain correctness
 		//
-		// Bug Fix: This prevents Bug #6 (INSERT column list mismatch) where:
-		// - Migration 04: INSERT INTO properties (id, owner_id, ...)
-		// - Migration 59: INSERT INTO properties (owner_id, manager_id, ...)
+		// This prevents  (INSERT column list mismatch) where:
 		// - Column evolution was modifying column lists but not VALUES, causing NULL misalignment
 		//
 		// Solution: Use the original SQL exactly as written - no column evolution applied
@@ -1948,7 +1945,6 @@ func (e *Engine) rewriteDataOperationColumns(sql string, tableName string, colum
 }
 
 // rewriteViewColumnReferences rewrites column names in VIEW SELECT clauses to reflect column renames.
-// This is the critical fix for Bug #1: Views referencing renamed columns.
 //
 // Example:
 //   Original table: CREATE TABLE rooms (size DECIMAL(10,2));
@@ -1973,7 +1969,7 @@ func (e *Engine) rewriteViewColumnReferences(sql string, columnEvolutionsByTable
 	viewName := e.extractViewName(sql)
 	e.logger.Info("[VIEW-REWRITE] Checking view '%s' for column evolution rewrites", viewName)
 
-	// BUG FIX: The deparser formats views as "viewname AS\nSELECT", not "viewname AS SELECT"
+	// The deparser formats views as "viewname AS\nSELECT", not "viewname AS SELECT"
 	// So we need to find the AS that comes after the view name, not just any " AS " with spaces.
 	// Use regex to find: VIEW viewname AS (with optional whitespace after AS)
 	asPattern := regexp.MustCompile(`(?i)VIEW\s+[\w.]+\s+AS\s+`)
@@ -2320,7 +2316,7 @@ func (e *Engine) optimizeIndexTypes(sql string) string {
 			reason = "spatial type"
 		} else if colInfo.IsArray {
 			// Arrays can use GIN for array operations (containment, overlap)
-			// Arrays CANNOT use GiST without operator class (Bug #6 fix)
+			// Arrays CANNOT use GiST without operator class
 			// Keep current access method if it's gin (likely correct for array operations)
 			// Change to btree only if it was incorrectly set to gist
 			if currentMethod == "gist" {

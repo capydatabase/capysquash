@@ -44,7 +44,7 @@ func (r *ColumnEvolutionRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool
 		}
 	}
 
-	// BUG #1 FIX: Log if we found RENAME COLUMN
+	// Log if we found RENAME COLUMN
 	if hasRenameColumn {
 		fmt.Printf("[COLUMN-EVO-DEBUG] Table %s has RENAME COLUMN operations, CanApply=true\n", lifecycle.Name)
 	} else {
@@ -63,7 +63,7 @@ func (r *ColumnEvolutionRule) Apply(lifecycle *tracking.ObjectLifecycle, engine 
 	// Track column evolution through lifecycle
 	columnChanges := r.analyzeColumnEvolution(lifecycle)
 
-	// BUG #1 FIX: Track column renames for view rewriting
+	// Track column renames for view rewriting
 	columnEvolutions := r.trackColumnRenames(lifecycle)
 
 	// Generate final schema with all column changes applied
@@ -90,7 +90,7 @@ func (r *ColumnEvolutionRule) Apply(lifecycle *tracking.ObjectLifecycle, engine 
 			FilesAffected:     len(originalStmts),
 			LinesReduced:      len(originalStmts) * 3,
 		},
-		// BUG #1 FIX: Populate column evolutions for view rewriting
+		// Populate column evolutions for view rewriting
 		ColumnEvolutions: columnEvolutions,
 	}
 
@@ -252,7 +252,7 @@ func (r *ColumnEvolutionRule) isColumnOperation(sql string) bool {
 		strings.Contains(upperSQL, "RENAME COLUMN")
 }
 
-// BUG #1 FIX: trackColumnRenames extracts RENAME COLUMN operations and builds ColumnEvolutionInfo map
+// trackColumnRenames extracts RENAME COLUMN operations and builds ColumnEvolutionInfo map
 func (r *ColumnEvolutionRule) trackColumnRenames(lifecycle *tracking.ObjectLifecycle) map[string]*tracking.ColumnEvolutionInfo {
 	fmt.Printf("[COLUMN-EVO-DEBUG] trackColumnRenames called for table %s\n", lifecycle.Name)
 	evolutions := make(map[string]*tracking.ColumnEvolutionInfo)

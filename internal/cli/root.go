@@ -375,9 +375,6 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 
 	startTime := time.Now()
 
-	// BUG #7 FIX: Config loading moved to line ~500 where it's actually used
-	// (Removed duplicate config load here - it was shadowing the one below)
-
 	if verbose {
 		fmt.Printf("Loading migrations from %d files...\n", len(args))
 	}
@@ -869,7 +866,6 @@ func runSquash(cmd *cobra.Command, args []string) error {
 				}
 				fmt.Println(color.YellowString("⚠️  Warning: Validation failed but continuing (use --fail-on-diff to exit on validation errors)"))
 			} else if valResult != nil && !valResult.Success {
-				// BUG #3 FIX: Check if comparison is valid before reporting differences as errors
 				if valResult.DockerValidation.ComparisonValid {
 					// Valid comparison - these are real consolidation issues
 					fmt.Println(color.RedString("❌ Schema differences detected!"))
@@ -925,7 +921,6 @@ func runSquash(cmd *cobra.Command, args []string) error {
 // runValidationCheck performs validation and returns the result
 func runValidationCheck(cfg *config.Config, originalPath, squashedPath string) (*validation.ValidationResult, error) {
 	// Create validator with config
-	// BUG #6 FIX: Extract PostgreSQL version from docker_image config instead of hardcoding
 	postgresVersion := "17" // Default to 17 if not specified
 	if cfg.Validation.DockerImage != "" {
 		// Parse version from docker image (e.g., "postgres:17" -> "17")
@@ -1023,7 +1018,6 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		// Create validation config with Docker support
 		valConfig := validation.DefaultValidationConfig()
 
-		// BUG #6 FIX: Extract PostgreSQL version from docker_image config
 		postgresVersion := "17" // Default to 17 if not specified
 		if cfg.Validation.DockerImage != "" {
 			// Parse version from docker image (e.g., "postgres:17" -> "17")

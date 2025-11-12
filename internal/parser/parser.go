@@ -68,7 +68,6 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 			continue
 		}
 
-		// BUGFIX Bug #4 & Bug #6: Extract DDL statements from DO blocks BEFORE parsing
 		// DO blocks often wrap DDL in IF NOT EXISTS checks:
 		//   DO $$ BEGIN IF NOT EXISTS (...) THEN ALTER TABLE foo ADD COLUMN bar; END IF; END $$;
 		//   DO $$ BEGIN IF NOT EXISTS (...) THEN CREATE INDEX idx ON foo(bar); END IF; END $$;
@@ -135,8 +134,6 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 		utils.GetDefaultLogger().WithPrefix("PARSER").Info("Warning: Parsed %d statements with %d errors in %s",
 			len(migration.Statements), len(migration.ParseErrors), filename)
 
-		// CRITICAL: If we have parse errors but NO statements were successfully parsed,
-		// and we have content, this indicates complete parsing failure (e.g., missing semicolons)
 		if len(migration.Statements) == 0 && len(migration.ParseErrors) > 0 {
 			// Return error to indicate catastrophic failure
 			return migration, errors.New(errors.ErrorCodeSyntaxError, errors.CategoryParsing, fmt.Sprintf("fatal: all statements failed to parse in %s: %d parse errors, 0 statements recovered", filename, len(migration.ParseErrors)), nil)
@@ -240,7 +237,6 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		// Extract constraint information from ALTER TABLE commands
 		stmt.Dependencies = extractAlterTableConstraints(node.AlterTableStmt, normalizer)
 
-	// BUG #1 FIX: Handle RenameStmt for ALTER TABLE RENAME COLUMN operations
 	case *pg_query.Node_RenameStmt:
 		// RenameStmt covers: ALTER TABLE ... RENAME COLUMN, ALTER TABLE ... RENAME TO, etc.
 		renameStmt := node.RenameStmt
@@ -271,7 +267,6 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 					stmt.Dependencies = append(stmt.Dependencies, tableName)
 				}
 			} else if node.DropStmt.RemoveType == pg_query.ObjectType_OBJECT_TRIGGER {
-				// BUG #2 FIX: Handle DROP TRIGGER specially to extract trigger name and table name separately
 				// DROP TRIGGER syntax: DROP TRIGGER [IF EXISTS] trigger_name ON table_name
 				// The pg_query parser returns a list like [schema?, table, trigger]
 				tableName, triggerName := extractDropTriggerDetails(firstObject, normalizer)
@@ -292,7 +287,6 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		stmt.ObjectType = types.TypeIndex
 		stmt.Operation = types.OpCreate
 		stmt.ObjectName = normalizer.NormalizeIdentifier(node.IndexStmt.Idxname)
-		// BUG-001 fix: Track whether index had explicit USING clause in original SQL
 		// This prevents pg_query.Deparse from adding "USING btree" to spatial indexes
 		// Check the original SQL, not the AST, since pg_query may have normalized it
 		if strings.Contains(strings.ToUpper(stmt.SQL), " USING ") {
@@ -323,7 +317,6 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		if node.ViewStmt.View != nil {
 			stmt.ObjectName = getTableNameWithNormalization(node.ViewStmt.View, normalizer)
 		}
-		// CRITICAL FIX: Extract table dependencies from the view's SELECT query
 		// This ensures views are placed AFTER the tables they reference
 		if node.ViewStmt.Query != nil {
 			stmt.Dependencies = extractQueryDependencies(node.ViewStmt.Query, normalizer)
@@ -401,8 +394,6 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		stmt.ObjectName = normalizer.NormalizeIdentifier(node.CreateExtensionStmt.Extname)
 
 	case *pg_query.Node_CommentStmt:
-		// CRITICAL FIX (Bug #5 revised): COMMENT statements should always be TypeComment
-		// The object being commented on is tracked via Dependencies, not ObjectType
 		// This prevents "Object X::VIEW depends on X which is never created" false warnings
 		// where COMMENT ON VIEW was being stored as a VIEW object instead of a COMMENT object
 		stmt.ObjectType = types.TypeComment
@@ -499,7 +490,6 @@ func categorizeStatement(stmt types.Statement) types.Category {
 		return types.CategoryData
 	}
 
-	// CRITICAL FIX: Check Operation first before ObjectType
 	// COMMENT ON statements have ObjectType set to the object being commented (e.g., TypeTable),
 	// but must be categorized as CategoryComments to ensure they come after object creation
 	if stmt.Operation == types.OpComment {
@@ -674,7 +664,7 @@ func extractQueryDependencies(queryNode *pg_query.Node, normalizer *ContextualNo
 			if joinExpr := fromClause.GetJoinExpr(); joinExpr != nil {
 				deps = append(deps, extractJoinDependencies(joinExpr, normalizer)...)
 			}
-			// Handle subqueries (RangeSubselect) - Bug #11 fix
+			// Handle subqueries (RangeSubselect)
 			if rangeSubselect := fromClause.GetRangeSubselect(); rangeSubselect != nil {
 				if rangeSubselect.Subquery != nil {
 					// Recursively extract dependencies from subquery
@@ -702,7 +692,7 @@ func extractJoinDependencies(joinExpr *pg_query.JoinExpr, normalizer *Contextual
 		if nestedJoin := joinExpr.Larg.GetJoinExpr(); nestedJoin != nil {
 			deps = append(deps, extractJoinDependencies(nestedJoin, normalizer)...)
 		}
-		// Handle subquery on left side - Bug #11 fix
+		// Handle subquery on left side
 		if rangeSubselect := joinExpr.Larg.GetRangeSubselect(); rangeSubselect != nil {
 			if rangeSubselect.Subquery != nil {
 				deps = append(deps, extractQueryDependencies(rangeSubselect.Subquery, normalizer)...)
@@ -721,7 +711,7 @@ func extractJoinDependencies(joinExpr *pg_query.JoinExpr, normalizer *Contextual
 		if nestedJoin := joinExpr.Rarg.GetJoinExpr(); nestedJoin != nil {
 			deps = append(deps, extractJoinDependencies(nestedJoin, normalizer)...)
 		}
-		// Handle subquery on right side - Bug #11 fix
+		// Handle subquery on right side
 		if rangeSubselect := joinExpr.Rarg.GetRangeSubselect(); rangeSubselect != nil {
 			if rangeSubselect.Subquery != nil {
 				deps = append(deps, extractQueryDependencies(rangeSubselect.Subquery, normalizer)...)
@@ -1015,7 +1005,6 @@ func extractCommentObjectNameWithNormalization(commentStmt *pg_query.CommentStmt
 }
 
 func mapCommentObjectType(objtype pg_query.ObjectType) types.ObjectType {
-	// CRITICAL FIX (Bug #5): Map all PostgreSQL object types that can have COMMENTs
 	// This prevents "never created" warnings for COMMENT ON VIEW, COMMENT ON POLICY, etc.
 	switch objtype {
 	case pg_query.ObjectType_OBJECT_TABLE:
@@ -1554,7 +1543,6 @@ func extractNestedTypesFromDoBlock(doBlockSQL string) []string {
 }
 
 // extractDDLFromConditionalBlocks extracts DDL from IF...THEN...END IF blocks
-// BUG #11 FIX: Handles conditional DDL that was previously skipped
 //
 // Pattern: IF EXISTS (...) THEN <DDL> END IF;
 //          IF NOT EXISTS (...) THEN <DDL> END IF;
@@ -1592,7 +1580,7 @@ func extractDDLFromConditionalBlocks(doBlockSQL string, ddlStatements *[]string)
 					if indexStmt != "" {
 						*ddlStatements = append(*ddlStatements, indexStmt+";")
 						utils.GetDefaultLogger().WithPrefix("PARSER").Info(
-							"BUG #11 FIX: Extracted CREATE INDEX from IF block: %s",
+							"Extracted CREATE INDEX from IF block: %s",
 							truncateForLog(indexStmt, 80))
 					}
 				}
@@ -1608,7 +1596,7 @@ func extractDDLFromConditionalBlocks(doBlockSQL string, ddlStatements *[]string)
 					if alterStmt != "" {
 						*ddlStatements = append(*ddlStatements, alterStmt+";")
 						utils.GetDefaultLogger().WithPrefix("PARSER").Info(
-							"BUG #11 FIX: Extracted ALTER TABLE from IF block: %s",
+							"Extracted ALTER TABLE from IF block: %s",
 							truncateForLog(alterStmt, 80))
 					}
 				}
@@ -1624,7 +1612,7 @@ func extractDDLFromConditionalBlocks(doBlockSQL string, ddlStatements *[]string)
 					if typeStmt != "" {
 						*ddlStatements = append(*ddlStatements, typeStmt+";")
 						utils.GetDefaultLogger().WithPrefix("PARSER").Info(
-							"BUG #11 FIX: Extracted CREATE TYPE from IF block: %s",
+							"Extracted CREATE TYPE from IF block: %s",
 							truncateForLog(typeStmt, 80))
 					}
 				}
@@ -1632,7 +1620,6 @@ func extractDDLFromConditionalBlocks(doBlockSQL string, ddlStatements *[]string)
 		}
 	}
 
-	// BUG #11: Detect dynamic SQL (EXECUTE format) and warn
 	if strings.Contains(strings.ToUpper(doBlockSQL), "EXECUTE") &&
 		strings.Contains(strings.ToUpper(doBlockSQL), "FORMAT") {
 		utils.GetDefaultLogger().WithPrefix("PARSER").Warn(
@@ -1676,12 +1663,9 @@ func extractAlterStatementsFromDoBlock(doBlockSQL string) []string {
 	// 1. ALTER TABLE ADD COLUMN (simple and GENERATED columns)
 	// 2. ALTER TABLE ADD CONSTRAINT (including multi-line CHECK constraints)
 	// 3. ALTER TABLE ENABLE/DISABLE ROW LEVEL SECURITY
-	// 4. CREATE INDEX (BUG #6 FIX - was missing!)
-	// 5. CREATE TYPE
-	// 6. IF EXISTS...THEN...END IF conditional blocks (BUG #11 FIX)
-	// 7. Other DDL that may be wrapped in DO blocks
+	// 4. CREATE TYPE
+	// 5. Other DDL that may be wrapped in DO blocks
 
-	// BUG #11 FIX: First, extract DDL from within IF blocks
 	// Pattern: IF EXISTS (...) THEN <DDL statements> END IF;
 	// We need to extract the DDL from inside the THEN clause
 	doBlockSQL = extractDDLFromConditionalBlocks(doBlockSQL, &ddlStatements)
@@ -1740,7 +1724,7 @@ func extractAlterStatementsFromDoBlock(doBlockSQL string) []string {
 		}
 	}
 
-	// Pattern 4: Extract CREATE INDEX (BUG #6 FIX)
+	// Pattern 4: Extract CREATE INDEX
 	// Handles both simple and conditional indexes: CREATE INDEX [IF NOT EXISTS] name ON table ...
 	createIndexPattern := regexp.MustCompile(`(?is)(CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+\S+\s+ON\s+[^;]+);`)
 	indexMatches := createIndexPattern.FindAllStringSubmatch(doBlockSQL, -1)

@@ -11,7 +11,7 @@ This package provides a complete, production-ready TUI with:
 - ✅ Progress monitoring
 - ✅ Keyboard-driven navigation
 
-**As of version 0.9.5+**, the TUI implementation is fully public (moved from `internal/tui` to `pkg/tui`), making it easy to integrate into any Go application or build custom TUI-based tools.
+**As of version 0.9.6+**, the TUI implementation is fully public (moved from `internal/tui` to `pkg/tui`), making it easy to integrate into any Go application or build custom TUI-based tools.
 
 ## Installation
 
@@ -366,18 +366,18 @@ pkg/tui/              # Fully public TUI implementation
 └── examples/         # Usage examples
 ```
 
-**Note:** As of version 0.9.5+, the entire TUI implementation is public. There is no longer an `internal/tui` package - everything needed to build, customize, or extend the TUI is in `pkg/tui`.
+**Note:** As of version 0.9.6+, the entire TUI implementation is public. There is no longer an `internal/tui` package - everything needed to build, customize, or extend the TUI is in `pkg/tui`.
 
-## What Changed (0.9.5+ Migration Notes)
+## What Changed (0.9.6+ Migration Notes)
 
-If you were using the TUI before version 0.9.5:
+If you were using the TUI before version 0.9.6:
 
 **Before (0.8.x - 0.9.4):**
 - TUI implementation was in `internal/tui` (not accessible)
 - Public API in `pkg/tui` was a wrapper with `tui.New(tui.Options{...})`
 - Limited ability to customize or extend
 
-**Now (0.9.5+):**
+**Now (0.9.6+):**
 - Entire TUI is in `pkg/tui` (fully accessible)
 - Simplified API: `tui.NewModel()`, `tui.Launch()`, `tui.LaunchWithView()`
 - Full access to all views, styles, and types

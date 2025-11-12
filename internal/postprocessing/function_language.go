@@ -39,7 +39,6 @@ func FixFunctionLanguageConflicts(sql string) string {
 	// Group 8: Optional SECURITY DEFINER after LANGUAGE
 	//
 	// We look for functions where volatility comes before AS but LANGUAGE comes after body
-	// CRITICAL FIX: Instead of using (.+?) which can match across function boundaries,
 	// we match specifically up to and including "$$ LANGUAGE" to ensure we only match ONE function
 	// Pattern: Match everything up to the FIRST occurrence of $$ followed immediately by LANGUAGE
 	// This prevents the regex from accidentally spanning multiple adjacent functions
@@ -302,7 +301,6 @@ func FixIncorrectLanguageDeclarations(sql string) string {
 	}
 
 	// FIX 2: LANGUAGE plpgsql → LANGUAGE sql (when body is simple SQL)
-	// This is the critical fix for Bug #2: Functions with bare SELECT statements
 	// declared as plpgsql need to either be changed to sql OR have proper BEGIN/END structure
 	plpgsqlPattern := regexp.MustCompile(
 		`(?si)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+[^\(]+\([^\)]*\)\s+RETURNS\s+.*?)\s+(LANGUAGE\s+plpgsql)(\s+.*?AS\s+\$\$)(.*?)(\$\$\s*;)`,

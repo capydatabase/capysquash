@@ -147,36 +147,6 @@ func (st *SQLTransformer) Transform(ctx context.Context, sql string) (*Transform
 	transformedSQL := sql
 	var err error // Declare err for use in subsequent steps
 
-	// STEP 0: Plugin Transformations (Pre-Parse, Highest Priority)
-	// BUG #2 FIX: DISABLED - Plugin transformations can modify functions
-	// Since we now preserve original SQL in consolidation rules, we must not transform
-	// Original SQL from migrations is correct and should be used as-is
-	//
-	// Previous behavior: Plugins added STABLE markers to auth functions
-	// Problem: This modifies functions when they should be preserved exactly
-	//
-	// transformedSQL, err := st.applyPluginTransformations(ctx, transformedSQL)
-	// if err != nil {
-	// 	result.Warnings = append(result.Warnings, fmt.Sprintf("Plugin transformations warning: %v", err))
-	// } // DISABLED
-
-	// STEP 1: Normalize LANGUAGE Position (Pre-Parse, Critical)
-	// BUG #2 FIX: DISABLED - This normalization corrupts functions
-	// The original placement of LANGUAGE (before AS or after body) is correct
-	// and should be preserved. Moving it causes syntax errors and breaks validation.
-	//
-	// Previous behavior: Moved "AS $$ ... $$ LANGUAGE plpgsql" → "LANGUAGE plpgsql AS $$ ... $$"
-	// Problem: This breaks functions that have LANGUAGE in trailing position
-	// Since we now preserve original SQL in consolidation rules, we must not normalize
-	//
-	// transformedSQL = st.normalizeLanguagePosition(transformedSQL) // DISABLED
-
-	// STEP 2: Function Volatility Fix (Pre-Parse, Fallback)
-	// CRITICAL: Must run BEFORE pg_query.Parse() because:
-	// - Parser fails on complex migrations (e.g., 9850 lines, 367KB files)
-	// - Volatility fix uses regex, doesn't need AST
-	// - Fixes: "ERROR: functions in index predicate must be marked IMMUTABLE"
-	// Note: Plugins may have already fixed their specific functions, this is a fallback
 	transformedSQL, err = st.fixFunctionVolatilityMarkers(ctx, transformedSQL, result)
 	if err != nil {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("Function volatility fix failed: %v", err))
@@ -650,7 +620,7 @@ func (st *SQLTransformer) fixCommentSyntax(sql string, result *TransformationRes
 // When volatility markers (VOLATILE/STABLE/IMMUTABLE) appear before AS $$,
 // the LANGUAGE clause must also appear before AS $$, not after the function body.
 func (st *SQLTransformer) normalizeLanguagePosition(sql string) string {
-	// CRITICAL FIX: Match ONE function at a time using terminating semicolon
+	// Match ONE function at a time using terminating semicolon
 	// Pattern: CREATE FUNCTION ... AS $$ body $$ LANGUAGE plpgsql ... ;
 	//
 	// We match up to the FIRST semicolon after LANGUAGE clause to avoid
@@ -827,7 +797,7 @@ func (st *SQLTransformer) fixFunctionVolatilityMarkers(ctx context.Context, sql 
 			continue // Already has volatility marker, skip
 		}
 
-		// BUG #2 FIX: Do NOT automatically add volatility markers to functions.
+		// Do NOT automatically add volatility markers to functions.
 		// Only add them if explicitly required for index predicates or other constraints.
 		// For single-version functions, preserve them exactly as written.
 		//
@@ -909,7 +879,7 @@ func (st *SQLTransformer) hasVolatilityMarker(s string) bool {
 }
 
 // isAuthFunction checks if a function name matches known auth function patterns
-// BUG-003 fix: Auth functions (Clerk, Supabase, etc.) should always be STABLE
+// Auth functions (Clerk, Supabase, etc.) should always be STABLE
 func isAuthFunction(funcName string) bool {
 	lowerName := strings.ToLower(funcName)
 
