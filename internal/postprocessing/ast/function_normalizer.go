@@ -1,8 +1,6 @@
 package ast
 
 import (
-	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/utils"
@@ -25,17 +23,17 @@ func NewFunctionNormalizer() *FunctionNormalizer {
 // NormalizeAll applies all function normalizations to the given SQL.
 // This is the main entry point that replaces all regex-based function fixes.
 //
-// BUG #2 FIX: Made significantly more conservative to preserve original function definitions.
+// Made significantly more conservative to preserve original function definitions.
 // Only applies minimal fixes for truly broken SQL, not stylistic normalization.
 func (fn *FunctionNormalizer) NormalizeAll(sql string) (string, error) {
-	// BUG #2 FIX: CONSERVATIVE MODE
+	// CONSERVATIVE MODE
 	// Don't apply AST modifications or deparsing unless absolutely necessary.
 	// For single-version functions, we want to preserve them byte-for-byte.
 	//
 	// The only thing we do is fix trailing LANGUAGE clauses via regex,
 	// but we DON'T move volatility or security markers.
 
-	// BUG #2 FIX: Skip ALL normalization - preserve functions exactly as written.
+	// Skip ALL normalization - preserve functions exactly as written.
 	// The previous approach of fixing language order, removing redundancies, etc.
 	// was causing volatility and security markers to be lost during deparsing.
 	//
@@ -133,7 +131,6 @@ func (fn *FunctionNormalizer) removeRedundantLanguage(funcStmt *pg_query.CreateF
 }
 
 // inferMissingLanguage adds missing LANGUAGE declaration or fixes incorrect LANGUAGE based on function body.
-// This is the critical fix for Bug #2: Functions with simple SQL bodies declared as plpgsql.
 func (fn *FunctionNormalizer) inferMissingLanguage(funcStmt *pg_query.CreateFunctionStmt) bool {
 	// Get function name for debugging
 	funcName := fn.getFunctionName(funcStmt)
@@ -228,7 +225,7 @@ func (fn *FunctionNormalizer) inferMissingLanguage(funcStmt *pg_query.CreateFunc
 }
 
 // inferLanguageFromFunction infers the appropriate language from function characteristics.
-// BUG #2 FIX: This function now ONLY infers LANGUAGE, not volatility.
+// This function now ONLY infers LANGUAGE, not volatility.
 // Volatility should be explicitly set by the user or left to PostgreSQL defaults.
 func (fn *FunctionNormalizer) inferLanguageFromFunction(funcStmt *pg_query.CreateFunctionStmt) string {
 	// Check if function returns TRIGGER - must be plpgsql
@@ -409,221 +406,4 @@ func (fn *FunctionNormalizer) deparseNode(node *pg_query.Node) string {
 	}
 
 	return deparsed
-}
-
-// ensureLanguageClausesPresent fixes pg_query deparser omissions by manually inserting
-// missing LANGUAGE clauses. The deparser inconsistently outputs LANGUAGE options even
-// when they exist in the AST.
-//
-// NOTE: pg_query deparser outputs compressed SQL where functions may appear on single
-// lines or with previous statements (e.g., "$$; CREATE OR REPLACE FUNCTION ...").
-func (fn *FunctionNormalizer) ensureLanguageClausesPresent(parseResult *pg_query.ParseResult, sql string) string {
-	// Build map of function names to their LANGUAGE values from the AST
-	functionLanguages := make(map[string]string)
-
-	for _, stmt := range parseResult.Stmts {
-		funcStmt := stmt.Stmt.GetCreateFunctionStmt()
-		if funcStmt == nil {
-			continue
-		}
-
-		funcName := fn.getFunctionName(funcStmt)
-
-		// Extract LANGUAGE from options
-		for _, opt := range funcStmt.Options {
-			defElem := opt.GetDefElem()
-			if defElem != nil && defElem.Defname == "language" {
-				if strNode := defElem.Arg.GetString_(); strNode != nil {
-					functionLanguages[funcName] = strNode.Sval
-				}
-				break
-			}
-		}
-	}
-
-	if len(functionLanguages) == 0 {
-		return sql // No functions with LANGUAGE to check
-	}
-
-	fixedCount := 0
-
-	// CRITICAL FIX: pg_query deparser bug with RETURNS TABLE
-	// It outputs: ) RETURNS TABLE LANGUAGE plpgsql (columns...)
-	// Correct:     ) RETURNS TABLE (columns...) LANGUAGE plpgsql
-	// Fix this globally before processing individual functions
-	// Pattern handles multiline: closing paren, newline/spaces, RETURNS TABLE, LANGUAGE, opening paren
-	returnsTablePattern := `(?is)(\)\s+RETURNS\s+TABLE)\s+(LANGUAGE\s+\w+)\s+(\()`
-	returnsTableRe := regexp.MustCompile(returnsTablePattern)
-	beforeFix := sql
-	// Remove misplaced LANGUAGE between TABLE and columns
-	sql = returnsTableRe.ReplaceAllString(sql, "$1 $3")
-	if sql != beforeFix {
-		fixCount := len(returnsTableRe.FindAllString(beforeFix, -1))
-		fn.logger.Info("Fixed pg_query deparser bug: removed %d misplaced LANGUAGE clauses from RETURNS TABLE", fixCount)
-	}
-
-	// Use regex to find and fix each function
-	// Pattern matches: CREATE [OR REPLACE] FUNCTION name(...) RETURNS ... [modifiers] AS $$
-	// CRITICAL: LANGUAGE must come BEFORE VOLATILE/STABLE/IMMUTABLE/SECURITY modifiers
-	for funcName, expectedLanguage := range functionLanguages {
-		// Build regex pattern for this specific function
-		// Pattern: CREATE ... FUNCTION funcName(...) RETURNS <type> ... AS $$
-		re := strings.NewReplacer(
-			"(", `\(`,
-			")", `\)`,
-		)
-		escapedName := re.Replace(funcName)
-
-		// Pattern must handle:
-		// 1. RETURNS [SETOF] type AS $$
-		// 2. RETURNS TABLE (...) AS $$ (single or multiline)
-		// 3. RETURNS TABLE(\n  col1 type,\n  col2 type\n) AS $$ (multiline with newlines)
-		//
-		// Strategy: Match up to RETURNS, then non-greedy .*? to AS $$
-		// This captures everything between RETURNS clause and AS $$ as group 2
-		funcPattern := `(?is)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[\w.]+\.)?` + escapedName + `\s*\([^)]*\)\s+RETURNS\s+.+?)(\s+)(AS\s+\$\$)`
-
-		funcRe, err := regexp.Compile(funcPattern)
-		if err != nil {
-			fn.logger.Info("Failed to compile regex for function %s: %v", funcName, err)
-			continue
-		}
-
-		// Check if this function is missing LANGUAGE before AS $$
-		matches := funcRe.FindStringSubmatch(sql)
-		if len(matches) >= 4 {
-			// matches[1]: Everything up to and including RETURNS clause (may be multiline TABLE)
-			// matches[2]: Space/whitespace between RETURNS clause and AS $$
-			// matches[3]: AS $$
-
-			// Check if LANGUAGE appears ANYWHERE between RETURNS and AS $$
-			// Extract the full text between RETURNS and AS to check for LANGUAGE
-			fullSection := matches[0] // The entire matched text
-			upperSection := strings.ToUpper(fullSection)
-
-			// Find where "RETURNS" ends and where "AS $$" begins
-			returnsIdx := strings.Index(upperSection, "RETURNS")
-			asIdx := strings.LastIndex(upperSection, "AS")
-
-			if returnsIdx >= 0 && asIdx > returnsIdx {
-				betweenReturnsAndAs := upperSection[returnsIdx:asIdx]
-
-				// Check if LANGUAGE is missing from the section between RETURNS and AS $$
-				if !strings.Contains(betweenReturnsAndAs, "LANGUAGE") {
-					fn.logger.Info("Adding LANGUAGE %s for function %s (missing between RETURNS and AS)", expectedLanguage, funcName)
-
-					// Insert LANGUAGE right before AS $$
-					// matches[1] = CREATE...RETURNS clause, matches[2] = space, matches[3] = AS $$
-					replacement := "$1 LANGUAGE " + expectedLanguage + "$2$3"
-					sql = funcRe.ReplaceAllString(sql, replacement)
-					fixedCount++
-				}
-			}
-		}
-	}
-
-	if fixedCount > 0 {
-		fn.logger.Info("Fixed %d functions where deparser omitted LANGUAGE clauses", fixedCount)
-	}
-
-	// PHASE 2: Remove trailing function options after closing $$
-	// The deparser sometimes outputs: AS $$ ... $$ LANGUAGE lang VOLATILE/STABLE/IMMUTABLE SECURITY DEFINER;
-	// After we insert options before AS, we need to remove the trailing ones to avoid conflicts
-	//
-	// BUG #10 FIX: Before removing SECURITY DEFINER from trailing position, we need to extract it
-	// and move it to the correct position (before AS) to preserve this critical security attribute.
-
-	trailingFixCount := 0
-
-	// BUG #10 FIX: Extract and preserve SECURITY DEFINER before removing trailing options
-	// Pattern: Look for functions that have SECURITY DEFINER after $$
-	// We need to move it before AS $$ in the format: LANGUAGE xxx SECURITY DEFINER AS $$
-	trailingSecurityPattern := `(?i)(\$\$);?\s*(SECURITY\s+(DEFINER|INVOKER))\s*;?`
-	trailingSecurityRe := regexp.MustCompile(trailingSecurityPattern)
-
-	// Find all functions with trailing SECURITY attributes
-	securityMatches := trailingSecurityRe.FindAllStringSubmatch(sql, -1)
-	if len(securityMatches) > 0 {
-		fn.logger.Info("Found %d functions with trailing SECURITY attributes that need to be moved", len(securityMatches))
-
-		// For each function with trailing SECURITY, move it before AS $$
-		for _, match := range securityMatches {
-			securityClause := match[2] // "SECURITY DEFINER" or "SECURITY INVOKER"
-
-			// Find the function containing this trailing security clause
-			// Pattern: LANGUAGE xxx AS $$ ... $$ SECURITY DEFINER
-			// We want to move SECURITY DEFINER to: LANGUAGE xxx SECURITY DEFINER AS $$
-			funcPattern := `(?i)(LANGUAGE\s+\w+)(\s+)(AS\s+\$\$[^$]*\$\$);?\s*` + regexp.QuoteMeta(securityClause)
-			funcRe := regexp.MustCompile(funcPattern)
-
-			sql = funcRe.ReplaceAllString(sql, fmt.Sprintf("$1 %s $3;", securityClause))
-		}
-
-		fn.logger.Info("Moved %d SECURITY attributes from trailing position to before AS clause", len(securityMatches))
-	}
-
-	// Remove LANGUAGE (handle $$LANGUAGE, $$; LANGUAGE, $$ LANGUAGE - all variations)
-	// Replace with $$; to ensure semicolon is always present
-	trailingLangPattern := `(?i)(\$\$);?\s*(LANGUAGE\s+(?:sql|plpgsql|plperl|plpython|c))\s*;?`
-	trailingLangRe := regexp.MustCompile(trailingLangPattern)
-	beforeLang := sql
-	sql = trailingLangRe.ReplaceAllString(sql, "$1;")
-	if sql != beforeLang {
-		trailingFixCount += len(trailingLangRe.FindAllString(beforeLang, -1))
-	}
-
-	// Remove volatility markers (handle $$VOLATILE, $$; VOLATILE, $$ VOLATILE - all variations)
-	// Replace with $$; to ensure semicolon is always present
-	trailingVolatilityPattern := `(?i)(\$\$);?\s*(VOLATILE|STABLE|IMMUTABLE)\s*;?`
-	trailingVolatilityRe := regexp.MustCompile(trailingVolatilityPattern)
-	beforeVol := sql
-	sql = trailingVolatilityRe.ReplaceAllString(sql, "$1;")
-	if sql != beforeVol {
-		trailingFixCount += len(trailingVolatilityRe.FindAllString(beforeVol, -1))
-	}
-
-	// Now remove any remaining trailing SECURITY DEFINER/INVOKER that we already moved
-	// (This handles any edge cases where the pattern didn't match perfectly)
-	beforeSec := sql
-	sql = trailingSecurityRe.ReplaceAllString(sql, "$1;")
-	if sql != beforeSec {
-		trailingFixCount += len(trailingSecurityRe.FindAllString(beforeSec, -1))
-	}
-
-	if trailingFixCount > 0 {
-		fn.logger.Info("Removed %d redundant trailing function options", trailingFixCount)
-	}
-
-	return sql
-}
-
-// extractFunctionNameFromSQL extracts the function name from a CREATE FUNCTION line.
-func (fn *FunctionNormalizer) extractFunctionNameFromSQL(line string) string {
-	// Pattern: CREATE [OR REPLACE] FUNCTION [schema.]name(...)
-	upperLine := strings.ToUpper(line)
-
-	// Find FUNCTION keyword
-	funcIdx := strings.Index(upperLine, "FUNCTION")
-	if funcIdx == -1 {
-		return ""
-	}
-
-	// Get everything after FUNCTION
-	afterFunc := strings.TrimSpace(line[funcIdx+8:])
-
-	// Function name is everything before the opening parenthesis
-	parenIdx := strings.Index(afterFunc, "(")
-	if parenIdx == -1 {
-		return ""
-	}
-
-	funcNameFull := strings.TrimSpace(afterFunc[:parenIdx])
-
-	// If it's schema-qualified (public.func_name), get just the name
-	parts := strings.Split(funcNameFull, ".")
-	if len(parts) > 1 {
-		return parts[len(parts)-1]
-	}
-
-	return funcNameFull
 }
