@@ -152,6 +152,7 @@ type ValidationConfig struct {
 	EnableExtensionDetection bool   `json:"enable_extension_detection"` // Auto-detect and install extensions (default: true)
 	AutoInstallExtensions    bool   `json:"auto_install_extensions"`    // Automatically install detected extensions (default: true)
 	EnableSQLFixes           bool   `json:"enable_sql_fixes"`           // Apply automatic SQL fixes during validation (default: false)
+	EnablePreprocessing      bool   `json:"enable_preprocessing"`       // Preprocess SQL to fix common issues (e.g., deduplicate publication statements) (default: true)
 	Verbose                  bool   `json:"verbose"`                    // Show detailed validation output (default: true)
 }
 
@@ -273,6 +274,7 @@ func DefaultConfig() *Config {
 			EnableExtensionDetection: true,            // Auto-detect required extensions
 			AutoInstallExtensions:    true,            // Auto-install detected extensions
 			EnableSQLFixes:           false,           // Manual review recommended by default
+			EnablePreprocessing:      true,            // Preprocess SQL to fix common issues (e.g., deduplicate publications)
 			Verbose:                  true,            // Show detailed validation output
 		},
 		AI: AIConfig{
