@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -978,7 +977,7 @@ func (sv *SchemaValidator) validateWithTwoDatabases(ctx context.Context, origina
 
 	result.Duration = time.Since(startTime)
 
-	// BUG #3 FIX: Only consider validation successful if comparison is valid (no original errors)
+	// Only consider validation successful if comparison is valid (no original errors)
 	// AND schemas match
 	if result.ComparisonValid {
 		result.Success = !diff.HasDifferences
@@ -1540,7 +1539,7 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 	sv.logInfo("📌 Docker assigned port: %d", assignedPort)
 	containerInfo := &ContainerInfo{ID: resp.ID, Port: assignedPort}
 
-	// BUG FIX: Re-inspect after a brief delay to get the actual bound port
+	// Re-inspect after a brief delay to get the actual bound port
 	// Docker may not have fully bound the port when we first inspect
 	time.Sleep(500 * time.Millisecond)
 	containerJSON2, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
@@ -1583,12 +1582,12 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 			sv.logInfo("⚠️  Warning: Failed to restart container: %v", err)
 		} else {
 			sv.logInfo("☑ Container restarted successfully")
-			// BUG #5 FIX: Wait a bit after restart for PostgreSQL to begin initialization
+			// Wait a bit after restart for PostgreSQL to begin initialization
 			// Without this, we immediately try to connect before PostgreSQL has started
 			sv.logInfo("⏳ Waiting 10 seconds for PostgreSQL to initialize after restart...")
 			time.Sleep(10 * time.Second)
 
-			// BUG #1 FIX (additional): Re-inspect port after container restart
+			// Re-inspect port after container restart
 			// Docker may reassign the port binding when the container restarts
 			containerJSON3, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
 			if err == nil {
@@ -1802,12 +1801,7 @@ func (sv *SchemaValidator) waitForPostgreSQLReady(ctx context.Context, container
 	}
 }
 
-// Backward compatibility alias
-//
-//nolint:unused // Backward compatibility alias, kept for potential future use
-func (sv *SchemaValidator) waitForContainer(ctx context.Context, containerInfo *ContainerInfo) error {
-	return sv.waitForPostgreSQLReady(ctx, containerInfo)
-}
+
 
 func (sv *SchemaValidator) installExtensions(ctx context.Context, containerInfo *ContainerInfo, extensions []string) error {
 	dsn := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", containerInfo.Port)
@@ -2370,24 +2364,6 @@ func (sv *SchemaValidator) compareSchemasWithNormalization(ctx context.Context, 
 	// Compare normalized schemas
 	diff := CompareNormalizedSchemas(schema1, schema2)
 	return diff, nil
-}
-
-//nolint:unused // Kept for backward compatibility, use DumpAndNormalizeContainerSchema instead
-func (sv *SchemaValidator) dumpContainerSchema(ctx context.Context, containerInfo *ContainerInfo) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", "exec", containerInfo.ID,
-		"pg_dump", "-U", "postgres", "-d", "postgres", "--schema-only")
-
-	output, err := cmd.Output()
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to dump schema",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Ensure pg_dump is available in the container")
-	}
-
-	return string(output), nil
 }
 
 func (sv *SchemaValidator) compareSchemas(db1, db2 *sql.DB) (string, error) {
