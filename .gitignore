@@ -315,3 +315,12 @@ case-study-outputs/vdk-hub-standard-no-ai/.squashmap.json
 case-study-outputs/vdk-hub-standard-no-ai/000_baseline.sql
 case-study-outputs/vdk-hub-standard-no-ai/010_data.sql
 e2e-validation-results/vdk-hub-fixed.txt
+case-studies/myroomie/test-index-fix/.squashmap.json
+case-studies/myroomie/test-index-fix/000_baseline.sql
+case-studies/myroomie/test-index-fix/010_data.sql
+case-studies/myroomie/test-phase1-debug/.squashmap.json
+case-studies/myroomie/test-phase1-debug/000_baseline.sql
+case-studies/myroomie/test-phase1-debug/010_data.sql
+case-studies/myroomie/test-phase1-integration/.squashmap.json
+case-studies/myroomie/test-phase1-integration/000_baseline.sql
+case-studies/myroomie/test-phase1-integration/010_data.sql
