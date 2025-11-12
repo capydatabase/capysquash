@@ -12,7 +12,7 @@ import (
 
 // Deparse takes a modified pg_query.ParseResult and generates a SQL string.
 // This is the primary interface for converting AST back to SQL.
-// BUG #2 FIX: Formats deparsed SQL to ensure proper spacing and readability.
+// Formats deparsed SQL to ensure proper spacing and readability.
 func Deparse(tree *pg_query.ParseResult) (string, error) {
 	if tree == nil {
 		return "", nil
@@ -28,14 +28,13 @@ func Deparse(tree *pg_query.ParseResult) (string, error) {
 		).WithInnerError(err)
 	}
 
-	// BUG #2 FIX: Format the deparsed SQL for readability
+	// Format the deparsed SQL for readability
 	// pg_query.Deparse returns compressed single-line SQL, so we add proper formatting
 	formatted := formatDeparserOutput(res)
 	return formatted, nil
 }
 
 // formatDeparserOutput adds proper formatting to compressed SQL from pg_query.Deparse
-// This fixes Bug #2 by ensuring CREATE TABLE, CREATE FUNCTION, etc. are readable
 func formatDeparserOutput(sql string) string {
 	if sql == "" {
 		return sql
@@ -68,8 +67,8 @@ func formatDeparserOutput(sql string) string {
 }
 
 // DeparseWithStatement takes a Statement and its ParseTree, and generates SQL.
-// BUG-001 fix: Clears implicit AccessMethod="btree" from indexes to preserve original semantics.
-// BUG-003 fix: Preserves function volatility markers (STABLE/VOLATILE/IMMUTABLE) during deparsing.
+// Clears implicit AccessMethod="btree" from indexes to preserve original semantics.
+// Preserves function volatility markers (STABLE/VOLATILE/IMMUTABLE) during deparsing.
 func DeparseWithStatement(stmt *types.Statement) (string, error) {
 	if stmt == nil || stmt.ParseTree == nil {
 		if stmt != nil {
@@ -83,14 +82,14 @@ func DeparseWithStatement(stmt *types.Statement) (string, error) {
 		return stmt.SQL, nil
 	}
 
-	// BUG-001 fix: For indexes without explicit access method, clear the
+	// For indexes without explicit access method, clear the
 	// AccessMethod field in the AST before deparsing. This prevents pg_query
 	// from adding "USING btree" which breaks spatial indexes.
 	if stmt.ObjectType == types.TypeIndex && !stmt.IndexHadExplicitAccessMethod {
 		cleanIndexAccessMethod(parseResult)
 	}
 
-	// BUG-003 fix: For functions, preserve volatility markers from original SQL
+	// For functions, preserve volatility markers from original SQL
 	// pg_query.Deparse() doesn't preserve volatility, so we extract from original
 	// SQL and restore after deparsing
 	if stmt.ObjectType == types.TypeFunction {
@@ -106,13 +105,13 @@ func DeparseWithStatement(stmt *types.Statement) (string, error) {
 }
 
 // deparseWithVolatilityPreservation deparses a function while preserving its volatility marker
-// BUG-003 fix: pg_query.Deparse() doesn't preserve STABLE/VOLATILE/IMMUTABLE markers
-// BUG-010 fix: pg_query.Deparse() doesn't preserve SECURITY DEFINER/INVOKER
+// pg_query.Deparse() doesn't preserve STABLE/VOLATILE/IMMUTABLE markers
+// pg_query.Deparse() doesn't preserve SECURITY DEFINER/INVOKER
 func deparseWithVolatilityPreservation(tree *pg_query.ParseResult, originalSQL string) (string, error) {
 	// Extract volatility from original SQL
 	volatility := extractVolatilityMarker(originalSQL)
 
-	// BUG-010 fix: Extract SECURITY DEFINER/INVOKER from original SQL
+	// Extract SECURITY DEFINER/INVOKER from original SQL
 	securityDefiner := extractSecurityDefiner(originalSQL)
 
 	// Deparse normally
@@ -136,7 +135,7 @@ func deparseWithVolatilityPreservation(tree *pg_query.ParseResult, originalSQL s
 		}
 	}
 
-	// BUG-010 fix: Inject SECURITY DEFINER after volatility (or after LANGUAGE if no volatility)
+	// Inject SECURITY DEFINER after volatility (or after LANGUAGE if no volatility)
 	if securityDefiner != "" {
 		deparsed, err = injectSecurityDefiner(deparsed, securityDefiner)
 		if err != nil {
@@ -172,7 +171,7 @@ func extractVolatilityMarker(sql string) string {
 }
 
 // extractSecurityDefiner extracts SECURITY DEFINER or SECURITY INVOKER from function SQL
-// BUG-010 fix: pg_query.Deparse() doesn't preserve these critical security attributes
+// pg_query.Deparse() doesn't preserve these critical security attributes
 func extractSecurityDefiner(sql string) string {
 	upperSQL := strings.ToUpper(sql)
 
@@ -221,7 +220,6 @@ func injectVolatilityMarker(sql string, volatility string) (string, error) {
 
 // injectSecurityDefiner adds SECURITY DEFINER/INVOKER to deparsed function SQL
 // Injects after LANGUAGE and volatility (if present), before AS
-// BUG-010 fix: Preserves critical security attributes dropped by pg_query.Deparse()
 func injectSecurityDefiner(sql string, securityMarker string) (string, error) {
 	// Pattern options:
 	// 1. LANGUAGE xxx VOLATILE/STABLE/IMMUTABLE AS $$ -> inject after volatility
@@ -249,7 +247,7 @@ func injectSecurityDefiner(sql string, securityMarker string) (string, error) {
 }
 
 // cleanIndexAccessMethod removes implicit "btree" access method from IndexStmt nodes
-// BUG-001 fix: Prevents pg_query.Deparse from adding "USING btree" to spatial indexes
+// Prevents pg_query.Deparse from adding "USING btree" to spatial indexes
 func cleanIndexAccessMethod(tree *pg_query.ParseResult) {
 	if tree == nil {
 		return
@@ -268,21 +266,4 @@ func cleanIndexAccessMethod(tree *pg_query.ParseResult) {
 			}
 		}
 	}
-}
-
-//nolint:unused // Utility function for future node deparsing needs
-// deparseNode converts a single Node back to SQL using pg_query.Deparse
-func deparseNode(node *pg_query.Node) (string, error) {
-	if node == nil {
-		return "", nil
-	}
-	// Create a dummy ParseResult to use the real deparser
-	tree := &pg_query.ParseResult{
-		Stmts: []*pg_query.RawStmt{
-			{
-				Stmt: node,
-			},
-		},
-	}
-	return Deparse(tree)
 }
