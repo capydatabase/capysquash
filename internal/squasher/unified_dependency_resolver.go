@@ -116,8 +116,8 @@ func (udr *UnifiedDependencyResolver) ResolveLifecycleDependencies(
 			sortedObjects, err := udr.resolveLifecycleWithinCategory(objects, category, graph)
 			if err != nil {
 				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Warning: Error in category %s: %v", category, err)
-				// Continue with best effort
-				sortedObjects = udr.fallbackSortLifecycles(objects)
+				// Continue with best effort (use lifecycle-aware sorting)
+				sortedObjects = udr.fallbackSortLifecycles(objects, lifecycles)
 			}
 
 			orderedObjects = append(orderedObjects, sortedObjects...)
@@ -290,7 +290,7 @@ func (udr *UnifiedDependencyResolver) breakCyclesAndSort(
 	cycles := subGraph.DetectCycles()
 	if len(cycles) == 0 {
 		// No cycles, should not happen, but handle gracefully
-		return udr.fallbackSortLifecycles(objects), nil
+		return udr.fallbackSortLifecycles(objects, nil), nil
 	}
 
 	// Strategy 1: Remove least important edges in cycles
@@ -301,7 +301,7 @@ func (udr *UnifiedDependencyResolver) breakCyclesAndSort(
 	}
 
 	// Strategy 2: Fallback to statement-type ordering
-	return udr.fallbackSortLifecycles(objects), errors.NewError(
+	return udr.fallbackSortLifecycles(objects, nil), errors.NewError(
 		errors.ErrorCodeDependencyError,
 		"cycles broken with fallback sorting",
 		errors.SeverityWarning,
@@ -404,14 +404,24 @@ func (udr *UnifiedDependencyResolver) isCriticalLifecycleDependency(from, to tra
 }
 
 // fallbackSortLifecycles provides object-type based sorting when topological sort fails
-func (udr *UnifiedDependencyResolver) fallbackSortLifecycles(objects []tracking.ObjectID) []tracking.ObjectID {
+// Uses lifecycle-aware type ordering to handle special cases like DO blocks with CREATE TYPE
+func (udr *UnifiedDependencyResolver) fallbackSortLifecycles(objects []tracking.ObjectID, lifecycles map[string]*tracking.ObjectLifecycle) []tracking.ObjectID {
 	utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Using fallback sorting for %d lifecycle objects", len(objects))
 
 	// Sort by object type order, then by name for stability
 	sort.Slice(objects, func(i, j int) bool {
-		// First, sort by type order
-		orderI := udr.getTypeOrder(objects[i].Type)
-		orderJ := udr.getTypeOrder(objects[j].Type)
+		// Get lifecycles for special case handling
+		var lifecycleI, lifecycleJ *tracking.ObjectLifecycle
+		if lifecycles != nil {
+			keyI := fmt.Sprintf("%s:%s", objects[i].Type, objects[i].Name)
+			keyJ := fmt.Sprintf("%s:%s", objects[j].Type, objects[j].Name)
+			lifecycleI = lifecycles[keyI]
+			lifecycleJ = lifecycles[keyJ]
+		}
+
+		// First, sort by type order (lifecycle-aware for DO blocks)
+		orderI := udr.getTypeOrderForLifecycle(objects[i].Type, lifecycleI)
+		orderJ := udr.getTypeOrderForLifecycle(objects[j].Type, lifecycleJ)
 
 		if orderI != orderJ {
 			return orderI < orderJ
@@ -566,7 +576,6 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 		Provides:     []string{},
 	}
 
-	// CRITICAL: First, extract dependencies from original statements (from parser)
 	// These are more accurate than regex-based extraction, especially for views
 	for _, stmt := range result.OriginalStatements {
 		info.Dependencies = append(info.Dependencies, stmt.Dependencies...)
@@ -583,8 +592,6 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 	switch category {
 	case types.CategoryExtensions:
 		info.RequiredFirst = true
-		// CRITICAL: Extract extension dependencies (e.g., earthdistance depends on cube)
-		// BUG #1 REGRESSION FIX: Add extension-to-extension dependencies
 		info.Dependencies = append(info.Dependencies, udr.extractExtensionDependencies(sql)...)
 		info.Dependencies = append(info.Dependencies, udr.extractExtensionToExtensionDependencies(sql)...)
 		info.Provides = append(info.Provides, udr.extractExtensionProvisions(sql)...)
@@ -593,12 +600,9 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 		info.Dependencies = append(info.Dependencies, udr.extractSchemaDependencies(sql)...)
 		info.Dependencies = append(info.Dependencies, udr.extractExtensionDependencies(sql)...)
 		// Type dependencies are already extracted by parser from AST and included in stmt.Dependencies above
-		// CRITICAL: Extract table-to-table dependencies (foreign keys) for correct ordering
 		info.Dependencies = append(info.Dependencies, udr.extractTableDependencies(sql)...)
-		// CRITICAL (Bug #9 Fix): Extract view-to-view dependencies from FROM/JOIN clauses
 		// This ensures views are created in correct order when views depend on other views
 		info.Dependencies = append(info.Dependencies, udr.extractViewDependencies(sql)...)
-		// CRITICAL: Extract function dependencies (e.g., from CHECK constraints calling functions)
 		// This ensures functions used in CHECK constraints are created before the tables
 		info.Dependencies = append(info.Dependencies, udr.extractFunctionDependencies(sql)...)
 		info.Provides = append(info.Provides, udr.extractTableProvisions(sql)...)
@@ -613,9 +617,7 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 		info.Dependencies = append(info.Dependencies, udr.extractTableDependencies(sql)...)
 		info.Dependencies = append(info.Dependencies, udr.extractSchemaDependencies(sql)...)
 		info.Dependencies = append(info.Dependencies, udr.extractExtensionDependencies(sql)...)
-		// CRITICAL: Extract function-to-function dependencies for correct ordering
 		info.Dependencies = append(info.Dependencies, udr.extractFunctionDependencies(sql)...)
-		// CRITICAL: Declare what functions this SQL provides for dependency resolution
 		info.Provides = append(info.Provides, udr.extractFunctionProvisions(sql)...)
 
 	case types.CategoryTriggers:
@@ -824,7 +826,6 @@ func (udr *UnifiedDependencyResolver) extractTableDependencies(sql string) []str
 }
 
 // extractViewDependencies finds view references in FROM/JOIN clauses
-// CRITICAL FIX (Bug #9): Views can depend on other views, not just tables
 // This method extracts view-to-view dependencies to ensure proper creation order
 func (udr *UnifiedDependencyResolver) extractViewDependencies(sql string) []string {
 	var deps []string
@@ -933,7 +934,7 @@ func (udr *UnifiedDependencyResolver) extractExtensionDependencies(sql string) [
 
 // extractExtensionToExtensionDependencies returns dependencies for CREATE EXTENSION statements
 // where the extension itself requires another extension to be installed first.
-// BUG #1 REGRESSION FIX: This ensures correct ordering of extension creation (e.g., cube before earthdistance)
+// This ensures correct ordering of extension creation (e.g., cube before earthdistance)
 func (udr *UnifiedDependencyResolver) extractExtensionToExtensionDependencies(sql string) []string {
 	var deps []string
 
@@ -1278,7 +1279,6 @@ func (udr *UnifiedDependencyResolver) dependencyMatches(dependency, provision st
 	}
 
 	// Direct table name match (handle schema qualifications)
-	// CRITICAL: Strip schema prefixes for comparison to handle both "blueprints" and "public.blueprints"
 	depName := dependency
 	provName := provision
 

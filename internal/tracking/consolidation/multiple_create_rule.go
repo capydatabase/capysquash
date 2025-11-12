@@ -92,7 +92,7 @@ func (r *MultipleCreateConsolidationRule) Apply(lifecycle *tracking.ObjectLifecy
 		}
 	}
 
-	// BUG FIX #5: Also integrate ALTER operations if present
+	// Also integrate ALTER operations if present
 	// After merging multiple CREATEs, we need to also apply any ALTER statements
 	if len(alterStmts) > 0 {
 		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  Integrating %d ALTER statements into merged CREATE for %s", len(alterStmts), lifecycle.Name)
@@ -104,9 +104,21 @@ func (r *MultipleCreateConsolidationRule) Apply(lifecycle *tracking.ObjectLifecy
 		}, alterStmts)
 	}
 
-	// BUG #11 NOTE: Indexes should remain as separate lifecycle objects
-	// The issue is not in consolidation but in how the tracker handles indexes
-	// when tables are recreated. This consolidation rule handles table schemas only.
+	// Consolidate indexes from all CREATE events (fixes index loss bug)
+	// When tables have DROP→CREATE cycles, indexes from earlier CREATEs are lost
+	// This consolidates all indexes from all CREATE events for this table
+	var consolidatedIndexes []string
+	if len(allCreateStmts) > 1 && lifecycle.Type == types.TypeTable {
+		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  Consolidating indexes for table %s (multiple CREATE events detected)", lifecycle.Name)
+		consolidatedIndexes = consolidateIndexesForTable(lifecycle, engine, allCreateStmts)
+		if len(consolidatedIndexes) > 0 {
+			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  Successfully consolidated %d indexes for table %s", len(consolidatedIndexes), lifecycle.Name)
+			// Append indexes to the consolidated table definition
+			for _, indexSQL := range consolidatedIndexes {
+				consolidatedSQL += "\n\n" + indexSQL + ";"
+			}
+		}
+	}
 
 	// Collect all statements for tracking
 	allStmts := make([]types.Statement, 0, len(allCreateStmts)+len(alterStmts))
@@ -142,6 +154,14 @@ func (r *MultipleCreateConsolidationRule) Apply(lifecycle *tracking.ObjectLifecy
 			fmt.Sprintf("Integrated %d ALTER operations", len(alterStmts)))
 	}
 
+	// Add optimization message if indexes were consolidated
+	if len(consolidatedIndexes) > 0 {
+		result.Optimizations = append(result.Optimizations,
+			fmt.Sprintf("Consolidated %d indexes from all CREATE events", len(consolidatedIndexes)))
+		// Update estimated savings to account for preserved indexes
+		result.EstimatedSavings.StatementsReduced += len(consolidatedIndexes)
+	}
+
 	return result, nil
 }
 
@@ -154,7 +174,7 @@ func (r *MultipleCreateConsolidationRule) Risk() tracking.RiskLevel {
 // and shared across multiple rules
 
 // consolidateIndexesForTable merges indexes from all CREATE events for a table
-// BUG #11 FIX: AST-based approach using IndexStmt.Relation to track table associations
+// AST-based approach using IndexStmt.Relation to track table associations
 //
 // Problem: When a table has multiple CREATE statements (CREATE → DROP → CREATE pattern),
 // indexes from the first CREATE are lost. This function consolidates indexes from ALL
