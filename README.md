@@ -2,13 +2,60 @@
 
 > The open-source Go engine that powers CAPYSQUASH
 
-**Catalog-proven equivalence** via double-build validation. Intelligently reorganizes your migration history into clean, production-ready SQL—without breaking anything.
+**Catalog-proven equivalence** via double-build validation. Intelligently reorganizes your migration history into clean, production-ready SQL-without breaking anything.
 
-**Current version:** 0.9.7 (Production Ready) ✅
+**Current version:** 0.9.7 (Beta) ⚠️
+
+## ⚠️ Beta Release Status
+
+Pgsquash-engine is currently in **beta** (v0.9.7) with active development toward v1.0.
+
+### Production Use Recommendations
+
+- ✅ **Use conservative safety modes** (`paranoid` or `conservative`) for production
+- ✅ **Always validate** with `pgsquash validate` before applying to production
+- ✅ **Test thoroughly** in staging environments
+- ✅ **Backup production data** before applying any migrations
+- ✅ **Review generated SQL** manually for critical databases
+
+### What Works Well
+
+- Core consolidation engine (5-phase pipeline)
+- Safety levels and dependency resolution
+- Docker-based schema validation
+- Supabase, Clerk, Prisma, Drizzle plugin detection
+- AST-based PostgreSQL parsing (pg_query_go)
+
+### Known Limitations
+
+- Test coverage expansion in progress
+- Large migrations (500+ files) should use `--streaming` mode
+- Some complex DDL edge cases may require manual review
+- **Schema comparator blind spots**: Docker validation compares catalog
+  signatures for extensions, tables/columns, constraints, indexes, views,
+  functions, triggers, and RLS policies. It does **not** currently compare
+  sequences, enum/custom type definitions, domains, grants/privileges, or
+  comments. Differences in those object classes will not be detected by
+  `validate` or post-squash validation - review them manually if they matter
+  to your deployment.
+- **Streaming mode** does not run backup generation, rollback plan generation,
+  SQL transformation, or paranoid database validation. Requesting
+  `--backup`/`--rollback` or `--safety paranoid` together with streaming is
+  rejected with an error instead of being silently skipped.
+
+### Stability Promise
+
+- **Public API** (`pkg/engine`) is stable - breaking changes will bump major version
+- **CLI interface** is stable - flag changes will be deprecated first
+- **Configuration format** stable - migration guides provided for any changes
+
+We’re committed to a stable v1.0 release. **Questions?** [Open an issue](https://github.com/capysquash/pgsquash-engine/issues/new/choose)
+
+---
 
 ## What is this?
 
-pgsquash-engine is the core library behind [CAPYSQUASH](https://capysquash.dev), the automatic migration cleanup tool for Supabase, Neon, and modern Postgres.
+Pgsquash-engine is the core library behind [CAPYSQUASH](https://capysquash.dev), the automatic migration cleanup tool for Supabase, Neon, and modern Postgres.
 
 **For most users:** Use [CAPYSQUASH](https://capysquash.dev) for one-click cleanup or [capysquash-cli](https://github.com/CAPYSQUASH/capysquash-cli) for terminal workflows.
 
@@ -18,19 +65,19 @@ pgsquash-engine is the core library behind [CAPYSQUASH](https://capysquash.dev),
 
 **The technology behind CAPYSQUASH.** This is the open-source Go library that powers both CAPYSQUASH and capysquash-cli.
 
-Intelligently consolidates and optimizes your migration history while preserving dependencies, respecting safety constraints, and validating every change. Works with your existing setup—Supabase projects, Prisma schemas, Clerk auth. No migration rewrites, no new syntax to learn. Just cleaner, safer SQL.
+Intelligently consolidates and optimizes your migration history while preserving dependencies, respecting safety constraints, and validating every change. Works with your existing setup-Supabase projects, Prisma schemas, Clerk auth. No migration rewrites, no new syntax to learn. Just cleaner, safer SQL.
 
-**Production-ready** with comprehensive validation, safety modes, and proven equivalence guarantees.
+**Beta** (v0.9.7) with comprehensive validation, safety modes, and catalog-based equivalence checks - see the Beta Release Status section above for production-use recommendations.
 
 ## What it does
 
 - **Intelligently consolidates** 100-300+ migration files into clean, organized output
-- **Catalog-proven equivalence** via double-build validation—proves the output produces an identical schema by running both versions through PostgreSQL and comparing the results
+- **Catalog-proven equivalence** via double-build validation-proves the output produces an identical schema by running both versions through PostgreSQL and comparing the results
 - **Dependency-aware** processing that automatically resolves and orders statements safely
 - **Safety-first** approach with multiple levels from paranoid (production) to aggressive (dev)
 - **Schema validation** against your original schema using Docker containers
-- **AI-powered analysis** for detecting duplicate functions, dead code, and optimization opportunities
-- **Streaming architecture** for memory-efficient processing—processes migrations incrementally without loading entire history into memory (tested with 1000+ migration files)
+- **Deterministic static analysis** for quality/safety checks and reproducible harness inputs
+- **Streaming architecture** for memory-efficient processing-processes migrations incrementally without loading entire history into memory (tested with 1000+ migration files)
 - **Lock level analysis** with PostgreSQL transaction planning and conflict detection
 - **Branch safety warnings** with git integration and protected branch enforcement
 - **Manual override pragmas** (`-- pgsquash:ignore`) for complex edge cases
@@ -38,24 +85,31 @@ Intelligently consolidates and optimizes your migration history while preserving
 
 ## Interactive mode
 
-pgsquash-engine includes a built-in TUI for a visual interface:
+Pgsquash-engine includes a built-in TUI for a visual interface:
 
 ```bash
+
 # Launch the dashboard (both commands work identically)
+
 pgsquash tui migrations/
 capysquash tui migrations/
 
 # Or add --tui to any command
+
 pgsquash analyze migrations/ --tui
 pgsquash squash migrations/ --tui
 
 # Jump to specific views
+
 pgsquash tui analyze migrations/     # analysis
+
 pgsquash tui config                  # settings
+
 pgsquash tui deps migrations/        # dependency graph
+
 ```
 
-The TUI gives you a dashboard with stats, live analysis, a config wizard, dependency visualization, and real-time progress tracking. Press `?` for keyboard shortcuts.
+The TUI gives you a dashboard with stats, live analysis, a config wizard, dependency visualization, and real-time progress tracking. Press `?` For keyboard shortcuts.
 
 ## Installation
 
@@ -64,11 +118,14 @@ The TUI gives you a dashboard with stats, live analysis, a config wizard, depend
 **For developers building custom tools:**
 
 ```bash
+
 # As a Go library
-go get github.com/CAPYSQUASH/pgsquash-engine
+
+go get github.com/capysquash/pgsquash-engine
 
 # Or build from source
-git clone https://github.com/CAPYSQUASH/pgsquash-engine
+
+git clone https://github.com/capysquash/pgsquash-engine
 cd pgsquash-engine
 go build -o pgsquash cmd/pgsquash/main.go
 ```
@@ -78,11 +135,13 @@ go build -o pgsquash cmd/pgsquash/main.go
 ### For Most Users
 
 **Try CAPYSQUASH** (fastest - 30 seconds):
-- Visit https://capysquash.dev
+
+- Visit <https://capysquash.dev>
 - Upload migrations or connect GitHub
 - Get one-click cleanup with visual dashboard
 
 **Or use capysquash-cli** (for terminal workflows):
+
 ```bash
 brew install capysquash-cli
 capysquash analyze migrations/
@@ -94,13 +153,17 @@ capysquash squash migrations/ --output clean/
 **Building with Supabase or Clerk?**
 
 ```bash
+
 # Auto-detects auth schemas, RLS policies, storage buckets
+
 pgsquash analyze migrations/*.sql
 
 # Preview consolidation (doesn't change files)
+
 pgsquash squash migrations/*.sql --dry-run
 
 # Consolidate and validate against your real schema
+
 pgsquash squash migrations/*.sql --output clean/
 ```
 
@@ -110,50 +173,67 @@ pgsquash squash migrations/*.sql --output clean/
 ### Managing a team?
 
 ```bash
+
 # Safe mode for production deploys
+
 pgsquash safe migrations/*.sql --output production/
 
 # Validate before merging PRs
+
 pgsquash validate migrations/ clean/
 
 # Set up GitHub webhooks for automatic PR analysis
-# See docs/github-webhooks.md
+
+# See https://capysquash.dev/docs/pgsquash-engine/api-server
+
 ```
 
 ### Working on multiple projects?
 
 ```bash
+
 # Share config across team with version control
+
 pgsquash init-config  # creates pgsquash.config.json
 
 # Consistent squashing across projects
+
 pgsquash squash migrations/*.sql  # uses config automatically
+
 ```
 
 ### Just need it to work?
 
 ```bash
+
 # Five-minute setup
+
 pgsquash analyze migrations/*.sql
 pgsquash squash migrations/*.sql --dry-run
 pgsquash squash migrations/*.sql --output clean/
 
 # Advanced features
-pgsquash plan migrations/*.sql                    # Show transaction plan
-pgsquash explain-locks migrations/*.sql          # Analyze lock conflicts
+
+pgsquash squash migrations/*.sql --explain        # Show detailed consolidation plan (implies --dry-run)
+
 pgsquash squash migrations/*.sql --branch-check   # Branch safety check
+
 ```
 
 ## Common workflows
 
 ```bash
+
 # For production: safe and conservative
+
 pgsquash safe migrations/*.sql --output production/
 
 # For development: more aggressive optimization
+
 pgsquash fast migrations/*.sql --output dev/
 
 # Just analyze without changing anything
+
 pgsquash analyze-deep migrations/*.sql
 ```
 
@@ -170,7 +250,7 @@ Pick the mode that matches your risk tolerance:
 
 ## Example output
 
-Here's what consolidated SQL looks like:
+Here’s what consolidated SQL looks like:
 
 ```sql
 -- Generated by pgsquash (standard mode)
@@ -202,13 +282,17 @@ CREATE POLICY users_select ON users FOR SELECT USING (true);
 Ready-to-use scripts for popular migration tools:
 
 ```bash
+
 # Apply squashed migrations and mark as applied in Prisma
+
 scripts/prisma-baseline.sh
 
 # Reset Drizzle migrations and apply squashed versions
+
 scripts/drizzle-reset.sh
 
 # GitHub Actions workflow for automated validation
+
 .github/workflows/pgsquash-validate.yml
 ```
 
@@ -216,26 +300,27 @@ See [scripts/README.md](scripts/README.md) for detailed usage and setup instruct
 
 ## Documentation
 
-**📖 All comprehensive documentation is centralized in the [ecosystem docs](../capysquash-docs/ecosystem%20docs/).**
+**📖 Full documentation lives at [capysquash.dev/docs](https://capysquash.dev/docs).**
 
 ### Quick Links
 
 **User Guides:**
-- [Quickstart](../capysquash-docs/ecosystem%20docs/pgsquash-engine/user%20docs/quickstart.md) - Get started in 5 minutes
-- [Configuration](../capysquash-docs/ecosystem%20docs/pgsquash-engine/user%20docs/configuration.md) - Config file options
-- [Safety Levels](../capysquash-docs/ecosystem%20docs/pgsquash-engine/user%20docs/safety-levels.md) - Choosing the right mode
-- [Troubleshooting](../capysquash-docs/ecosystem%20docs/pgsquash-engine/user%20docs/troubleshooting.md) - Common issues
+
+- [Getting Started](https://capysquash.dev/docs/getting-started) - Get started in 5 minutes
+- [Configuration](https://capysquash.dev/docs/pgsquash-engine/configuration) - Config file options
+- [Safety Levels](https://capysquash.dev/docs/core-concepts/safety-levels) - Choosing the right mode
+- [Troubleshooting](https://capysquash.dev/docs/troubleshooting) - Common issues
 
 **Developer Docs:**
-- [Public API Reference](../capysquash-docs/ecosystem%20docs/pgsquash-engine/PUBLIC_API_REFERENCE.md) - Complete API documentation
-- [Architecture](../capysquash-docs/ecosystem%20docs/pgsquash-engine/ARCHITECTURE.md) - System design
-- [Plugin Development](../capysquash-docs/ecosystem%20docs/pgsquash-engine/user%20docs/plugin-development.md) - Build custom plugins
+
+- [Library API](https://capysquash.dev/docs/pgsquash-engine/library-api) - The public Go API (`pkg/engine`)
+- [Architecture](https://capysquash.dev/docs/core-concepts/ecosystem-architecture) - System design
+- [Plugin Development](internal/plugins/README.md) - Build custom plugins
+- [AI Features](https://capysquash.dev/docs/pgsquash-engine/ai-features) - Harness / AI integration
 
 **Deployment:**
-- [Fly.io Deployment](../capysquash-docs/ecosystem%20docs/pgsquash-engine/FLYIO_DEPLOYMENT.md) - Deploy to Fly.io
-- [Homebrew Setup](../capysquash-docs/ecosystem%20docs/pgsquash-engine/HOMEBREW_SETUP.md) - Publishing via Homebrew
 
-**See also:** [Complete Ecosystem Docs](../capysquash-docs/ecosystem%20docs/README.md) | [Documentation Index](../DOCUMENTATION_INDEX.md)
+- [API Server](https://capysquash.dev/docs/pgsquash-engine/api-server) - Run the hosted API
 
 ## Configuration
 
@@ -267,7 +352,7 @@ Example `pgsquash.config.json`:
 }
 ```
 
-Check [configuration.md](docs/configuration.md) for all available options.
+See the [configuration reference](https://capysquash.dev/docs/pgsquash-engine/configuration) for all available options.
 
 ## API Server (capysquash-api)
 
@@ -276,7 +361,9 @@ The HTTP API server is now maintained as a separate module for better modularity
 **[capysquash-api](https://github.com/CAPYSQUASH/capysquash-api)** - Production-ready REST API server
 
 ```bash
+
 # Clone and build the API server (separate repository)
+
 git clone https://github.com/CAPYSQUASH/capysquash-api
 cd capysquash-api
 go build -o api-server ./cmd/api-server
@@ -288,7 +375,7 @@ go build -o api-server ./cmd/api-server
 - REST endpoints for analyze and squash operations
 - JWT authentication with database persistence
 - GitHub webhook integration for PR automation
-- AI-powered analysis endpoints
+- Managed AI harness endpoints (served by `capysquash-api`, not OSS engine runtime)
 - Rules and plugins management
 - Operations tracking and monitoring
 - CORS support for web platforms
@@ -298,16 +385,20 @@ See the [capysquash-api repository](https://github.com/CAPYSQUASH/capysquash-api
 ## Building from source
 
 ```bash
+
 # Clone and build
-git clone https://github.com/CAPYSQUASH/pgsquash-engine
+
+git clone https://github.com/capysquash/pgsquash-engine
 cd pgsquash-engine
 go mod tidy
 go build -o pgsquash cmd/pgsquash/main.go
 
 # Run tests
+
 go test ./...
 
 # Try it out
+
 ./pgsquash analyze test_migrations/*.sql
 ```
 
@@ -316,24 +407,32 @@ The codebase is organized as:
 ```
 cmd/
 └── pgsquash/           # CLI entry point
+
 internal/
 ├── parser/             # SQL parsing via pg_query_go
+
 ├── tracking/           # Object lifecycle tracking
+
 ├── squasher/           # Consolidation logic
+
 ├── validation/         # Docker validation
-├── ai/                 # AI integrations
+
 ├── github/             # GitHub integration
+
 ├── plugins/            # Plugin system
+
 └── transformation/     # SQL transformations
+
 pkg/
 └── engine/             # Public Go API for library usage
+
 ```
 
 **Note:** The HTTP API server (`cmd/api-server`) has been moved to [capysquash-api](https://github.com/CAPYSQUASH/capysquash-api) as a separate module.
 
 ## What's next
 
-We're working toward 1.0 with:
+We’re working toward 1.0 with:
 
 - Better test coverage
 - Performance benchmarks
@@ -341,15 +440,15 @@ We're working toward 1.0 with:
 - Platform-specific plugins (Neon, Railway)
 - PostgreSQL 18 support
 
-See the [roadmap](docs/internal/roadmap/ROADMAP.md) for details.
+See the [documentation](https://capysquash.dev/docs) for details.
 
 ## License
 
-MIT License - see LICENSE file
+MIT License - see LICENSE file.
 
 ## The CAPYSQUASH Ecosystem
 
-pgsquash-engine is the core Go library that powers the CAPYSQUASH ecosystem:
+Pgsquash-engine is the core Go library that powers the CAPYSQUASH ecosystem:
 
 ```
 ┌─────────────────────────────────────────┐
@@ -392,10 +491,10 @@ pgsquash-engine is the core Go library that powers the CAPYSQUASH ecosystem:
 ## Links
 
 - **CAPYSQUASH**: <https://capysquash.dev>
-- **GitHub**: <https://github.com/CAPYSQUASH/pgsquash-engine>
-- **Documentation**: [docs/user docs/](docs/user%20docs/)
-- **Issues**: <https://github.com/CAPYSQUASH/pgsquash-engine/issues>
+- **GitHub**: <https://github.com/capysquash/pgsquash-engine>
+- **Documentation**: [capysquash.dev/docs](https://capysquash.dev/docs)
+- **Issues**: <https://github.com/capysquash/pgsquash-engine/issues>
 
 ---
 
-<sub>Powered by pgsquash-engine • Part of the CAPYSQUASH ecosystem</sub>
+<Sub>Powered by pgsquash-engine • Part of the CAPYSQUASH ecosystem</sub>.

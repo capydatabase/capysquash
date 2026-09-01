@@ -30,12 +30,12 @@ type DataOperation struct {
 //
 // Therefore, we track them separately using AST-based dependency extraction.
 type DataOperationTracker struct {
-	operations []*DataOperation           // All data operations in original order
+	operations []*DataOperation            // All data operations in original order
 	byTable    map[string][]*DataOperation // Operations grouped by table for quick lookup
-	insertOps  []*DataOperation           // All INSERT operations (for dependency resolution)
-	updateOps  []*DataOperation           // All UPDATE operations
-	deleteOps  []*DataOperation           // All DELETE operations
-	logger     *utils.Logger              // Logger for tracking operations
+	insertOps  []*DataOperation            // All INSERT operations (for dependency resolution)
+	updateOps  []*DataOperation            // All UPDATE operations
+	deleteOps  []*DataOperation            // All DELETE operations
+	logger     *utils.Logger               // Logger for tracking operations
 }
 
 // NewDataOperationTracker creates a new data operation tracker
@@ -248,8 +248,8 @@ func (dot *DataOperationTracker) topologicalSort() []*DataOperation {
 }
 
 // GetStatistics returns statistics about tracked data operations
-func (dot *DataOperationTracker) GetStatistics() map[string]interface{} {
-	return map[string]interface{}{
+func (dot *DataOperationTracker) GetStatistics() map[string]any {
+	return map[string]any{
 		"total_operations": len(dot.operations),
 		"insert_count":     len(dot.insertOps),
 		"update_count":     len(dot.updateOps),
@@ -273,8 +273,8 @@ func extractTableNameFromAST(stmt types.Statement) (string, error) {
 		)
 	}
 
-	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
-	if !ok || len(parseResult.Stmts) == 0 {
+	parseResult := stmt.ParseTree
+	if parseResult == nil || len(parseResult.Stmts) == 0 {
 		return "", errors.NewError(
 			errors.ErrorCodeAnalysisError,
 			"invalid parse tree structure",
@@ -335,8 +335,8 @@ func extractDependenciesFromAST(stmt types.Statement) ([]string, error) {
 		return []string{}, nil
 	}
 
-	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
-	if !ok || len(parseResult.Stmts) == 0 {
+	parseResult := stmt.ParseTree
+	if parseResult == nil || len(parseResult.Stmts) == 0 {
 		return []string{}, nil
 	}
 
@@ -421,10 +421,28 @@ func extractFromNode(node *pg_query.Node, dependencies map[string]bool) {
 
 // extractFromWhereClause extracts table references from WHERE clause subqueries
 func extractFromWhereClause(whereClause *pg_query.Node, dependencies map[string]bool) {
-	// This is a simplified implementation
-	// A complete implementation would recursively walk the entire WHERE clause AST
-	// For now, we handle the most common case: simple subqueries
-	// TODO: Implement full recursive WHERE clause parsing if needed
-	_ = whereClause
-	_ = dependencies
+	if whereClause == nil {
+		return
+	}
+
+	// Simple recursive walker to find SubLinks
+	// In a production-grade implementation, this should use a proper AST walker
+	// For now, we manually check the top-level structure and common patterns
+
+	switch n := whereClause.Node.(type) {
+	case *pg_query.Node_SubLink:
+		if n.SubLink.Subselect != nil {
+			extractFromSelectStmt(n.SubLink.Subselect, dependencies)
+		}
+	case *pg_query.Node_BoolExpr:
+		for _, arg := range n.BoolExpr.Args {
+			extractFromWhereClause(arg, dependencies)
+		}
+	case *pg_query.Node_AExpr:
+		extractFromWhereClause(n.AExpr.Lexpr, dependencies)
+		extractFromWhereClause(n.AExpr.Rexpr, dependencies)
+	}
+
+	// Note: Deep extraction of all possible expression types types is omitted for brevity
+	// but this covers the most common cases of subqueries in WHERE clauses.
 }

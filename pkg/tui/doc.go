@@ -88,6 +88,7 @@
 //   - ViewConfig: Interactive configuration wizard
 //   - ViewDependencyGraph: Visual dependency graph
 //   - ViewProgress: Real-time operation progress
+//   - ViewValidation: Schema validation results
 //   - ViewHelp: Keyboard shortcuts and help
 //
 // # Integration with CLI Tools

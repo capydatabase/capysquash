@@ -9,46 +9,7 @@ import (
 	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
-// WarningSeverity maps to errors.Severity for backward compatibility
-// DEPRECATED: Use errors.Severity directly
-type WarningSeverity = errors.Severity
-
-// Severity constants for backward compatibility during migration
-// DEPRECATED: Use errors.SeverityInfo, errors.SeverityWarning, errors.SeverityError, errors.SeverityCritical directly
-const (
-	SeverityInfo     = errors.SeverityInfo
-	SeverityWarning  = errors.SeverityWarning
-	SeverityLow      = errors.SeverityWarning // Map Low → Warning
-	SeverityMedium   = errors.SeverityWarning // Map Medium → Warning
-	SeverityHigh     = errors.SeverityError   // Map High → Error
-	SeverityCritical = errors.SeverityCritical
-)
-
-// WarningCategory maps to errors.Category for backward compatibility
-// DEPRECATED: Use errors.Category directly
-type WarningCategory = errors.Category
-
-// Category constants for backward compatibility during migration
-// DEPRECATED: Use errors.CategoryX directly
-const (
-	CategoryDependency     = errors.CategoryDependency
-	CategoryCycle          = errors.CategoryCycle
-	CategoryOptimization   = errors.CategoryOptimization
-	CategoryRisk           = errors.CategoryRisk
-	CategoryTransformation = errors.CategoryTransformation
-	CategoryBackup         = errors.CategoryBackup
-	CategoryRollback       = errors.CategoryRollback
-	CategoryValidation     = errors.CategoryValidation
-	CategoryInfo           = errors.CategoryInfo
-	CategoryGeneral        = errors.CategoryGeneral
-)
-
-// Warning is now an alias to errors.StructuredError for backward compatibility
-// DEPRECATED: Use errors.StructuredError directly
-type Warning = errors.StructuredError
-
 // WarningManager handles deduplication and categorization of warnings
-// Now backed by errors.StructuredError instead of custom Warning type
 type WarningManager struct {
 	warnings   []*errors.StructuredError
 	seenHashes map[string]bool
@@ -146,7 +107,7 @@ func (wm *WarningManager) CountBySeverity() map[errors.Severity]int {
 // HasCriticalWarnings returns true if any critical warnings exist
 func (wm *WarningManager) HasCriticalWarnings() bool {
 	for _, warning := range wm.warnings {
-		if warning.Severity == SeverityCritical {
+		if warning.Severity == errors.SeverityCritical {
 			return true
 		}
 	}
@@ -301,10 +262,4 @@ func (wm *WarningManager) FormatWarnings() string {
 	}
 
 	return output.String()
-}
-
-// SeverityString returns a human-readable string for a severity level
-// DEPRECATED: Use errors.Severity.String() directly
-func SeverityString(severity errors.Severity) string {
-	return severity.String()
 }

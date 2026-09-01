@@ -49,14 +49,14 @@ type SquashStats struct {
 type ProgressPhase string
 
 const (
-	PhaseInitializing   ProgressPhase = "Initializing"
-	PhaseParsing        ProgressPhase = "Parsing"
-	PhaseTracking       ProgressPhase = "Tracking"
-	PhaseAnalyzing      ProgressPhase = "Analyzing"
-	PhaseConsolidating  ProgressPhase = "Consolidating"
-	PhaseGenerating     ProgressPhase = "Generating SQL"
-	PhaseValidating     ProgressPhase = "Validating"
-	PhaseComplete       ProgressPhase = "Complete"
+	PhaseInitializing  ProgressPhase = "Initializing"
+	PhaseParsing       ProgressPhase = "Parsing"
+	PhaseTracking      ProgressPhase = "Tracking"
+	PhaseAnalyzing     ProgressPhase = "Analyzing"
+	PhaseConsolidating ProgressPhase = "Consolidating"
+	PhaseGenerating    ProgressPhase = "Generating SQL"
+	PhaseValidating    ProgressPhase = "Validating"
+	PhaseComplete      ProgressPhase = "Complete"
 )
 
 // ProgressCallback is called during squashing to report progress.

@@ -5,27 +5,33 @@ import (
 	"fmt"
 	"strings"
 
+	internal_plugins "github.com/capysquash/pgsquash-engine/internal/plugins"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/clerk"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/drizzle"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/prisma"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/supabase"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
 	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
-// PluginInfo contains metadata about a plugin
+// PluginInfo describes a plugin as reported by the plugin implementation itself.
 type PluginInfo struct {
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Description string   `json:"description"`
-	Provider    string   `json:"provider"`
-	Detected    bool     `json:"detected"`
-	Patterns    []string `json:"patterns"`
+	Name               string   `json:"name"`
+	Priority           int      `json:"priority"`
+	ConflictsWith      []string `json:"conflicts_with"`
+	RequiredExtensions []string `json:"required_extensions"`
+	Detected           bool     `json:"detected"`
 }
 
 // DetectionResult contains the results of plugin detection
 type DetectionResult struct {
-	Detected []PluginInfo          `json:"detected"`
-	Count    int                   `json:"count"`
-	Details  map[string][]string   `json:"details"` // Plugin name -> detected patterns
+	Detected []PluginInfo        `json:"detected"`
+	Count    int                 `json:"count"`
+	Details  map[string][]string `json:"details"` // Plugin name -> detected patterns
 }
 
-// CompatibilityMatrix describes plugin compatibility
+// CompatibilityMatrix describes plugin compatibility after priority-based
+// conflict resolution, matching the resolution the squashing engine applies.
 type CompatibilityMatrix struct {
 	Compatible   []string          `json:"compatible"`
 	Incompatible []string          `json:"incompatible"`
@@ -33,186 +39,113 @@ type CompatibilityMatrix struct {
 	Details      map[string]string `json:"details"` // Plugin name -> compatibility note
 }
 
-// GetAvailablePlugins returns information about all available plugins
+// builtinPlugins returns fresh instances of all built-in plugins.
+// This is the single source of truth for the built-in plugin set; both
+// RegisterDefault and the detection/compatibility APIs derive from it.
+func builtinPlugins() []internal_plugins.Plugin {
+	return []internal_plugins.Plugin{
+		clerk.NewClerkPlugin(),
+		supabase.NewSupabasePlugin(),
+		prisma.NewPrismaPlugin(),
+		drizzle.NewDrizzlePlugin(),
+	}
+}
+
+// pluginInfo builds PluginInfo from a live plugin instance.
+func pluginInfo(p internal_plugins.Plugin) PluginInfo {
+	return PluginInfo{
+		Name:               p.Name(),
+		Priority:           p.Priority(),
+		ConflictsWith:      p.GetConflictingPlugins(),
+		RequiredExtensions: p.GetRequiredExtensions(),
+	}
+}
+
+// GetAvailablePlugins returns information about all built-in plugins,
+// derived from the plugin implementations themselves.
 func GetAvailablePlugins() []PluginInfo {
-	return []PluginInfo{
-		{
-			Name:        "supabase",
-			Version:     "1.0.0",
-			Description: "Supabase integration with RLS policy optimization, auth schema handling, and storage integration",
-			Provider:    "supabase",
-			Patterns: []string{
-				"auth.users",
-				"storage.objects",
-				"storage.buckets",
-				"RLS policies",
-				"supabase_realtime.*",
-			},
-		},
-		{
-			Name:        "clerk",
-			Version:     "1.0.0",
-			Description: "Clerk authentication integration with JWT v2 support and organization handling",
-			Provider:    "clerk",
-			Patterns: []string{
-				"clerk_user_id columns",
-				"clerk_org_id columns",
-				"Clerk JWT patterns",
-			},
-		},
-		{
-			Name:        "prisma",
-			Version:     "1.0.0",
-			Description: "Prisma ORM integration with migration table handling and shadow database optimizations",
-			Provider:    "prisma",
-			Patterns: []string{
-				"_prisma_migrations table",
-				"@@map, @@index directives",
-				"Prisma-specific naming",
-			},
-		},
-		{
-			Name:        "drizzle",
-			Version:     "1.0.0",
-			Description: "Drizzle ORM integration with identity column preference and sequence optimization",
-			Provider:    "drizzle",
-			Patterns: []string{
-				"drizzle schema patterns",
-				"Identity columns",
-				"Drizzle-style migrations",
-			},
-		},
+	builtins := builtinPlugins()
+	infos := make([]PluginInfo, 0, len(builtins))
+	for _, p := range builtins {
+		infos = append(infos, pluginInfo(p))
 	}
+	return infos
 }
 
-// GetPluginInfo returns information about a specific plugin
-func GetPluginInfo(name string) (*PluginInfo, error) {
-	plugins := GetAvailablePlugins()
-	for _, plugin := range plugins {
-		if plugin.Name == name {
-			return &plugin, nil
-		}
-	}
-	return nil, fmt.Errorf("plugin not found: %s", name)
-}
-
-// DetectPlugins analyzes SQL migrations and detects which plugins are applicable
+// DetectPlugins analyzes SQL migrations and detects which plugins are applicable.
+//
+// Migrations are parsed with the same parser the squashing engine uses, and each
+// built-in plugin's own Detect implementation runs over the parsed statements —
+// so detection results here always agree with the plugins activated during an
+// actual squash.
 func DetectPlugins(ctx context.Context, migrations []string) (*DetectionResult, error) {
+	parsed := make([]*types.Migration, 0, len(migrations))
+	for i, sql := range migrations {
+		migration, err := parser.ParseMigrationWithContext(ctx, sql, fmt.Sprintf("migration_%03d.sql", i+1))
+		if err != nil && migration == nil {
+			return nil, fmt.Errorf("failed to parse migration %d for plugin detection: %w", i+1, err)
+		}
+		// A non-nil migration with recoverable parse errors still carries the
+		// successfully parsed statements, which is enough for detection.
+		migration.Sequence = i + 1
+		parsed = append(parsed, migration)
+	}
+
+	combinedSQL := strings.Join(migrations, "\n")
+
 	result := &DetectionResult{
 		Detected: []PluginInfo{},
 		Details:  make(map[string][]string),
 	}
 
-	// Combine all migrations into one string for pattern matching
-	combinedSQL := strings.Join(migrations, "\n")
-
-	// Detect each plugin using pattern matching
-	availablePlugins := GetAvailablePlugins()
-
-	for _, info := range availablePlugins {
-		detected := detectPluginPatterns(combinedSQL, info.Name)
-		if detected {
-			info.Detected = true
-			result.Detected = append(result.Detected, info)
-			result.Details[info.Name] = detectPatterns(combinedSQL, info.Name)
+	for _, plugin := range builtinPlugins() {
+		if !plugin.Detect(parsed) {
+			continue
 		}
+
+		info := pluginInfo(plugin)
+		info.Detected = true
+		result.Detected = append(result.Detected, info)
+
+		patterns := plugin.DetectPatterns(combinedSQL)
+		names := make([]string, 0, len(patterns))
+		for _, pattern := range patterns {
+			names = append(names, pattern.Name)
+		}
+		result.Details[plugin.Name()] = names
 	}
 
 	result.Count = len(result.Detected)
 	return result, nil
 }
 
-// detectPatterns finds which specific patterns were detected for a plugin
-func detectPatterns(sql, pluginName string) []string {
-	patterns := []string{}
-	sqlLower := strings.ToLower(sql)
-
-	switch pluginName {
-	case "supabase":
-		if strings.Contains(sqlLower, "auth.users") {
-			patterns = append(patterns, "auth.users table")
-		}
-		if strings.Contains(sqlLower, "storage.objects") {
-			patterns = append(patterns, "storage.objects table")
-		}
-		if strings.Contains(sqlLower, "storage.buckets") {
-			patterns = append(patterns, "storage.buckets table")
-		}
-		if strings.Contains(sqlLower, "enable row level security") || strings.Contains(sqlLower, "create policy") {
-			patterns = append(patterns, "RLS policies")
-		}
-		if strings.Contains(sqlLower, "supabase_realtime") {
-			patterns = append(patterns, "Realtime schema")
-		}
-
-	case "clerk":
-		if strings.Contains(sqlLower, "clerk_user_id") {
-			patterns = append(patterns, "clerk_user_id columns")
-		}
-		if strings.Contains(sqlLower, "clerk_org_id") {
-			patterns = append(patterns, "clerk_org_id columns")
-		}
-
-	case "prisma":
-		if strings.Contains(sqlLower, "_prisma_migrations") {
-			patterns = append(patterns, "_prisma_migrations table")
-		}
-
-	case "drizzle":
-		if strings.Contains(sqlLower, "generated always as identity") ||
-			strings.Contains(sqlLower, "generated by default as identity") {
-			patterns = append(patterns, "Identity columns")
-		}
-	}
-
-	return patterns
-}
-
-// detectPluginPatterns checks if a plugin's patterns are present in SQL
-func detectPluginPatterns(sql, pluginName string) bool {
-	sqlLower := strings.ToLower(sql)
-
-	switch pluginName {
-	case "supabase":
-		return strings.Contains(sqlLower, "auth.users") ||
-			strings.Contains(sqlLower, "storage.objects") ||
-			strings.Contains(sqlLower, "storage.buckets") ||
-			strings.Contains(sqlLower, "enable row level security") ||
-			strings.Contains(sqlLower, "create policy")
-
-	case "clerk":
-		return strings.Contains(sqlLower, "clerk_user_id") ||
-			strings.Contains(sqlLower, "clerk_org_id")
-
-	case "prisma":
-		return strings.Contains(sqlLower, "_prisma_migrations")
-
-	case "drizzle":
-		return strings.Contains(sqlLower, "generated always as identity") ||
-			strings.Contains(sqlLower, "generated by default as identity")
-	}
-
-	return false
-}
-
-// DetectFromTypes detects plugins from parsed migration types
-func DetectFromTypes(ctx context.Context, migrations []*types.Migration) (*DetectionResult, error) {
-	// Extract SQL from migrations
-	sqlStrings := make([]string, len(migrations))
-	for i, migration := range migrations {
-		// Concatenate statement SQL from migration
-		if len(migration.Statements) > 0 {
-			for _, stmt := range migration.Statements {
-				sqlStrings[i] += stmt.SQL + ";\n"
-			}
-		}
-	}
-
-	return DetectPlugins(ctx, sqlStrings)
-}
-
-// CheckCompatibility checks compatibility between multiple detected plugins
+// CheckCompatibility checks compatibility between plugins using the same
+// priority-based conflict resolution the plugin registry applies during
+// squashing: each plugin's GetConflictingPlugins() is honored and, on
+// conflict, the higher-priority plugin wins (e.g. Clerk 95 excludes Supabase 90).
 func CheckCompatibility(pluginNames []string) (*CompatibilityMatrix, error) {
+	available := make(map[string]internal_plugins.Plugin)
+	for _, p := range builtinPlugins() {
+		available[p.Name()] = p
+	}
+
+	selected := make([]internal_plugins.Plugin, 0, len(pluginNames))
+	seen := make(map[string]bool, len(pluginNames))
+	for _, name := range pluginNames {
+		plugin, ok := available[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown plugin: %s", name)
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		selected = append(selected, plugin)
+	}
+
+	active := internal_plugins.ResolveConflicts(selected)
+	activeByName := make(map[string]internal_plugins.Plugin, len(active))
+
 	matrix := &CompatibilityMatrix{
 		Compatible:   []string{},
 		Incompatible: []string{},
@@ -220,127 +153,43 @@ func CheckCompatibility(pluginNames []string) (*CompatibilityMatrix, error) {
 		Details:      make(map[string]string),
 	}
 
-	// All current plugins are compatible with each other
-	for _, name := range pluginNames {
-		matrix.Compatible = append(matrix.Compatible, name)
-		matrix.Details[name] = "Compatible with all other detected plugins"
+	for _, plugin := range active {
+		activeByName[plugin.Name()] = plugin
+		matrix.Compatible = append(matrix.Compatible, plugin.Name())
+		matrix.Details[plugin.Name()] = fmt.Sprintf("active (priority %d)", plugin.Priority())
 	}
 
-	// Add specific compatibility notes
-	hasSupabase := contains(pluginNames, "supabase")
-	hasClerk := contains(pluginNames, "clerk")
-	hasPrisma := contains(pluginNames, "prisma")
-	hasDrizzle := contains(pluginNames, "drizzle")
+	for _, plugin := range selected {
+		if _, ok := activeByName[plugin.Name()]; ok {
+			continue
+		}
 
-	if hasSupabase && hasClerk {
-		matrix.Warnings = append(matrix.Warnings,
-			"Both Supabase and Clerk auth detected - ensure only one is actively used for authentication")
-	}
-
-	if hasPrisma && hasDrizzle {
-		matrix.Warnings = append(matrix.Warnings,
-			"Both Prisma and Drizzle ORMs detected - using multiple ORMs may cause conflicts")
-	}
-
-	if hasSupabase {
-		matrix.Details["supabase"] = "Supabase auth/storage schemas will be preserved and optimized"
-	}
-
-	if hasClerk {
-		matrix.Details["clerk"] = "Clerk user/org ID columns will be preserved"
-	}
-
-	if hasPrisma {
-		matrix.Details["prisma"] = "Prisma migration history will be preserved"
-	}
-
-	if hasDrizzle {
-		matrix.Details["drizzle"] = "Identity columns will be preferred over sequences"
+		winner := conflictWinner(plugin.Name(), active)
+		matrix.Incompatible = append(matrix.Incompatible, plugin.Name())
+		matrix.Details[plugin.Name()] = fmt.Sprintf(
+			"excluded: conflicts with %s (priority %d > %d)",
+			winner.Name(), winner.Priority(), plugin.Priority(),
+		)
+		matrix.Warnings = append(matrix.Warnings, fmt.Sprintf(
+			"%s conflicts with higher-priority plugin %s and will be excluded during squashing",
+			plugin.Name(), winner.Name(),
+		))
 	}
 
 	return matrix, nil
 }
 
-// contains checks if a slice contains a string
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// GetOptimizations returns available optimizations for detected plugins
-func GetOptimizations(pluginNames []string) map[string][]string {
-	optimizations := make(map[string][]string)
-
-	for _, name := range pluginNames {
-		switch name {
-		case "supabase":
-			optimizations["supabase"] = []string{
-				"Consolidate RLS policies",
-				"Optimize auth schema references",
-				"Preserve storage triggers",
-				"Handle realtime schema correctly",
-			}
-		case "clerk":
-			optimizations["clerk"] = []string{
-				"Preserve Clerk user/org ID columns",
-				"Optimize JWT v2 patterns",
-				"Handle organization relationships",
-			}
-		case "prisma":
-			optimizations["prisma"] = []string{
-				"Preserve _prisma_migrations table",
-				"Optimize shadow database operations",
-				"Handle Prisma-specific naming conventions",
-			}
-		case "drizzle":
-			optimizations["drizzle"] = []string{
-				"Prefer identity columns over sequences",
-				"Optimize Drizzle migration patterns",
-				"Preserve drizzle schema metadata",
+// conflictWinner finds the active plugin whose conflict list excluded the named
+// plugin. Falls back to the highest-priority active plugin, which can only
+// happen if resolution semantics change without this function being updated.
+func conflictWinner(excluded string, active []internal_plugins.Plugin) internal_plugins.Plugin {
+	for _, plugin := range active {
+		for _, conflict := range plugin.GetConflictingPlugins() {
+			if conflict == excluded {
+				return plugin
 			}
 		}
 	}
-
-	return optimizations
-}
-
-// ValidatePluginConfiguration validates plugin-specific configuration
-func ValidatePluginConfiguration(pluginName string, config map[string]interface{}) error {
-	// Get plugin info to validate it exists
-	_, err := GetPluginInfo(pluginName)
-	if err != nil {
-		return err
-	}
-
-	// Basic validation - ensure config is not nil if provided
-	if config == nil {
-		return nil // nil config is valid (uses defaults)
-	}
-
-	// Plugin-specific validation
-	switch pluginName {
-	case "supabase":
-		// Validate Supabase config
-		if _, ok := config["enabled"].(bool); !ok && config["enabled"] != nil {
-			return fmt.Errorf("supabase config 'enabled' must be boolean")
-		}
-	case "clerk":
-		// Validate Clerk config
-		if version, ok := config["jwt_version"].(string); ok {
-			if version != "v1" && version != "v2" {
-				return fmt.Errorf("clerk jwt_version must be 'v1' or 'v2'")
-			}
-		}
-	case "prisma", "drizzle":
-		// Basic validation for ORM plugins
-		if _, ok := config["enabled"].(bool); !ok && config["enabled"] != nil {
-			return fmt.Errorf("%s config 'enabled' must be boolean", pluginName)
-		}
-	}
-
-	return nil
+	// active is sorted by priority (highest first) by ResolveConflicts.
+	return active[0]
 }

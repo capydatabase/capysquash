@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/errors"
-	"github.com/capysquash/pgsquash-engine/internal/patterns"
 	"github.com/capysquash/pgsquash-engine/internal/tracking"
 	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // PublicationDeduplicationRule removes duplicate ALTER PUBLICATION ADD TABLE statements
@@ -34,10 +34,10 @@ func (r *PublicationDeduplicationRule) CanApply(lifecycle *tracking.ObjectLifecy
 		}
 
 		// Extract publication name and table name
-		if match := patterns.PublicationPattern.FindStringSubmatch(sql); match != nil {
-			pubName := strings.ToLower(match[1])
-			schemaName := strings.ToLower(match[2])
-			tableName := strings.ToLower(match[3])
+		if parsed, ok := utils.ParsePublicationAddTable(sql); ok {
+			pubName := strings.ToLower(parsed.Publication)
+			schemaName := strings.ToLower(parsed.Schema)
+			tableName := strings.ToLower(parsed.Table)
 
 			// Build fully qualified key
 			var key string
@@ -64,7 +64,7 @@ func (r *PublicationDeduplicationRule) CanApply(lifecycle *tracking.ObjectLifecy
 // Apply applies the rule to deduplicate publication member additions
 func (r *PublicationDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "PublicationDedupRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "PublicationDedupRule"})
 	}
 
 	// Track which publication + table combinations we've seen
@@ -83,10 +83,10 @@ func (r *PublicationDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle
 		}
 
 		// Extract publication name and table name
-		if match := patterns.PublicationPattern.FindStringSubmatch(sql); match != nil {
-			pubName := strings.ToLower(match[1])
-			schemaName := strings.ToLower(match[2])
-			tableName := strings.ToLower(match[3])
+		if parsed, ok := utils.ParsePublicationAddTable(sql); ok {
+			pubName := strings.ToLower(parsed.Publication)
+			schemaName := strings.ToLower(parsed.Schema)
+			tableName := strings.ToLower(parsed.Table)
 
 			// Build fully qualified key
 			var key string
@@ -141,4 +141,10 @@ func (r *PublicationDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle
 // Risk returns the risk level of this consolidation rule
 func (r *PublicationDeduplicationRule) Risk() tracking.RiskLevel {
 	return tracking.RiskLevelLow // Deduplication is very safe
+}
+
+type publicationAddTable = utils.PublicationAddTableTarget
+
+func parsePublicationAddTable(sql string) (publicationAddTable, bool) {
+	return utils.ParsePublicationAddTable(sql)
 }

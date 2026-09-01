@@ -3,7 +3,6 @@ package transformation
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/errors"
@@ -31,7 +30,7 @@ type TransformationConfig struct {
 	EnableUnsafeToSafe   bool   `json:"enable_unsafe_to_safe"`
 	EnableModernSyntax   bool   `json:"enable_modern_syntax"`
 	EnablePerformance    bool   `json:"enable_performance"`
-	EnableSyntaxFixes    bool   `json:"enable_syntax_fixes"`    // Fix common SQL syntax errors
+	EnableSyntaxFixes    bool   `json:"enable_syntax_fixes"` // Fix common SQL syntax errors
 	PreserveSrcPositions bool   `json:"preserve_src_positions"`
 	TargetVersion        string `json:"target_version"` // PostgreSQL version target
 }
@@ -74,28 +73,6 @@ type TransformationApplied struct {
 type SQLTransformer struct {
 	config    *TransformationConfig
 	pgVersion string
-	patterns  *TransformationPatterns
-}
-
-// TransformationPatterns contains regex patterns for transformations
-type TransformationPatterns struct {
-	// DML patterns
-	InsertPattern *regexp.Regexp
-	UpdatePattern *regexp.Regexp
-	DeletePattern *regexp.Regexp
-
-	// Unsafe patterns
-	DropTablePattern  *regexp.Regexp
-	DropColumnPattern *regexp.Regexp
-	AlterTypePattern  *regexp.Regexp
-
-	// Performance patterns
-	NoIndexPattern   *regexp.Regexp
-	LargeScanPattern *regexp.Regexp
-
-	// Modern syntax opportunities
-	OldJoinPattern     *regexp.Regexp
-	OldFunctionPattern *regexp.Regexp
 }
 
 // NewSQLTransformer creates a new SQL transformer
@@ -104,23 +81,9 @@ func NewSQLTransformer(config *TransformationConfig) *SQLTransformer {
 		config = DefaultTransformationConfig()
 	}
 
-	patterns := &TransformationPatterns{
-		InsertPattern:      regexp.MustCompile(`(?i)^\s*INSERT\s+INTO\s+`),
-		UpdatePattern:      regexp.MustCompile(`(?i)^\s*UPDATE\s+`),
-		DeletePattern:      regexp.MustCompile(`(?i)^\s*DELETE\s+FROM\s+`),
-		DropTablePattern:   regexp.MustCompile(`(?i)^\s*DROP\s+TABLE\s+`),
-		DropColumnPattern:  regexp.MustCompile(`(?i)ALTER\s+TABLE\s+\w+\s+DROP\s+COLUMN\s+`),
-		AlterTypePattern:   regexp.MustCompile(`(?i)ALTER\s+TABLE\s+\w+\s+ALTER\s+COLUMN\s+\w+\s+TYPE\s+`),
-		NoIndexPattern:     regexp.MustCompile(`(?i)WHERE\s+[^=]+\s*=\s*[^=]+`),
-		LargeScanPattern:   regexp.MustCompile(`(?i)SELECT\s+\*\s+FROM\s+\w+\s*;?\s*$`),
-		OldJoinPattern:     regexp.MustCompile(`(?i)WHERE\s+\w+\.\w+\s*=\s*\w+\.\w+`),
-		OldFunctionPattern: regexp.MustCompile(`(?i)substr\(|length\(|position\(`),
-	}
-
 	return &SQLTransformer{
 		config:    config,
 		pgVersion: config.TargetVersion,
-		patterns:  patterns,
 	}
 }
 
@@ -240,7 +203,7 @@ func (st *SQLTransformer) transformDMLToSelect(ctx context.Context, sql string, 
 		trimmed := strings.TrimSpace(line)
 
 		// Transform INSERT to SELECT
-		if st.patterns.InsertPattern.MatchString(trimmed) {
+		if isInsertStatement(trimmed) {
 			transformed := st.convertInsertToSelect(trimmed)
 			if transformed != trimmed {
 				transformedLines[i] = transformed
@@ -256,7 +219,7 @@ func (st *SQLTransformer) transformDMLToSelect(ctx context.Context, sql string, 
 		}
 
 		// Transform UPDATE to SELECT
-		if st.patterns.UpdatePattern.MatchString(trimmed) {
+		if isUpdateStatement(trimmed) {
 			transformed := st.convertUpdateToSelect(trimmed)
 			if transformed != trimmed {
 				transformedLines[i] = transformed
@@ -272,7 +235,7 @@ func (st *SQLTransformer) transformDMLToSelect(ctx context.Context, sql string, 
 		}
 
 		// Transform DELETE to SELECT
-		if st.patterns.DeletePattern.MatchString(trimmed) {
+		if isDeleteStatement(trimmed) {
 			transformed := st.convertDeleteToSelect(trimmed)
 			if transformed != trimmed {
 				transformedLines[i] = transformed
@@ -293,100 +256,467 @@ func (st *SQLTransformer) transformDMLToSelect(ctx context.Context, sql string, 
 
 // convertInsertToSelect converts INSERT statement to SELECT for validation
 func (st *SQLTransformer) convertInsertToSelect(sql string) string {
-	// INSERT INTO table (col1, col2) VALUES (val1, val2)
-	// -> SELECT val1 as col1, val2 as col2
-
-	insertPattern := regexp.MustCompile(`(?i)INSERT\s+INTO\s+(\w+(?:\.\w+)?)\s*(?:\(([^)]+)\))?\s*VALUES\s*\(([^)]+)\)`)
-	matches := insertPattern.FindStringSubmatch(sql)
-
-	if len(matches) >= 4 {
-		table := matches[1]
-		columns := matches[2]
-		values := matches[3]
-
-		if columns != "" {
-			// Parse columns and values
-			cols := strings.Split(columns, ",")
-			vals := strings.Split(values, ",")
-
-			selectParts := make([]string, 0, len(vals))
-			for i, val := range vals {
-				val = strings.TrimSpace(val)
-				if i < len(cols) {
-					col := strings.TrimSpace(cols[i])
-					selectParts = append(selectParts, fmt.Sprintf("%s as %s", val, col))
-				} else {
-					selectParts = append(selectParts, val)
-				}
-			}
-
-			return fmt.Sprintf("-- INSERT validation: SELECT %s -- FROM %s",
-				strings.Join(selectParts, ", "), table)
-		} else {
-			return fmt.Sprintf("-- INSERT validation: SELECT %s -- INTO %s", values, table)
-		}
+	trimmed := strings.TrimSpace(strings.TrimSuffix(sql, ";"))
+	if !isInsertStatement(trimmed) {
+		return sql
 	}
 
-	return sql
+	rest := strings.TrimSpace(trimmed[len("INSERT INTO "):])
+	tableName, rest := splitLeadingIdentifier(rest)
+	if tableName == "" {
+		return sql
+	}
+
+	columnsPart := ""
+	if strings.HasPrefix(strings.TrimSpace(rest), "(") {
+		open := strings.Index(rest, "(")
+		close := findMatchingParen(rest, open)
+		if close == -1 {
+			return sql
+		}
+		columnsPart = rest[open+1 : close]
+		rest = strings.TrimSpace(rest[close+1:])
+	}
+
+	valuesIdx := findKeywordIndexCI(rest, "VALUES")
+	if valuesIdx == -1 {
+		return sql
+	}
+
+	valuesExpr := strings.TrimSpace(rest[valuesIdx+len("VALUES"):])
+	if !strings.HasPrefix(valuesExpr, "(") {
+		return sql
+	}
+
+	valuesClose := findMatchingParen(valuesExpr, 0)
+	if valuesClose == -1 {
+		return sql
+	}
+
+	valuesPart := valuesExpr[1:valuesClose]
+	vals := splitCSVTopLevel(valuesPart)
+	if len(vals) == 0 {
+		return sql
+	}
+
+	if strings.TrimSpace(columnsPart) != "" {
+		cols := splitCSVTopLevel(columnsPart)
+		selectParts := make([]string, 0, len(vals))
+		for i, val := range vals {
+			value := strings.TrimSpace(val)
+			if i < len(cols) {
+				col := strings.TrimSpace(cols[i])
+				selectParts = append(selectParts, fmt.Sprintf("%s as %s", value, col))
+				continue
+			}
+			selectParts = append(selectParts, value)
+		}
+
+		return fmt.Sprintf("-- INSERT validation: SELECT %s -- FROM %s", strings.Join(selectParts, ", "), tableName)
+	}
+
+	return fmt.Sprintf("-- INSERT validation: SELECT %s -- INTO %s", strings.Join(vals, ", "), tableName)
 }
 
 // convertUpdateToSelect converts UPDATE statement to SELECT for validation
 func (st *SQLTransformer) convertUpdateToSelect(sql string) string {
-	// UPDATE table SET col1 = val1 WHERE condition
-	// -> SELECT val1 as col1 FROM table WHERE condition
-
-	updatePattern := regexp.MustCompile(`(?i)UPDATE\s+(\w+(?:\.\w+)?)\s+SET\s+(.+?)(?:\s+WHERE\s+(.+))?$`)
-	matches := updatePattern.FindStringSubmatch(sql)
-
-	if len(matches) >= 3 {
-		table := matches[1]
-		setPart := matches[2]
-		wherePart := ""
-		if len(matches) >= 4 && matches[3] != "" {
-			wherePart = " WHERE " + matches[3]
-		}
-
-		// Parse SET clause
-		setPattern := regexp.MustCompile(`(\w+)\s*=\s*([^,]+)`)
-		setMatches := setPattern.FindAllStringSubmatch(setPart, -1)
-
-		selectParts := make([]string, 0, len(setMatches))
-		for _, match := range setMatches {
-			if len(match) >= 3 {
-				col := strings.TrimSpace(match[1])
-				val := strings.TrimSpace(match[2])
-				selectParts = append(selectParts, fmt.Sprintf("%s as %s", val, col))
-			}
-		}
-
-		if len(selectParts) > 0 {
-			return fmt.Sprintf("-- UPDATE validation: SELECT %s FROM %s%s",
-				strings.Join(selectParts, ", "), table, wherePart)
-		}
+	trimmed := strings.TrimSpace(strings.TrimSuffix(sql, ";"))
+	if !isUpdateStatement(trimmed) {
+		return sql
 	}
 
-	return sql
+	rest := strings.TrimSpace(trimmed[len("UPDATE "):])
+	tableName, rest := splitLeadingIdentifier(rest)
+	if tableName == "" {
+		return sql
+	}
+
+	setIdx := findKeywordIndexCI(rest, "SET")
+	if setIdx == -1 {
+		return sql
+	}
+
+	setAndWhere := strings.TrimSpace(rest[setIdx+len("SET"):])
+	whereIdx := findKeywordIndexCI(setAndWhere, "WHERE")
+
+	setPart := setAndWhere
+	wherePart := ""
+	if whereIdx >= 0 {
+		setPart = strings.TrimSpace(setAndWhere[:whereIdx])
+		wherePart = strings.TrimSpace(setAndWhere[whereIdx+len("WHERE"):])
+	}
+
+	assignments := splitCSVTopLevel(setPart)
+	selectParts := make([]string, 0, len(assignments))
+	for _, assignment := range assignments {
+		parts := strings.SplitN(assignment, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		col := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if col == "" || val == "" {
+			continue
+		}
+
+		selectParts = append(selectParts, fmt.Sprintf("%s as %s", val, col))
+	}
+
+	if len(selectParts) == 0 {
+		return sql
+	}
+
+	if wherePart != "" {
+		return fmt.Sprintf("-- UPDATE validation: SELECT %s FROM %s WHERE %s", strings.Join(selectParts, ", "), tableName, wherePart)
+	}
+
+	return fmt.Sprintf("-- UPDATE validation: SELECT %s FROM %s", strings.Join(selectParts, ", "), tableName)
 }
 
 // convertDeleteToSelect converts DELETE statement to SELECT for validation
 func (st *SQLTransformer) convertDeleteToSelect(sql string) string {
-	// DELETE FROM table WHERE condition
-	// -> SELECT COUNT(*) FROM table WHERE condition
-
-	deletePattern := regexp.MustCompile(`(?i)DELETE\s+FROM\s+(\w+(?:\.\w+)?)(?:\s+WHERE\s+(.+))?$`)
-	matches := deletePattern.FindStringSubmatch(sql)
-
-	if len(matches) >= 2 {
-		table := matches[1]
-		wherePart := ""
-		if len(matches) >= 3 && matches[2] != "" {
-			wherePart = " WHERE " + matches[2]
-		}
-
-		return fmt.Sprintf("-- DELETE validation: SELECT COUNT(*) FROM %s%s", table, wherePart)
+	trimmed := strings.TrimSpace(strings.TrimSuffix(sql, ";"))
+	if !isDeleteStatement(trimmed) {
+		return sql
 	}
 
-	return sql
+	rest := strings.TrimSpace(trimmed[len("DELETE FROM "):])
+	tableName, rest := splitLeadingIdentifier(rest)
+	if tableName == "" {
+		return sql
+	}
+
+	whereIdx := findKeywordIndexCI(rest, "WHERE")
+	if whereIdx >= 0 {
+		whereExpr := strings.TrimSpace(rest[whereIdx+len("WHERE"):])
+		if whereExpr != "" {
+			return fmt.Sprintf("-- DELETE validation: SELECT COUNT(*) FROM %s WHERE %s", tableName, whereExpr)
+		}
+	}
+
+	return fmt.Sprintf("-- DELETE validation: SELECT COUNT(*) FROM %s", tableName)
+}
+
+func splitLeadingIdentifier(input string) (string, string) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", ""
+	}
+
+	for i, r := range trimmed {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '(' {
+			return strings.TrimSpace(trimmed[:i]), strings.TrimSpace(trimmed[i:])
+		}
+	}
+
+	return trimmed, ""
+}
+
+func splitCSVTopLevel(input string) []string {
+	parts := make([]string, 0)
+	if strings.TrimSpace(input) == "" {
+		return parts
+	}
+
+	start := 0
+	depth := 0
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i, r := range input {
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		switch r {
+		case '\\':
+			escaped = true
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '(':
+			if !inSingle && !inDouble {
+				depth++
+			}
+		case ')':
+			if !inSingle && !inDouble && depth > 0 {
+				depth--
+			}
+		case ',':
+			if !inSingle && !inDouble && depth == 0 {
+				parts = append(parts, strings.TrimSpace(input[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	if start < len(input) {
+		parts = append(parts, strings.TrimSpace(input[start:]))
+	}
+
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+
+	return filtered
+}
+
+func findMatchingParen(input string, openIndex int) int {
+	if openIndex < 0 || openIndex >= len(input) || input[openIndex] != '(' {
+		return -1
+	}
+
+	depth := 0
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i := openIndex; i < len(input); i++ {
+		ch := input[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		switch ch {
+		case '\\':
+			escaped = true
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '(':
+			if !inSingle && !inDouble {
+				depth++
+			}
+		case ')':
+			if !inSingle && !inDouble {
+				depth--
+				if depth == 0 {
+					return i
+				}
+			}
+		}
+	}
+
+	return -1
+}
+
+func isInsertStatement(sql string) bool {
+	return hasKeywordPrefixCI(sql, "INSERT", "INTO")
+}
+
+func isUpdateStatement(sql string) bool {
+	return hasKeywordPrefixCI(sql, "UPDATE")
+}
+
+func isDeleteStatement(sql string) bool {
+	return hasKeywordPrefixCI(sql, "DELETE", "FROM")
+}
+
+func isCreateFunctionStatement(sql string) bool {
+	if hasKeywordPrefixCI(sql, "CREATE", "FUNCTION") {
+		return true
+	}
+	return hasKeywordPrefixCI(sql, "CREATE", "OR", "REPLACE", "FUNCTION")
+}
+
+func isDropTableStatement(sql string) bool {
+	return hasKeywordPrefixCI(sql, "DROP", "TABLE")
+}
+
+func isDropColumnStatement(sql string) bool {
+	upper := normalizeUpperWhitespace(sql)
+	return strings.HasPrefix(upper, "ALTER TABLE ") && strings.Contains(upper, " DROP COLUMN ")
+}
+
+func isAlterTypeStatement(sql string) bool {
+	upper := normalizeUpperWhitespace(sql)
+	return strings.HasPrefix(upper, "ALTER TABLE ") && strings.Contains(upper, " ALTER COLUMN ") && strings.Contains(upper, " TYPE ")
+}
+
+func hasLegacyJoinPredicate(sql string) bool {
+	upper := strings.ToUpper(sql)
+	whereIdx := strings.Index(upper, "WHERE")
+	if whereIdx == -1 {
+		return false
+	}
+
+	predicate := sql[whereIdx:]
+	before, after, ok := strings.Cut(predicate, "=")
+	if !ok {
+		return false
+	}
+
+	left := strings.TrimSpace(before)
+	right := strings.TrimSpace(after)
+
+	leftToken := lastIdentifierToken(left)
+	rightToken := firstIdentifierToken(right)
+
+	return strings.Contains(leftToken, ".") && strings.Contains(rightToken, ".")
+}
+
+func hasLegacyFunctionNames(sql string) bool {
+	lower := strings.ToLower(sql)
+	return strings.Contains(lower, "substr(") || strings.Contains(lower, "length(") || strings.Contains(lower, "position(")
+}
+
+func replaceBareLengthFunction(sql string) string {
+	lower := strings.ToLower(sql)
+	needle := "length("
+
+	var builder strings.Builder
+	start := 0
+	for {
+		relIdx := strings.Index(lower[start:], needle)
+		if relIdx == -1 {
+			builder.WriteString(sql[start:])
+			break
+		}
+
+		idx := start + relIdx
+		builder.WriteString(sql[start:idx])
+
+		if idx > 0 {
+			prev := sql[idx-1]
+			if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
+				builder.WriteString(sql[idx : idx+len(needle)])
+				start = idx + len(needle)
+				continue
+			}
+		}
+
+		builder.WriteString("char_length(")
+		start = idx + len(needle)
+	}
+
+	return builder.String()
+}
+
+func hasSimpleWhereEquality(sql string) bool {
+	upper := strings.ToUpper(sql)
+	whereIdx := strings.Index(upper, "WHERE")
+	if whereIdx == -1 {
+		return false
+	}
+
+	predicate := sql[whereIdx+len("WHERE"):]
+	eqIdx := strings.Index(predicate, "=")
+	if eqIdx == -1 {
+		return false
+	}
+
+	left := strings.TrimSpace(predicate[:eqIdx])
+	right := strings.TrimSpace(predicate[eqIdx+1:])
+	if left == "" || right == "" {
+		return false
+	}
+
+	// Ignore non-equality operators.
+	if eqIdx > 0 && predicate[eqIdx-1] == '!' {
+		return false
+	}
+	if eqIdx+1 < len(predicate) && predicate[eqIdx+1] == '=' {
+		return false
+	}
+
+	return true
+}
+
+func isSelectStarFromSingleTable(sql string) bool {
+	upper := normalizeUpperWhitespace(sql)
+	if !strings.HasPrefix(upper, "SELECT * FROM ") {
+		return false
+	}
+
+	if strings.Contains(upper, " WHERE ") || strings.Contains(upper, " JOIN ") || strings.Contains(upper, " GROUP BY ") || strings.Contains(upper, " ORDER BY ") {
+		return false
+	}
+
+	return true
+}
+
+func hasKeywordPrefixCI(sql string, keywords ...string) bool {
+	if len(keywords) == 0 {
+		return false
+	}
+
+	tokens := strings.Fields(strings.ToUpper(strings.TrimSpace(sql)))
+	if len(tokens) < len(keywords) {
+		return false
+	}
+
+	for i, keyword := range keywords {
+		if tokens[i] != strings.ToUpper(keyword) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func normalizeUpperWhitespace(sql string) string {
+	return strings.Join(strings.Fields(strings.ToUpper(sql)), " ")
+}
+
+func findKeywordIndexCI(sql, keyword string) int {
+	upperSQL := strings.ToUpper(sql)
+	upperKeyword := strings.ToUpper(keyword)
+
+	for i := 0; i+len(upperKeyword) <= len(upperSQL); i++ {
+		if upperSQL[i:i+len(upperKeyword)] != upperKeyword {
+			continue
+		}
+
+		beforeOk := i == 0 || !isIdentifierByte(upperSQL[i-1])
+		afterPos := i + len(upperKeyword)
+		afterOk := afterPos >= len(upperSQL) || !isIdentifierByte(upperSQL[afterPos])
+		if beforeOk && afterOk {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func isIdentifierByte(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+func lastIdentifierToken(s string) string {
+	tokens := strings.FieldsFunc(strings.TrimSpace(s), func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '(' || r == ')' || r == ','
+	})
+	if len(tokens) == 0 {
+		return ""
+	}
+	return tokens[len(tokens)-1]
+}
+
+func firstIdentifierToken(s string) string {
+	tokens := strings.FieldsFunc(strings.TrimSpace(s), func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '(' || r == ')' || r == ','
+	})
+	if len(tokens) == 0 {
+		return ""
+	}
+	return tokens[0]
 }
 
 // transformDropToComment converts dangerous DROP statements to comments
@@ -398,7 +728,7 @@ func (st *SQLTransformer) transformDropToComment(ctx context.Context, sql string
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		if st.patterns.DropTablePattern.MatchString(trimmed) {
+		if isDropTableStatement(trimmed) {
 			commented := "-- DANGEROUS: " + trimmed
 			transformedLines[i] = commented
 			result.Transformations = append(result.Transformations, TransformationApplied{
@@ -411,7 +741,7 @@ func (st *SQLTransformer) transformDropToComment(ctx context.Context, sql string
 			})
 		}
 
-		if st.patterns.DropColumnPattern.MatchString(trimmed) {
+		if isDropColumnStatement(trimmed) {
 			commented := "-- DANGEROUS: " + trimmed
 			transformedLines[i] = commented
 			result.Transformations = append(result.Transformations, TransformationApplied{
@@ -438,7 +768,7 @@ func (st *SQLTransformer) transformUnsafeToSafe(ctx context.Context, sql string,
 		trimmed := strings.TrimSpace(line)
 
 		// ALTER TYPE operations - add USING clause suggestions
-		if st.patterns.AlterTypePattern.MatchString(trimmed) {
+		if isAlterTypeStatement(trimmed) {
 			if !strings.Contains(strings.ToUpper(trimmed), "USING") {
 				suggestion := trimmed + " -- Add USING clause for type conversion"
 				transformedLines[i] = suggestion
@@ -463,19 +793,16 @@ func (st *SQLTransformer) transformToModernSyntax(ctx context.Context, sql strin
 	transformedSQL := sql
 
 	// Convert old join syntax to modern ANSI joins
-	if st.patterns.OldJoinPattern.MatchString(sql) {
+	if hasLegacyJoinPredicate(sql) {
 		// This is a complex transformation that would need more sophisticated parsing
 		result.Warnings = append(result.Warnings, "Consider converting old-style joins to ANSI join syntax")
 	}
 
 	// Convert old function names to modern equivalents
-	if st.patterns.OldFunctionPattern.MatchString(sql) {
+	if hasLegacyFunctionNames(sql) {
 		modernSQL := strings.ReplaceAll(transformedSQL, "substr(", "substring(")
 
-		// BUGFIX: Use word boundary regex to avoid converting char_length -> char_char_length
-		// The \b boundary prevents matching when "length" is preceded by underscore (char_length, character_length)
-		lengthRegex := regexp.MustCompile(`\blength\(`)
-		modernSQL = lengthRegex.ReplaceAllString(modernSQL, "char_length(")
+		modernSQL = replaceBareLengthFunction(modernSQL)
 
 		modernSQL = strings.ReplaceAll(modernSQL, "position(", "strpos(")
 
@@ -503,12 +830,12 @@ func (st *SQLTransformer) applyPerformanceTransformations(ctx context.Context, s
 		trimmed := strings.TrimSpace(line)
 
 		// Detect queries that might benefit from indexes
-		if st.patterns.NoIndexPattern.MatchString(trimmed) && !strings.Contains(strings.ToUpper(trimmed), "INDEX") {
+		if hasSimpleWhereEquality(trimmed) && !strings.Contains(strings.ToUpper(trimmed), "INDEX") {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Line %d: Consider adding index for WHERE clause performance", i+1))
 		}
 
 		// Detect SELECT * queries
-		if st.patterns.LargeScanPattern.MatchString(trimmed) {
+		if isSelectStarFromSingleTable(trimmed) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Line %d: SELECT * may cause performance issues", i+1))
 		}
 	}
@@ -622,117 +949,27 @@ func (st *SQLTransformer) fixCommentSyntax(sql string, result *TransformationRes
 // This runs BEFORE pg_query.Parse() because the parser can fail on complex migrations.
 // Uses regex-based detection instead of AST analysis.
 func (st *SQLTransformer) fixFunctionVolatilityMarkers(ctx context.Context, sql string, result *TransformationResult) (string, error) {
-	// Regex Pattern Explanation:
-	// (?ims) - Case insensitive, multiline, dot matches newline
-	// Group 1: CREATE [OR REPLACE] FUNCTION [schema.]name(...) RETURNS type
-	// Group 2: Optional modifiers (LANGUAGE, SECURITY DEFINER, SET)
-	// Group 3: AS keyword with delimiter ($$ or $tag$ or ')
-	//
-	// Handles both formats:
-	// - Single line: CREATE FUNCTION foo() RETURNS TEXT AS $$...
-	// - Multi-line:  CREATE FUNCTION foo()
-	//                RETURNS TEXT
-	//                LANGUAGE plpgsql
-	//                AS $$...
-	funcPattern := regexp.MustCompile(`(?ims)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[a-z_][a-z0-9_]*\.)?[a-z_][a-z0-9_]*\s*\([^)]*\)\s*RETURNS\s+(?:TABLE\s*\([^)]+\)|SETOF\s+[^\s]+|[^\s]+))((?:\s+(?:LANGUAGE\s+[a-z]+|SECURITY\s+DEFINER|SET\s+[^\s]+\s*=\s*[^\s]+|VOLATILE|STABLE|IMMUTABLE))*?)(\s+AS\s+(?:\$\$|\$[a-z0-9_]*\$|\'))`)
-
-	matches := funcPattern.FindAllStringSubmatchIndex(sql, -1)
-	if len(matches) == 0 {
-		return sql, nil // No functions to fix
+	statements, err := pg_query.SplitWithScanner(sql, true)
+	if err != nil {
+		return sql, nil
 	}
 
-	transformedSQL := sql
-	offset := 0
-
-	for _, match := range matches {
-		if len(match) < 8 {
+	for _, stmt := range statements {
+		trimmed := strings.TrimSpace(stmt)
+		if !isCreateFunctionStatement(trimmed) {
 			continue
 		}
 
-		// Extract function definition parts
-		beforeAS := transformedSQL[match[0]+offset : match[6]+offset]  // Full match up to AS
-		modifiers := transformedSQL[match[4]+offset : match[5]+offset] // LANGUAGE/SECURITY DEFINER/SET
-		asKeyword := transformedSQL[match[6]+offset : match[7]+offset] // " AS "
-
-		// Check if volatility marker already exists (before AS or after body)
-		hasVolatility := st.hasVolatilityMarker(modifiers) || st.hasVolatilityMarker(beforeAS)
-
-		// Also check AFTER the function body (format: AS $$...$$ LANGUAGE SQL STABLE)
-		// Extract text from AS to end of function definition
-		// Increase capture to 500 chars to ensure we catch LANGUAGE clause after body
-		bodyStart := match[7] + offset
-		bodyPattern := regexp.MustCompile(`(?s)\$\$(.+?)\$\$(.{0,500})`)
-		bodyMatch := bodyPattern.FindStringSubmatchIndex(transformedSQL[bodyStart:])
-		if len(bodyMatch) >= 6 {
-			afterBody := transformedSQL[bodyStart+bodyMatch[4] : bodyStart+bodyMatch[5]]
-			fmt.Printf("[VOLATILITY-DEBUG] funcName=%s, afterBody (first 100 chars): '%s'\n", st.extractFunctionName(beforeAS), afterBody[:min(100, len(afterBody))])
-			if st.hasVolatilityMarker(afterBody) {
-				fmt.Printf("[VOLATILITY-DEBUG] ✓ Found volatility marker in afterBody for %s!\n", st.extractFunctionName(beforeAS))
-				hasVolatility = true
-			} else {
-				fmt.Printf("[VOLATILITY-DEBUG] ✗ NO volatility marker found for %s, full afterBody: '%s'\n", st.extractFunctionName(beforeAS), afterBody)
-			}
-		} else {
-			fmt.Printf("[VOLATILITY-DEBUG] bodyMatch length=%d for %s\n", len(bodyMatch), st.extractFunctionName(beforeAS))
+		if st.hasVolatilityMarker(trimmed) {
+			continue
 		}
 
-		if hasVolatility {
-			continue // Already has volatility marker, skip
-		}
-
-		// Do NOT automatically add volatility markers to functions.
-		// Only add them if explicitly required for index predicates or other constraints.
-		// For single-version functions, preserve them exactly as written.
-		//
-		// The previous approach (forcing STABLE for auth functions) was too aggressive
-		// and caused schema differences after squashing.
-		//
-		// SKIP: Don't add volatility markers proactively
-		// If a function truly needs a volatility marker for an index predicate,
-		// it should be present in the original SQL or added manually by the developer.
-
-		// Skip this function - don't add volatility markers
-		_ = beforeAS    // Suppress unused variable warning
-		_ = modifiers   // Suppress unused variable warning
-		_ = asKeyword   // Suppress unused variable warning
-		continue
-
-		// DEAD CODE BELOW - Left for reference but never executed due to continue above
-		// If we decide to re-enable automatic volatility markers in the future,
-		// this code shows how it was done previously.
-		/*
-		// Build new modifiers string
-		// PostgreSQL syntax: CREATE FUNCTION name() RETURNS type [LANGUAGE lang] [SECURITY DEFINER] [VOLATILE|STABLE|IMMUTABLE] AS $$
-		newModifiers := strings.TrimSpace(modifiers)
-
-		// Only add volatility if not already present
-		if newModifiers != "" {
-			// Modifiers already exist, volatility marker goes after them
-			newModifiers = newModifiers + " " + volatility
-		} else {
-			// No existing modifiers, just add volatility
-			newModifiers = volatility
-		}
-
-		// Construct replacement: signature + newModifiers + AS
-		// Ensure single space separation
-		signature := beforeAS[:match[4]+offset-match[0]-offset]
-		replacement := strings.TrimRight(signature, " ") + " " + newModifiers + asKeyword
-
-		transformedSQL = transformedSQL[:match[0]+offset] + replacement + transformedSQL[match[7]+offset:]
-		offset += len(replacement) - (match[7] - match[0])
-
-		// Record transformation
-		result.Transformations = append(result.Transformations, TransformationApplied{
-			Type:        UnsafeToSafe,
-			Description: fmt.Sprintf("Added %s volatility marker to function %s for index predicate compatibility", volatility, funcName),
-			Before:      beforeAS + asKeyword,
-			After:       replacement,
-		})
-		*/
+		// Read-only analysis only: keep SQL unchanged.
+		// We intentionally do not auto-insert volatility keywords.
+		_ = st.extractFunctionName(trimmed)
 	}
 
-	return transformedSQL, nil
+	return sql, nil
 }
 
 // hasVolatilityMarker checks if a function definition already has a volatility marker.
@@ -802,20 +1039,20 @@ func isAuthFunction(funcName string) bool {
 // Decision Logic (in order of precedence):
 //
 // 1. VOLATILE - Functions that:
-//    - Modify data: INSERT, UPDATE, DELETE, TRUNCATE
-//    - Modify schema: CREATE, DROP, ALTER
-//    - Use non-deterministic sequences: nextval(), setval(), currval()
-//    - Use randomness: random(), setseed()
+//   - Modify data: INSERT, UPDATE, DELETE, TRUNCATE
+//   - Modify schema: CREATE, DROP, ALTER
+//   - Use non-deterministic sequences: nextval(), setval(), currval()
+//   - Use randomness: random(), setseed()
 //
 // 2. STABLE - Functions that:
-//    - Read session/auth state: auth.jwt(), auth.uid(), current_user, current_setting()
-//    - Read time (within transaction): now(), current_timestamp, current_date
-//    - Read database: SELECT (any query is at minimum STABLE)
+//   - Read session/auth state: auth.jwt(), auth.uid(), current_user, current_setting()
+//   - Read time (within transaction): now(), current_timestamp, current_date
+//   - Read database: SELECT (any query is at minimum STABLE)
 //
 // 3. IMMUTABLE - Functions that:
-//    - Are purely computational (no DB access, no state)
-//    - Always return same result for same inputs
-//    - Example: Mathematical calculations, string operations
+//   - Are purely computational (no DB access, no state)
+//   - Always return same result for same inputs
+//   - Example: Mathematical calculations, string operations
 //
 // Default: STABLE (safest for auth functions, works with index predicates)
 //
@@ -840,9 +1077,9 @@ func (st *SQLTransformer) determineVolatility(functionBody string) string {
 	// Pattern 2: STABLE - Session/database state reads (no modifications)
 	// This is the safest default for auth functions (Clerk, Supabase, Auth0)
 	stablePatterns := []string{
-		"AUTH.JWT()", "AUTH.UID()", "AUTH.ROLE()",           // Supabase/Clerk auth
-		"CURRENT_USER", "CURRENT_SETTING(", "SESSION_USER",  // PostgreSQL session
-		"CURRENT_TIMESTAMP", "NOW()", "TIMEOFDAY()",         // Time functions
+		"AUTH.JWT()", "AUTH.UID()", "AUTH.ROLE()", // Supabase/Clerk auth
+		"CURRENT_USER", "CURRENT_SETTING(", "SESSION_USER", // PostgreSQL session
+		"CURRENT_TIMESTAMP", "NOW()", "TIMEOFDAY()", // Time functions
 		"CURRENT_DATE", "CURRENT_TIME",
 		"TRANSACTION_TIMESTAMP()", "STATEMENT_TIMESTAMP()",
 		"SELECT ", // Any SELECT query reads state
@@ -856,9 +1093,9 @@ func (st *SQLTransformer) determineVolatility(functionBody string) string {
 	// Pattern 3: IMMUTABLE - Pure computational functions only
 	// Very conservative check - must have no database/state access
 	isPure := !strings.Contains(bodyUpper, "SELECT") &&
-	          !strings.Contains(bodyUpper, "FROM") &&
-	          !strings.Contains(bodyUpper, "PERFORM") &&
-	          len(strings.TrimSpace(functionBody)) > 0
+		!strings.Contains(bodyUpper, "FROM") &&
+		!strings.Contains(bodyUpper, "PERFORM") &&
+		len(strings.TrimSpace(functionBody)) > 0
 
 	if isPure {
 		return "IMMUTABLE"
@@ -876,12 +1113,26 @@ func (st *SQLTransformer) determineVolatility(functionBody string) string {
 //   - "CREATE FUNCTION public.bar(...)" → "bar"
 //   - "CREATE OR REPLACE FUNCTION baz(...)" → "baz"
 func (st *SQLTransformer) extractFunctionName(funcDef string) string {
-	// Pattern: FUNCTION [schema.]name
-	// Captures only the function name, not the schema
-	namePattern := regexp.MustCompile(`(?i)FUNCTION\s+(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)`)
-	match := namePattern.FindStringSubmatch(funcDef)
-	if len(match) >= 2 {
-		return match[1]
+	upper := strings.ToUpper(funcDef)
+	idx := strings.Index(upper, "FUNCTION")
+	if idx == -1 {
+		return "unknown"
 	}
-	return "unknown"
+
+	rest := strings.TrimSpace(funcDef[idx+len("FUNCTION"):])
+	if strings.HasPrefix(strings.ToUpper(rest), "IF NOT EXISTS") {
+		rest = strings.TrimSpace(rest[len("IF NOT EXISTS"):])
+	}
+
+	nameToken, _ := splitLeadingIdentifier(rest)
+	if nameToken == "" {
+		return "unknown"
+	}
+
+	if strings.Contains(nameToken, ".") {
+		parts := strings.Split(nameToken, ".")
+		return parts[len(parts)-1]
+	}
+
+	return nameToken
 }

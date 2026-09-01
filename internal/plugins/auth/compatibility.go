@@ -13,43 +13,43 @@ import (
 type ServiceType string
 
 const (
-    ServiceClerk    ServiceType = "clerk"
-    ServiceSupabase ServiceType = "supabase"
-    ServiceAuth0    ServiceType = "auth0"
-    ServiceNextAuth ServiceType = "nextauth"
-    ServiceFirebase ServiceType = "firebase"
+	ServiceClerk    ServiceType = "clerk"
+	ServiceSupabase ServiceType = "supabase"
+	ServiceAuth0    ServiceType = "auth0"
+	ServiceNextAuth ServiceType = "nextauth"
+	ServiceFirebase ServiceType = "firebase"
 )
 
 // CompatibilityGenerator generates authentication compatibility SQL
 // for validation environments. Creates mock schemas, roles, and functions
 // that allow migrations to be validated without actual auth services.
 type CompatibilityGenerator struct {
-    service ServiceType
+	service ServiceType
 }
 
 // NewCompatibilityGenerator creates a new auth compatibility generator
 func NewCompatibilityGenerator(service ServiceType) *CompatibilityGenerator {
-    return &CompatibilityGenerator{
-        service: service,
-    }
+	return &CompatibilityGenerator{
+		service: service,
+	}
 }
 
 // Generate returns the complete compatibility SQL for the configured service
 func (g *CompatibilityGenerator) Generate() string {
-    switch g.service {
-    case ServiceClerk:
-        return g.GenerateClerkCompatibility()
-    case ServiceSupabase:
-        return g.GenerateSupabaseCompatibility()
-    case ServiceAuth0:
-        return g.GenerateAuth0Compatibility()
-    case ServiceNextAuth:
-        return g.GenerateNextAuthCompatibility()
-    case ServiceFirebase:
-        return g.GenerateFirebaseCompatibility()
-    default:
-        return ""
-    }
+	switch g.service {
+	case ServiceClerk:
+		return g.GenerateClerkCompatibility()
+	case ServiceSupabase:
+		return g.GenerateSupabaseCompatibility()
+	case ServiceAuth0:
+		return g.GenerateAuth0Compatibility()
+	case ServiceNextAuth:
+		return g.GenerateNextAuthCompatibility()
+	case ServiceFirebase:
+		return g.GenerateFirebaseCompatibility()
+	default:
+		return ""
+	}
 }
 
 // GenerateClerkCompatibility creates Clerk authentication compatibility layer
@@ -59,7 +59,7 @@ func (g *CompatibilityGenerator) Generate() string {
 //   - Mock auth.jwt() function with Clerk JWT v2 organization structure
 //   - Helper functions (current_user_id, current_organization_id, etc.)
 func (g *CompatibilityGenerator) GenerateClerkCompatibility() string {
-    return `-- Clerk Authentication Compatibility Layer
+	return `-- Clerk Authentication Compatibility Layer
 CREATE SCHEMA IF NOT EXISTS auth;
 
 -- Create common Supabase/Clerk roles (used in RLS policies)
@@ -99,11 +99,65 @@ BEGIN
 END;
 $$;
 
+-- Clerk-compatible claim helper used by many migrations
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION current_clerk_claims() RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN auth.jwt();
+END;
+$$;
+
+-- Clerk user-id helper used by policies and RPCs
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION clerk_user_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN COALESCE(
+    current_clerk_claims()->>'sub',
+    current_clerk_claims()->>'user_id',
+    current_setting('app.clerk_user_id', true)
+  );
+END;
+$$;
+
+-- Backward-compatible alias used in some migration sets
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION current_clerk_user_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN clerk_user_id();
+END;
+$$;
+
+-- Clerk admin helper used in RLS predicates
+-- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION clerk_is_admin() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  app_role text;
+  org_role text;
+BEGIN
+  app_role := lower(COALESCE(
+    current_clerk_claims()->>'app_role',
+    current_clerk_claims()->'publicMetadata'->>'role',
+    current_clerk_claims()->'privateMetadata'->>'role',
+    current_clerk_claims()->'app_metadata'->>'role',
+    current_clerk_claims()->'user_metadata'->>'role',
+    current_clerk_claims()->>'role'
+  ));
+
+  org_role := lower(COALESCE(
+    current_clerk_claims()->'org'->>'role',
+    current_clerk_claims()->'o'->>'role'
+  ));
+
+  RETURN app_role IN ('admin', 'super_admin', 'owner')
+    OR org_role IN ('admin', 'owner');
+END;
+$$;
+
 -- Mock current_user_id helper (common in Clerk setups)
 -- NOTE: No volatility marker - let PostgreSQL use defaults for test mocks
 CREATE OR REPLACE FUNCTION current_user_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
-  RETURN (auth.jwt() ->> 'sub')::text;
+  RETURN clerk_user_id();
 END;
 $$;
 
@@ -111,19 +165,88 @@ $$;
 -- NOTE: No volatility markers - let PostgreSQL use defaults for test mocks
 CREATE OR REPLACE FUNCTION current_organization_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
-  RETURN (auth.jwt()->'o'->>'id')::text;
+  RETURN COALESCE(
+    (auth.jwt()->'org'->>'id')::text,
+    (auth.jwt()->'o'->>'id')::text
+  );
 END;
 $$;
 
 CREATE OR REPLACE FUNCTION current_organization_role() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
-  RETURN (auth.jwt()->'o'->>'role')::text;
+  RETURN COALESCE(
+    (auth.jwt()->'org'->>'role')::text,
+    (auth.jwt()->'o'->>'role')::text
+  );
 END;
 $$;
 
 CREATE OR REPLACE FUNCTION current_organization_name() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
-  RETURN (auth.jwt()->'o'->>'name')::text;
+  RETURN COALESCE(
+    (auth.jwt()->'org'->>'name')::text,
+    (auth.jwt()->'o'->>'name')::text
+  );
+END;
+$$;
+
+-- Clerk-style org helper aliases frequently used in production migrations
+-- NOTE: No volatility markers - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION current_clerk_org_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN current_organization_id();
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION current_clerk_org_role() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN current_organization_role();
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION current_clerk_org_name() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN current_organization_name();
+END;
+$$;
+
+-- Common identity helpers
+-- NOTE: No volatility markers - let PostgreSQL use defaults for test mocks
+CREATE OR REPLACE FUNCTION clerk_user_email() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN NULLIF(current_clerk_claims()->>'email', '');
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION is_authenticated() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN clerk_user_id() IS NOT NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION user_has_valid_mfa() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  mfa_age integer;
+BEGIN
+  BEGIN
+    mfa_age := (current_clerk_claims()->'fva'->>1)::integer;
+  EXCEPTION WHEN others THEN
+    RETURN FALSE;
+  END;
+
+  RETURN COALESCE(mfa_age != -1, FALSE);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION get_clerk_user_id() RETURNS text LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN clerk_user_id();
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION is_clerk_admin() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  RETURN clerk_is_admin();
 END;
 $$;
 
@@ -145,8 +268,12 @@ $$;`
 //   - Mock auth.uid() and auth.jwt() functions
 //   - Supabase Realtime publication
 func (g *CompatibilityGenerator) GenerateSupabaseCompatibility() string {
-    return `-- Supabase Authentication Compatibility Layer
+	return `-- Supabase Authentication Compatibility Layer
 CREATE SCHEMA IF NOT EXISTS auth;
+
+-- Ensure extensions are available for UUID generation
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- Create auth.users table stub for foreign key references
 -- This allows migrations to reference auth.users(id) without errors
@@ -182,6 +309,19 @@ CREATE TABLE IF NOT EXISTS auth.users (
     reauthentication_sent_at TIMESTAMPTZ,
     is_sso_user BOOLEAN DEFAULT FALSE,
     deleted_at TIMESTAMPTZ
+);
+
+-- Create auth.identities table stub (commonly referenced in triggers)
+CREATE TABLE IF NOT EXISTS auth.identities (
+    id TEXT NOT NULL,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    identity_data JSONB NOT NULL,
+    provider TEXT NOT NULL,
+    last_sign_in_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+    email TEXT,
+    CONSTRAINT identities_pkey PRIMARY KEY (provider, id)
 );
 
 -- Create Supabase roles (used in RLS policies)
@@ -286,7 +426,7 @@ $$;`
 
 // GenerateAuth0Compatibility creates Auth0 authentication compatibility layer
 func (g *CompatibilityGenerator) GenerateAuth0Compatibility() string {
-    return `-- Auth0 Authentication Compatibility Layer
+	return `-- Auth0 Authentication Compatibility Layer
 CREATE SCHEMA IF NOT EXISTS auth;
 
 -- Mock Auth0 JWT function
@@ -308,7 +448,7 @@ $$;`
 
 // GenerateNextAuthCompatibility creates NextAuth authentication compatibility layer
 func (g *CompatibilityGenerator) GenerateNextAuthCompatibility() string {
-    return `-- NextAuth.js Authentication Compatibility Layer
+	return `-- NextAuth.js Authentication Compatibility Layer
 CREATE SCHEMA IF NOT EXISTS public;
 
 -- NextAuth required tables
@@ -353,7 +493,7 @@ CREATE TABLE IF NOT EXISTS verification_tokens (
 
 // GenerateFirebaseCompatibility creates Firebase authentication compatibility layer
 func (g *CompatibilityGenerator) GenerateFirebaseCompatibility() string {
-    return `-- Firebase Authentication Compatibility Layer
+	return `-- Firebase Authentication Compatibility Layer
 CREATE SCHEMA IF NOT EXISTS auth;
 
 -- Mock Firebase JWT function
@@ -381,23 +521,23 @@ $$;`
 
 // GetServiceFromString converts string to ServiceType
 func GetServiceFromString(s string) (ServiceType, error) {
-    switch s {
-    case "clerk":
-        return ServiceClerk, nil
-    case "supabase":
-        return ServiceSupabase, nil
-    case "auth0":
-        return ServiceAuth0, nil
-    case "nextauth":
-        return ServiceNextAuth, nil
-    case "firebase":
-        return ServiceFirebase, nil
-    default:
-        return "", errors.New(
-            errors.ErrorCodeValidationFailed,
-            errors.CategoryValidation,
-            "unknown auth service",
-            map[string]interface{}{"service": s},
-        )
-    }
+	switch s {
+	case "clerk":
+		return ServiceClerk, nil
+	case "supabase":
+		return ServiceSupabase, nil
+	case "auth0":
+		return ServiceAuth0, nil
+	case "nextauth":
+		return ServiceNextAuth, nil
+	case "firebase":
+		return ServiceFirebase, nil
+	default:
+		return "", errors.New(
+			errors.ErrorCodeValidationFailed,
+			errors.CategoryValidation,
+			"unknown auth service",
+			map[string]any{"service": s},
+		)
+	}
 }

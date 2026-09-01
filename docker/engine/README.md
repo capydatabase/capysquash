@@ -12,13 +12,17 @@ Run pgsquash CLI tool (the engine) inside a Docker container for portability and
 ## Quick Start
 
 ```bash
+
 # 1. Squash migrations
+
 docker compose -f docker/engine/quick-start.yml run --rm pgsquash squash /app/migrations/*.sql
 
 # 2. Analyze migrations
+
 docker compose -f docker/engine/quick-start.yml run --rm pgsquash analyze /app/migrations/*.sql
 
 # 3. Interactive shell
+
 docker compose -f docker/engine/quick-start.yml run --rm pgsquash bash
 ```
 

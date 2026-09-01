@@ -2,11 +2,11 @@ package squasher
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/errors"
 	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
@@ -41,22 +41,15 @@ func formatDeparserOutput(sql string) string {
 	}
 
 	// 1. Add newlines after semicolons (statement boundaries)
-	sql = regexp.MustCompile(`;(\s*)(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|SELECT)`).
-		ReplaceAllString(sql, ";\n\n$2")
+	sql = insertStatementBreaks(sql)
 
 	// 2. Add newlines after key clauses in CREATE TABLE
-	sql = regexp.MustCompile(`\),\s*`).ReplaceAllString(sql, "),\n  ")
+	sql = addTupleCommaLineBreaks(sql)
 
-	// 3. Add spacing around CHECK constraints
-	sql = regexp.MustCompile(`\s*CHECK\s*\(`).ReplaceAllString(sql, " CHECK (")
+	// 3. Normalize excessive horizontal whitespace
+	sql = collapseHorizontalWhitespace(sql)
 
-	// 4. Fix DEFAULT clauses
-	sql = regexp.MustCompile(`\s*DEFAULT\s+`).ReplaceAllString(sql, " DEFAULT ")
-
-	// 5. Normalize excessive whitespace
-	sql = regexp.MustCompile(`[ \t]+`).ReplaceAllString(sql, " ")
-
-	// 6. Clean up lines
+	// 4. Clean up lines
 	lines := strings.Split(sql, "\n")
 	for i, line := range lines {
 		lines[i] = strings.TrimSpace(line)
@@ -64,6 +57,146 @@ func formatDeparserOutput(sql string) string {
 	sql = strings.Join(lines, "\n")
 
 	return sql
+}
+
+func insertStatementBreaks(sql string) string {
+	if sql == "" {
+		return sql
+	}
+
+	var out strings.Builder
+	out.Grow(len(sql) + 16)
+
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+		if ch != ';' {
+			out.WriteByte(ch)
+			continue
+		}
+
+		out.WriteByte(';')
+
+		j := i + 1
+		for j < len(sql) && isHorizontalOrLineWhitespace(sql[j]) {
+			j++
+		}
+
+		if hasStatementStarterAtCI(sql, j) {
+			out.WriteString("\n\n")
+			i = j - 1
+		}
+	}
+
+	return out.String()
+}
+
+func addTupleCommaLineBreaks(sql string) string {
+	if sql == "" {
+		return sql
+	}
+
+	var out strings.Builder
+	out.Grow(len(sql) + 16)
+
+	for i := 0; i < len(sql); i++ {
+		if sql[i] == ')' && i+1 < len(sql) && sql[i+1] == ',' {
+			out.WriteString("),\n  ")
+
+			i += 1
+			j := i + 1
+			for j < len(sql) && isHorizontalOrLineWhitespace(sql[j]) {
+				j++
+			}
+			i = j - 1
+			continue
+		}
+
+		out.WriteByte(sql[i])
+	}
+
+	return out.String()
+}
+
+func collapseHorizontalWhitespace(sql string) string {
+	if sql == "" {
+		return sql
+	}
+
+	var out strings.Builder
+	out.Grow(len(sql))
+
+	seenSpace := false
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+
+		if ch == '\n' || ch == '\r' {
+			seenSpace = false
+			out.WriteByte(ch)
+			continue
+		}
+
+		if isHorizontalWhitespace(ch) {
+			if !seenSpace {
+				out.WriteByte(' ')
+				seenSpace = true
+			}
+			continue
+		}
+
+		seenSpace = false
+		out.WriteByte(ch)
+	}
+
+	return out.String()
+}
+
+func isHorizontalWhitespace(ch byte) bool {
+	return ch == ' ' || ch == '\t' || ch == '\f' || ch == '\v'
+}
+
+func isHorizontalOrLineWhitespace(ch byte) bool {
+	return isHorizontalWhitespace(ch) || ch == '\n' || ch == '\r'
+}
+
+func hasStatementStarterAtCI(sql string, pos int) bool {
+	if pos < 0 || pos >= len(sql) {
+		return false
+	}
+
+	starters := []string{"CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "SELECT"}
+	for _, keyword := range starters {
+		if hasKeywordAtCI(sql, pos, keyword) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hasKeywordAtCI(sql string, pos int, keyword string) bool {
+	if pos < 0 || pos+len(keyword) > len(sql) {
+		return false
+	}
+
+	if pos > 0 && isIdentifierByte(sql[pos-1]) {
+		return false
+	}
+
+	segment := sql[pos : pos+len(keyword)]
+	if !strings.EqualFold(segment, keyword) {
+		return false
+	}
+
+	end := pos + len(keyword)
+	if end < len(sql) && isIdentifierByte(sql[end]) {
+		return false
+	}
+
+	return true
+}
+
+func isIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_'
 }
 
 // DeparseWithStatement takes a Statement and its ParseTree, and generates SQL.
@@ -77,8 +210,8 @@ func DeparseWithStatement(stmt *types.Statement) (string, error) {
 		return "", nil
 	}
 
-	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
-	if !ok {
+	parseResult := stmt.ParseTree
+	if parseResult == nil {
 		return stmt.SQL, nil
 	}
 
@@ -93,10 +226,17 @@ func DeparseWithStatement(stmt *types.Statement) (string, error) {
 	// pg_query.Deparse() doesn't preserve volatility, so we extract from original
 	// SQL and restore after deparsing
 	if stmt.ObjectType == types.TypeFunction {
-		fmt.Printf("[DEBUG] Deparsing function with volatility preservation. Original SQL: %.100s\n", stmt.SQL)
+		if logger := utils.GetDefaultLogger(); logger != nil {
+			logger.WithPrefix("DEPARSER").Debug(
+				"Deparsing function with volatility preservation. Original SQL: %.100s",
+				stmt.SQL,
+			)
+		}
 		result, err := deparseWithVolatilityPreservation(parseResult, stmt.SQL)
 		if err == nil {
-			fmt.Printf("[DEBUG] Deparsed result: %.100s\n", result)
+			if logger := utils.GetDefaultLogger(); logger != nil {
+				logger.WithPrefix("DEPARSER").Debug("Deparsed result: %.100s", result)
+			}
 		}
 		return result, err
 	}
@@ -198,52 +338,70 @@ func extractSecurityDefiner(sql string) string {
 // injectVolatilityMarker adds volatility marker to deparsed function SQL
 // Injects after LANGUAGE clause, before AS
 func injectVolatilityMarker(sql string, volatility string) (string, error) {
-	// Pattern: ... LANGUAGE xxx AS $$ or ... LANGUAGE xxx SECURITY DEFINER AS $$
-	// We want to inject volatility after LANGUAGE (and SECURITY DEFINER if present)
-	// but before AS
-
-	// Try to find "LANGUAGE xxx" followed by optional "SECURITY DEFINER", then "AS"
-	pattern := regexp.MustCompile(`(?i)(LANGUAGE\s+\w+)(\s+(?:SECURITY\s+(?:DEFINER|INVOKER)\s+)?)(AS\s+)`)
-
-	// Replace with: LANGUAGE xxx [SECURITY DEFINER] VOLATILITY AS
-	replacement := fmt.Sprintf("$1$2%s $3", volatility)
-	result := pattern.ReplaceAllString(sql, replacement)
-
-	// If no match, try simpler pattern: just before AS
-	if result == sql {
-		simplePattern := regexp.MustCompile(`(?i)(\s+)(AS\s+\$)`)
-		result = simplePattern.ReplaceAllString(sql, fmt.Sprintf(" %s $2", volatility))
-	}
-
-	return result, nil
+	return insertMarkerBeforeAS(sql, volatility), nil
 }
 
 // injectSecurityDefiner adds SECURITY DEFINER/INVOKER to deparsed function SQL
 // Injects after LANGUAGE and volatility (if present), before AS
 func injectSecurityDefiner(sql string, securityMarker string) (string, error) {
-	// Pattern options:
-	// 1. LANGUAGE xxx VOLATILE/STABLE/IMMUTABLE AS $$ -> inject after volatility
-	// 2. LANGUAGE xxx AS $$ -> inject after LANGUAGE
-	//
-	// We want: LANGUAGE xxx [VOLATILITY] SECURITY DEFINER AS $$
+	return insertMarkerBeforeAS(sql, securityMarker), nil
+}
 
-	// Try pattern with volatility marker first
-	withVolatilityPattern := regexp.MustCompile(`(?i)(LANGUAGE\s+\w+\s+(?:VOLATILE|STABLE|IMMUTABLE))(\s+)(AS\s+)`)
-	result := withVolatilityPattern.ReplaceAllString(sql, fmt.Sprintf("$1 %s $3", securityMarker))
-
-	// If no match (no volatility), inject after LANGUAGE
-	if result == sql {
-		withoutVolatilityPattern := regexp.MustCompile(`(?i)(LANGUAGE\s+\w+)(\s+)(AS\s+)`)
-		result = withoutVolatilityPattern.ReplaceAllString(sql, fmt.Sprintf("$1 %s $3", securityMarker))
+func insertMarkerBeforeAS(sql string, marker string) string {
+	trimmedMarker := strings.TrimSpace(marker)
+	if sql == "" || trimmedMarker == "" {
+		return sql
 	}
 
-	// If still no match, try simpler pattern: just before AS
-	if result == sql {
-		simplePattern := regexp.MustCompile(`(?i)(\s+)(AS\s+\$)`)
-		result = simplePattern.ReplaceAllString(sql, fmt.Sprintf(" %s $2", securityMarker))
+	upperSQL := strings.ToUpper(sql)
+	if strings.Contains(upperSQL, strings.ToUpper(trimmedMarker)) {
+		return sql
 	}
 
-	return result, nil
+	asIdx := findAsBeforeDollarIndex(sql)
+	if asIdx == -1 {
+		asIdx = findStandaloneAsIndex(sql)
+	}
+	if asIdx == -1 {
+		return sql
+	}
+
+	prefix := strings.TrimRight(sql[:asIdx], " \t\r\n")
+	suffix := strings.TrimLeft(sql[asIdx:], " \t\r\n")
+	if prefix == "" {
+		return trimmedMarker + " " + suffix
+	}
+
+	return prefix + " " + trimmedMarker + " " + suffix
+}
+
+func findAsBeforeDollarIndex(sql string) int {
+	for i := 0; i+2 <= len(sql); i++ {
+		if !hasKeywordAtCI(sql, i, "AS") {
+			continue
+		}
+
+		j := i + 2
+		for j < len(sql) && isHorizontalOrLineWhitespace(sql[j]) {
+			j++
+		}
+
+		if j < len(sql) && sql[j] == '$' {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func findStandaloneAsIndex(sql string) int {
+	for i := 0; i+2 <= len(sql); i++ {
+		if hasKeywordAtCI(sql, i, "AS") {
+			return i
+		}
+	}
+
+	return -1
 }
 
 // cleanIndexAccessMethod removes implicit "btree" access method from IndexStmt nodes

@@ -2,7 +2,7 @@ package consolidation
 
 import (
 	"fmt"
-	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/utils"
@@ -40,7 +40,7 @@ func (r *EnumDeduplicationRule) CanApply(lifecycle *tracking.ObjectLifecycle) bo
 // Apply applies the consolidation rule to the given lifecycle
 func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "EnumDedupRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "EnumDedupRule"})
 	}
 
 	// Get safety level to determine behavior
@@ -49,20 +49,21 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 
 	// Collect all ENUM definitions
 	var enumStmts []types.Statement
-	enumPattern := regexp.MustCompile(`(?is)CREATE\s+TYPE\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s+ENUM\s*\((.*?)\)`)
 
 	for _, event := range lifecycle.History {
-		if matches := enumPattern.FindStringSubmatch(event.Statement.SQL); len(matches) > 1 {
+		if isCreateEnumStatement(event.Statement.SQL) {
 			enumStmts = append(enumStmts, event.Statement)
 		}
 	}
 
 	if len(enumStmts) == 0 {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no ENUM statements found", map[string]interface{}{"object": lifecycle.Name})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no ENUM statements found", map[string]any{"object": lifecycle.Name})
 	}
 
 	// Check for duplicate ENUM types across the entire codebase
+	// CRITICAL FIX: Only consider enums in the SAME SCHEMA as duplicates
 	typeName := lifecycle.Name
+	typeSchema := lifecycle.Schema // Get the schema (defaults to "public" if not specified)
 	allLifecycles := tracker.GetObjectsByCategory()
 	var conflictingEnums []tracking.ObjectLifecycle
 	var primaryEnum string // The name that should be kept
@@ -70,12 +71,20 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 	// BUGFIX: Extract values from this enum for comparison
 	currentEnumValues := extractEnumValuesFromLifecycle(lifecycle)
 
-	// Collect all similar ENUMs including self (but only if they have the SAME values)
+	// Collect all similar ENUMs including self (but only if they have the SAME values AND same schema)
 	allSimilarEnums := []string{typeName}
 	for _, categoryObjects := range allLifecycles {
 		for _, otherLifecycle := range categoryObjects {
 			if otherLifecycle.Key == lifecycle.Key {
 				continue // Skip self
+			}
+
+			// CRITICAL FIX: Only treat as duplicate if in SAME SCHEMA
+			otherSchema := otherLifecycle.Schema
+			if typeSchema != otherSchema {
+				utils.GetDefaultLogger().WithPrefix("ENUM-DEDUP").Info("ENUM %s.%s has similar name to %s.%s but DIFFERENT schemas - keeping both",
+					otherSchema, otherLifecycle.Name, typeSchema, typeName)
+				continue
 			}
 
 			// Check if other lifecycle is also an ENUM with similar name AND same values
@@ -87,9 +96,11 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 				if enumValuesMatch(currentEnumValues, otherEnumValues) {
 					conflictingEnums = append(conflictingEnums, *otherLifecycle)
 					allSimilarEnums = append(allSimilarEnums, otherLifecycle.Name)
-					utils.GetDefaultLogger().WithPrefix("ENUM-DEDUP").Info("Found duplicate ENUM: %s has same values as %s", otherLifecycle.Name, typeName)
+					utils.GetDefaultLogger().WithPrefix("ENUM-DEDUP").Info("Found duplicate ENUM: %s.%s has same values as %s.%s",
+						otherSchema, otherLifecycle.Name, typeSchema, typeName)
 				} else {
-					utils.GetDefaultLogger().WithPrefix("ENUM-DEDUP").Info("ENUM %s has similar name to %s but DIFFERENT values - keeping both", otherLifecycle.Name, typeName)
+					utils.GetDefaultLogger().WithPrefix("ENUM-DEDUP").Info("ENUM %s.%s has similar name to %s.%s but DIFFERENT values - keeping both",
+						otherSchema, otherLifecycle.Name, typeSchema, typeName)
 				}
 			}
 		}
@@ -190,11 +201,8 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 	case "conservative":
 		// CONSERVATIVE: Collapse only when final order equals original and all are appends
 		if len(alterTypeStmts) > 0 {
-			enumPattern := regexp.MustCompile(`(?is)CREATE\s+TYPE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+ENUM\s*\((.*?)\)`)
-			matches := enumPattern.FindStringSubmatch(firstEnum.SQL)
-			if len(matches) > 1 {
-				existingValues := parseEnumValues(matches[1])
-
+			existingValues := extractEnumValuesFromSQL(firstEnum.SQL)
+			if len(existingValues) > 0 {
 				// Verify all ALTER TYPE statements are appends (no reorders)
 				allAppends := true
 				newValues := make([]string, len(existingValues))
@@ -213,10 +221,10 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 
 				if allAppends {
 					// Safe to merge - all are appends
-					valuesList := strings.Join(quoteEnumValues(newValues), ", ")
-					consolidatedSQL = regexp.MustCompile(`(?is)(CREATE\s+TYPE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+ENUM\s*\().*?(\))`).
-						ReplaceAllString(firstEnum.SQL, fmt.Sprintf("${1}%s${2}", valuesList))
-					warnings = append(warnings, fmt.Sprintf("Conservative mode: Merged %d append-only ALTER TYPE statements", len(alterTypeStmts)))
+					if mergedSQL, ok := replaceCreateEnumValues(firstEnum.SQL, newValues); ok {
+						consolidatedSQL = mergedSQL
+						warnings = append(warnings, fmt.Sprintf("Conservative mode: Merged %d append-only ALTER TYPE statements", len(alterTypeStmts)))
+					}
 				} else {
 					// Not safe - preserve sequence
 					var sqlParts []string
@@ -233,12 +241,8 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 	case "standard", "aggressive":
 		// STANDARD/AGGRESSIVE: Merge ALTER TYPE statements into CREATE TYPE
 		if len(alterTypeStmts) > 0 {
-			enumPattern := regexp.MustCompile(`(?is)CREATE\s+TYPE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+ENUM\s*\((.*?)\)`)
-			matches := enumPattern.FindStringSubmatch(firstEnum.SQL)
-			if len(matches) > 1 {
-				// Parse existing values
-				existingValues := parseEnumValues(matches[1])
-
+			existingValues := extractEnumValuesFromSQL(firstEnum.SQL)
+			if len(existingValues) > 0 {
 				// Add new values from ALTER TYPE statements
 				for _, alterStmt := range alterTypeStmts {
 					if alterStmt.AlterTypeNewValue != "" && !contains(existingValues, alterStmt.AlterTypeNewValue) {
@@ -246,35 +250,33 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 					}
 				}
 
-				// Reconstruct CREATE TYPE with all values
-				valuesList := strings.Join(quoteEnumValues(existingValues), ", ")
-				consolidatedSQL = regexp.MustCompile(`(?is)(CREATE\s+TYPE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+ENUM\s*\().*?(\))`).
-					ReplaceAllString(firstEnum.SQL, fmt.Sprintf("${1}%s${2}", valuesList))
+				if mergedSQL, ok := replaceCreateEnumValues(firstEnum.SQL, existingValues); ok {
+					consolidatedSQL = mergedSQL
 
-				mode := "Standard"
-				if safetyLevel == "aggressive" {
-					mode = "Aggressive"
+					mode := "Standard"
+					if safetyLevel == "aggressive" {
+						mode = "Aggressive"
+					}
+					warnings = append(warnings, fmt.Sprintf("%s mode: Merged %d ALTER TYPE ADD VALUE statement(s) into CREATE TYPE", mode, len(alterTypeStmts)))
 				}
-				warnings = append(warnings, fmt.Sprintf("%s mode: Merged %d ALTER TYPE ADD VALUE statement(s) into CREATE TYPE", mode, len(alterTypeStmts)))
 			}
 		}
 
 	default:
 		// Fallback to standard behavior
 		if len(alterTypeStmts) > 0 {
-			enumPattern := regexp.MustCompile(`(?is)CREATE\s+TYPE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+ENUM\s*\((.*?)\)`)
-			matches := enumPattern.FindStringSubmatch(firstEnum.SQL)
-			if len(matches) > 1 {
-				existingValues := parseEnumValues(matches[1])
+			existingValues := extractEnumValuesFromSQL(firstEnum.SQL)
+			if len(existingValues) > 0 {
 				for _, alterStmt := range alterTypeStmts {
 					if alterStmt.AlterTypeNewValue != "" && !contains(existingValues, alterStmt.AlterTypeNewValue) {
 						existingValues = append(existingValues, alterStmt.AlterTypeNewValue)
 					}
 				}
-				valuesList := strings.Join(quoteEnumValues(existingValues), ", ")
-				consolidatedSQL = regexp.MustCompile(`(?is)(CREATE\s+TYPE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+ENUM\s*\().*?(\))`).
-					ReplaceAllString(firstEnum.SQL, fmt.Sprintf("${1}%s${2}", valuesList))
-				warnings = append(warnings, fmt.Sprintf("Merged %d ALTER TYPE ADD VALUE statement(s) into CREATE TYPE", len(alterTypeStmts)))
+
+				if mergedSQL, ok := replaceCreateEnumValues(firstEnum.SQL, existingValues); ok {
+					consolidatedSQL = mergedSQL
+					warnings = append(warnings, fmt.Sprintf("Merged %d ALTER TYPE ADD VALUE statement(s) into CREATE TYPE", len(alterTypeStmts)))
+				}
 			}
 		}
 	}
@@ -361,14 +363,39 @@ func isSimilarEnumName(name1, name2 string) bool {
 // Output: ["active", "inactive", "suspended"]
 func parseEnumValues(valuesStr string) []string {
 	var values []string
-	// Match quoted strings
-	valuePattern := regexp.MustCompile(`'([^']*)'`)
-	matches := valuePattern.FindAllStringSubmatch(valuesStr, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			values = append(values, match[1])
-		}
+	if valuesStr == "" {
+		return values
 	}
+
+	inQuote := false
+	var current strings.Builder
+
+	for i := 0; i < len(valuesStr); i++ {
+		ch := valuesStr[i]
+
+		if !inQuote {
+			if ch == '\'' {
+				inQuote = true
+				current.Reset()
+			}
+			continue
+		}
+
+		if ch == '\'' {
+			if i+1 < len(valuesStr) && valuesStr[i+1] == '\'' {
+				current.WriteByte('\'')
+				i++
+				continue
+			}
+
+			values = append(values, current.String())
+			inQuote = false
+			continue
+		}
+
+		current.WriteByte(ch)
+	}
+
 	return values
 }
 
@@ -385,24 +412,167 @@ func quoteEnumValues(values []string) []string {
 
 // contains checks if a string slice contains a specific value
 func contains(slice []string, value string) bool {
-	for _, item := range slice {
-		if item == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, value)
 }
 
 // extractEnumValuesFromLifecycle extracts enum values from a lifecycle's SQL
 func extractEnumValuesFromLifecycle(lifecycle *tracking.ObjectLifecycle) []string {
-	enumPattern := regexp.MustCompile(`(?is)CREATE\s+TYPE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+ENUM\s*\((.*?)\)`)
-
 	for _, event := range lifecycle.History {
-		if matches := enumPattern.FindStringSubmatch(event.Statement.SQL); len(matches) > 1 {
-			return parseEnumValues(matches[1])
+		if values := extractEnumValuesFromSQL(event.Statement.SQL); len(values) > 0 {
+			return values
 		}
 	}
 	return []string{}
+}
+
+func isCreateEnumStatement(sql string) bool {
+	_, _, ok := findEnumValuesSpan(sql)
+	return ok
+}
+
+func extractEnumValuesFromSQL(sql string) []string {
+	start, end, ok := findEnumValuesSpan(sql)
+	if !ok || start >= end || start < 0 || end > len(sql) {
+		return nil
+	}
+
+	return parseEnumValues(sql[start:end])
+}
+
+func replaceCreateEnumValues(sql string, values []string) (string, bool) {
+	start, end, ok := findEnumValuesSpan(sql)
+	if !ok || start > end || start < 0 || end > len(sql) {
+		return "", false
+	}
+
+	replacement := strings.Join(quoteEnumValues(values), ", ")
+	return sql[:start] + replacement + sql[end:], true
+}
+
+func findEnumValuesSpan(sql string) (int, int, bool) {
+	if sql == "" {
+		return 0, 0, false
+	}
+
+	asEnumIndex := findKeywordSequenceIndexCI(sql, "AS", "ENUM")
+	if asEnumIndex < 0 {
+		return 0, 0, false
+	}
+
+	openParen := -1
+	for i := asEnumIndex; i < len(sql); i++ {
+		if sql[i] == '(' {
+			openParen = i
+			break
+		}
+	}
+	if openParen == -1 {
+		return 0, 0, false
+	}
+
+	closeParen := findMatchingParenWithQuotes(sql, openParen)
+	if closeParen == -1 || closeParen <= openParen {
+		return 0, 0, false
+	}
+
+	return openParen + 1, closeParen, true
+}
+
+func findKeywordSequenceIndexCI(sql string, words ...string) int {
+	if len(words) == 0 || sql == "" {
+		return -1
+	}
+
+	for i := 0; i < len(sql); i++ {
+		if !isWordBoundaryStart(sql, i) {
+			continue
+		}
+
+		index := i
+		matched := true
+		for _, word := range words {
+			index = skipWhitespaceBytes(sql, index)
+			if index+len(word) > len(sql) || !strings.EqualFold(sql[index:index+len(word)], word) {
+				matched = false
+				break
+			}
+
+			end := index + len(word)
+			if end < len(sql) && isIdentifierByte(sql[end]) {
+				matched = false
+				break
+			}
+
+			index = end
+		}
+
+		if matched {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func findMatchingParenWithQuotes(sql string, openIndex int) int {
+	if openIndex < 0 || openIndex >= len(sql) || sql[openIndex] != '(' {
+		return -1
+	}
+
+	depth := 0
+	inSingleQuote := false
+
+	for i := openIndex; i < len(sql); i++ {
+		ch := sql[i]
+
+		if inSingleQuote {
+			if ch == '\'' {
+				if i+1 < len(sql) && sql[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+func isWordBoundaryStart(sql string, index int) bool {
+	if index <= 0 {
+		return true
+	}
+	return !isIdentifierByte(sql[index-1])
+}
+
+func skipWhitespaceBytes(sql string, index int) int {
+	for index < len(sql) {
+		switch sql[index] {
+		case ' ', '\t', '\n', '\r', '\f', '\v':
+			index++
+		default:
+			return index
+		}
+	}
+	return index
+}
+
+func isIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_'
 }
 
 // enumValuesMatch checks if two enum value lists are the same (order-independent)

@@ -1,7 +1,10 @@
 // Package plugins provides a public API for pgsquash plugin management.
 //
-// This package exports plugin registration and detection functionality for use
-// by external tools while keeping the internal plugin implementation details private.
+// This package exports plugin registration, detection, and compatibility
+// functionality for use by external tools while keeping the internal plugin
+// implementation details private. Detection and compatibility results are
+// produced by the same plugin implementations and conflict-resolution logic
+// the squashing engine uses, so they always agree with an actual squash run.
 //
 // # Available Plugins
 //
@@ -25,7 +28,7 @@
 //
 //	migrations := []string{
 //	    "CREATE TABLE users (id SERIAL PRIMARY KEY);",
-//	    "ALTER TABLE users ADD COLUMN clerk_user_id TEXT;",
+//	    "CREATE POLICY user_select ON users USING (auth.uid() = id);",
 //	}
 //
 //	result, err := plugins.DetectPlugins(ctx, migrations)
@@ -34,15 +37,15 @@
 //	}
 //
 //	for _, plugin := range result.Detected {
-//	    fmt.Printf("Detected: %s (%s)\n", plugin.Name, plugin.Description)
+//	    fmt.Printf("Detected: %s (priority %d)\n", plugin.Name, plugin.Priority)
 //	}
 //
 // # Compatibility Checking
 //
-// Check compatibility between detected plugins:
+// Check compatibility between detected plugins. Conflicts are resolved by
+// priority exactly as during squashing (e.g. Clerk 95 excludes Supabase 90):
 //
-//	pluginNames := []string{"supabase", "clerk"}
-//	matrix, err := plugins.CheckCompatibility(pluginNames)
+//	matrix, err := plugins.CheckCompatibility([]string{"supabase", "clerk"})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -55,53 +58,35 @@
 //
 // Get information about available plugins:
 //
-//	allPlugins := plugins.GetAvailablePlugins()
-//	for _, plugin := range allPlugins {
-//	    fmt.Printf("%s v%s: %s\n", plugin.Name, plugin.Version, plugin.Description)
+//	for _, plugin := range plugins.GetAvailablePlugins() {
+//	    fmt.Printf("%s (priority %d)\n", plugin.Name, plugin.Priority)
 //	}
 package plugins
 
 import (
 	internal_plugins "github.com/capysquash/pgsquash-engine/internal/plugins"
-	"github.com/capysquash/pgsquash-engine/internal/plugins/clerk"
-	"github.com/capysquash/pgsquash-engine/internal/plugins/drizzle"
-	"github.com/capysquash/pgsquash-engine/internal/plugins/prisma"
-	"github.com/capysquash/pgsquash-engine/internal/plugins/supabase"
 )
 
-// RegisterDefault registers all built-in pgsquash plugins.
-// This includes plugins for popular platforms and ORMs:
-//   - Supabase (RLS policies, storage, auth)
+// RegisterDefault registers all built-in pgsquash plugins with the global
+// plugin registry:
 //   - Clerk (JWT v2 auth)
+//   - Supabase (RLS policies, storage, auth)
 //   - Prisma (ORM migrations)
 //   - Drizzle (ORM migrations)
 //
 // This should be called during application initialization, typically in init().
-// Registration failures are logged as warnings but don't prevent startup.
 //
 // Example:
-//   if err := plugins.RegisterDefault(); err != nil {
-//       log.Printf("Warning: Some plugins failed to register: %v", err)
-//   }
+//
+//	if err := plugins.RegisterDefault(); err != nil {
+//	    log.Printf("Warning: Some plugins failed to register: %v", err)
+//	}
 func RegisterDefault() error {
-	// Register auth service plugins
-	if err := internal_plugins.Register(clerk.NewClerkPlugin()); err != nil {
-		return err
+	for _, plugin := range builtinPlugins() {
+		if err := internal_plugins.Register(plugin); err != nil {
+			return err
+		}
 	}
-
-	if err := internal_plugins.Register(supabase.NewSupabasePlugin()); err != nil {
-		return err
-	}
-
-	// Register ORM plugins
-	if err := internal_plugins.Register(prisma.NewPrismaPlugin()); err != nil {
-		return err
-	}
-
-	if err := internal_plugins.Register(drizzle.NewDrizzlePlugin()); err != nil {
-		return err
-	}
-
 	return nil
 }
 

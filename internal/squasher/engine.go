@@ -4,13 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
+	"os"
 	"path/filepath"
-	"regexp"
+	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/capysquash/pgsquash-engine/internal/ai"
 	"github.com/capysquash/pgsquash-engine/internal/builder"
 	"github.com/capysquash/pgsquash-engine/internal/config"
 	"github.com/capysquash/pgsquash-engine/internal/errors"
@@ -19,17 +22,24 @@ import (
 	"github.com/capysquash/pgsquash-engine/internal/performance"
 	"github.com/capysquash/pgsquash-engine/internal/plugins"
 	"github.com/capysquash/pgsquash-engine/internal/plugins/auth"
+	"github.com/capysquash/pgsquash-engine/internal/postprocessing"
 
-	// "github.com/capysquash/pgsquash-engine/internal/postprocessing" // DISABLED - corrupts functions
+	// Enable for selected non-destructive fixes
 	"github.com/capysquash/pgsquash-engine/internal/tracking"
 	"github.com/capysquash/pgsquash-engine/internal/tracking/consolidation"
 	"github.com/capysquash/pgsquash-engine/internal/transformation"
 	"github.com/capysquash/pgsquash-engine/internal/types"
 	"github.com/capysquash/pgsquash-engine/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+
+	"github.com/capysquash/pgsquash-engine/pkg/validation"
 )
 
 // SquashResult represents the result of a squash operation with multiple output files
+//
+// NOTE: detailed partner-integration metrics (DetailedMetrics/RecommendedActions)
+// live exclusively in pkg/engine (detailed_metrics.go); the internal result
+// carries only what the engine itself computes.
 type SquashResult struct {
 	BaselineSQL       string     // DDL-only SQL (000_baseline.sql)
 	DataOperationsSQL string     // Data operations SQL (010_data.sql)
@@ -37,55 +47,8 @@ type SquashResult struct {
 	ProvenanceMap     *SquashMap // Provenance tracking information
 	Extensions        []string   // Extensions detected/required
 
-	// Enhanced metrics for partner integrations
-	DetailedMetrics    *DetailedMetrics    `json:"detailed_metrics,omitempty"`
-	RecommendedActions []RecommendedAction `json:"recommended_actions,omitempty"`
-}
-
-// DetailedMetrics provides comprehensive analysis metrics
-type DetailedMetrics struct {
-	TotalMigrations     int     `json:"total_migrations"`
-	OptimizedMigrations int     `json:"optimized_migrations"`
-	ReductionPercentage float64 `json:"reduction_percentage"`
-
-	Operations OperationBreakdown `json:"operations"`
-
-	EstimatedTimeSavingsSeconds int     `json:"estimated_time_savings_seconds"`
-	FileSizeReductionBytes      int64   `json:"file_size_reduction_bytes"`
-	FileSizeReductionPercent    float64 `json:"file_size_reduction_percent"`
-
-	RedundanciesFound []RedundancyDetail `json:"redundancies_found"`
-}
-
-// OperationBreakdown categorizes SQL operations
-type OperationBreakdown struct {
-	Creates      int `json:"creates"`
-	Alters       int `json:"alters"`
-	Drops        int `json:"drops"`
-	Inserts      int `json:"inserts"`
-	Updates      int `json:"updates"`
-	Deletes      int `json:"deletes"`
-	Consolidated int `json:"consolidated"`
-}
-
-// RedundancyDetail describes a specific redundancy found
-type RedundancyDetail struct {
-	Type        string `json:"type"`        // "drop_create_cycle", "duplicate_alter", etc.
-	ObjectName  string `json:"object_name"` // "users", "posts", etc.
-	ObjectType  string `json:"object_type"` // "table", "index", "function"
-	Severity    string `json:"severity"`    // "low", "medium", "high", "critical"
-	Description string `json:"description"`
-	FileNumbers []int  `json:"file_numbers"` // Which migration files involved
-	Savings     string `json:"savings"`      // "2 operations consolidated"
-}
-
-// RecommendedAction suggests next steps
-type RecommendedAction struct {
-	Action      string `json:"action"` // "auto_cleanup", "manual_review", "guarded_apply"
-	Reason      string `json:"reason"`
-	Priority    string `json:"priority"`     // "high", "medium", "low"
-	AutomateURL string `json:"automate_url"` // Deep link to platform action
-	RiskLevel   string `json:"risk_level"`   // "safe", "moderate", "high"
+	// Auth compatibility for validation
+	AuthCompatibilitySQL string `json:"auth_compatibility_sql,omitempty"`
 }
 
 type SafetyLevel string
@@ -101,10 +64,15 @@ const (
 type Engine struct {
 	// Core configuration and state
 	config     *config.Config
+	version    string // Tool version stamped into provenance (fallback: "dev")
 	lifecycles map[string]*tracking.ObjectLifecycle
 	warnings   []string
-	aiAnalyzer *ai.Analyzer
 	prodDB     *sql.DB
+	ctx        context.Context
+
+	// Validators
+	preFlightValidator  *validation.StaticValidator
+	postFlightValidator *validation.StaticValidator
 
 	// Enhanced components
 	metadataManager      *metadata.MetadataManager
@@ -115,10 +83,11 @@ type Engine struct {
 	logger               *utils.Logger // Centralized logger with ENGINE prefix
 
 	// Transformation components
-	backupGenerator *transformation.BackupGenerator
-	rollbackManager *transformation.RollbackManager
-	sqlTransformer  *transformation.SQLTransformer
-	rollbackPath    string
+	backupGenerator     *transformation.BackupGenerator
+	rollbackManager     *transformation.RollbackManager
+	sqlTransformer      *transformation.SQLTransformer
+	rollbackPath        string
+	backupRetentionDays int
 
 	// Processing state
 	processedFiles       map[string]bool
@@ -140,8 +109,13 @@ type Engine struct {
 	showCycleDetails     bool
 	cycleDetectionDepth  int
 
+	// Output options
+	excludeDataFromBaseline bool
+
 	// Extension analysis and auth compatibility
 	authCompatibilitySQL string
+	extAnalysis          *ExtensionAnalysis
+	envPrepared          bool
 
 	// Processing statistics
 	stats      *SquashStats
@@ -163,7 +137,15 @@ type SquashStats struct {
 
 // EngineConfig configures the engine with optional streaming capabilities
 type EngineConfig struct {
-	Config              *config.Config
+	Config  *config.Config
+	Context context.Context
+
+	// Version is the tool version stamped into provenance metadata
+	// (.squashmap.json). Callers set it from their release metadata (e.g. the
+	// CLI passes its rootCmd version). Empty falls back to "dev" - never a
+	// hardcoded release string.
+	Version string
+
 	EnableStreaming     bool
 	BatchSize           int
 	WorkerCount         int
@@ -178,19 +160,27 @@ type EngineConfig struct {
 	BackupConfig         *transformation.BackupConfig
 	TransformationConfig *transformation.TransformationConfig
 	RollbackPath         string // Directory for rollback scripts
+	BackupPath           string // Directory for pg_dump backups (default: <output dir>/.backups)
+	BackupRetentionDays  int    // Retention window for old backups (0 = keep forever)
+
+	// Output options
+	ExcludeDataFromBaseline bool // If true, filter data operations from baseline SQL (default: false, meaning include)
 
 	EnableCycleDetection bool
 	ShowCycleDetails     bool
 	CycleDetectionDepth  int
 }
 
-// NewEngine creates an enhanced engine with the provided configuration
-func NewEngine(cfg EngineConfig) *Engine {
+// NewEngine creates an enhanced engine with the provided configuration.
+//
+// Breaking change: constructor failures now return explicit errors instead of
+// silently returning nil engine pointers.
+func NewEngine(cfg EngineConfig) (*Engine, error) {
 	return newEngineInternal(cfg)
 }
 
 // newEngineInternal is the internal implementation
-func newEngineInternal(engineCfg EngineConfig) *Engine {
+func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 	// Initialize logger for this engine instance
 	logger := utils.GetDefaultLogger().WithPrefix("ENGINE")
 
@@ -202,6 +192,10 @@ func newEngineInternal(engineCfg EngineConfig) *Engine {
 	memoryLimitMB := engineCfg.MemoryLimitMB
 	enableProgressTrack := engineCfg.EnableProgressTrack
 	progressCallback := engineCfg.ProgressCallback
+	engineContext := engineCfg.Context
+	if engineContext == nil {
+		engineContext = context.Background()
+	}
 
 	// Set defaults for streaming config
 	if batchSize == 0 {
@@ -214,6 +208,45 @@ func newEngineInternal(engineCfg EngineConfig) *Engine {
 		memoryLimitMB = 256
 	}
 
+	// Validate the safety level once at the engine boundary. Every entry point
+	// (CLI flag, config file, library config) funnels through here.
+	if _, err := ParseSafetyLevel(cfg.SafetyLevel); err != nil {
+		return nil, err
+	}
+
+	// Streaming mode does not execute the backup, rollback, transformation, or
+	// paranoid database-validation phases. Silently dropping explicitly
+	// requested safety features is not acceptable, so reject the combination
+	// outright. Callers with a soft default (e.g. the CLI's --transform which
+	// defaults to true) must disable the feature before constructing a
+	// streaming engine and surface a warning to the user.
+	if enableStreaming {
+		if engineCfg.EnableBackup || engineCfg.EnableRollback {
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"backup and rollback generation are not supported in streaming mode",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithSuggestion("Disable streaming mode, or drop --backup/--rollback for streaming runs")
+		}
+		if engineCfg.EnableTransformation {
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"SQL transformation is not supported in streaming mode",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithSuggestion("Disable streaming mode, or drop --transform for streaming runs")
+		}
+		if cfg.SafetyLevel == string(Paranoid) {
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"paranoid safety level requires database validation, which streaming mode does not execute",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithSuggestion("Use conservative safety level with streaming, or disable streaming for paranoid runs")
+		}
+	}
+
 	// Database connection for paranoid mode or backup feature
 	var db *sql.DB
 	var err error
@@ -222,21 +255,36 @@ func newEngineInternal(engineCfg EngineConfig) *Engine {
 	if needsDB {
 		if cfg.ProdDBDSN == "" {
 			if cfg.SafetyLevel == string(Paranoid) {
-				// TODO: Implement production DSN support for paranoid mode live dead code analysis
-				// For E2E testing, paranoid mode uses mock data without production DSN
-				// Full implementation requires: database connection pooling, query analysis, and runtime statistics
-				logger.Warn("Paranoid safety level selected, but no production database DSN provided. Dead code analysis will be skipped.")
+				// Paranoid is documented as "requires DB". Running it without a
+				// production connection silently skips the database validation
+				// that defines the level, so fail closed instead of degrading.
+				return nil, errors.NewError(
+					errors.ErrorCodeValidationFailed,
+					"paranoid safety level requires a production database connection (PROD_DB_DSN)",
+					errors.SeverityError,
+					errors.CategoryValidation,
+				).WithSuggestion("Set the PROD_DB_DSN environment variable or prod_db_dsn in the config, or use the conservative safety level")
 			}
 			if engineCfg.EnableBackup {
-				logger.Warn("Backup generation requested, but no production database DSN provided (prod_db_dsn in config). Backup will be skipped.")
+				logger.Warn("Backup generation requested, but no production database DSN provided. Backup will be skipped.")
 			}
 		} else {
 			db, err = sql.Open("postgres", cfg.ProdDBDSN)
 			if err != nil {
-				logger.Fatal("Failed to connect to production database: %v", err)
+				return nil, errors.NewError(
+					errors.ErrorCodeValidationFailed,
+					"failed to connect to production database",
+					errors.SeverityCritical,
+					errors.CategoryValidation,
+				).WithInnerError(err)
 			}
 			if err := db.Ping(); err != nil {
-				logger.Fatal("Failed to ping production database: %v", err)
+				return nil, errors.NewError(
+					errors.ErrorCodeValidationFailed,
+					"failed to ping production database",
+					errors.SeverityCritical,
+					errors.CategoryValidation,
+				).WithInnerError(err)
 			}
 			if cfg.SafetyLevel == string(Paranoid) {
 				logger.Info("Successfully connected to production database for dead code analysis.")
@@ -256,7 +304,16 @@ func newEngineInternal(engineCfg EngineConfig) *Engine {
 	tracker := tracking.NewTrackerWithMetadata(metaMgr)
 	dataOperationTracker := tracking.NewDataOperationTracker() // Separate tracker for data operations
 	sqlBuilder := builder.NewSQLBuilder(builder.DefaultBuildOptions())
-	ruleEngine := NewSquasherRuleEngine(SafetyLevel(cfg.SafetyLevel))
+	ruleEngine, err := NewSquasherRuleEngine(SafetyLevel(cfg.SafetyLevel), cfg.Rules.Overrides)
+	if err != nil {
+		return nil, err
+	}
+
+	// Version stamped into provenance metadata; never a hardcoded release.
+	version := strings.TrimSpace(engineCfg.Version)
+	if version == "" {
+		version = "dev"
+	}
 
 	// Initialize streaming components if enabled
 	var memManager *performance.MemoryManager
@@ -281,6 +338,15 @@ func newEngineInternal(engineCfg EngineConfig) *Engine {
 			backupConfig = transformation.DefaultBackupConfig()
 		}
 		backupGenerator = transformation.NewBackupGenerator(backupConfig, db)
+
+		// Backups belong under the user's output area, never a shared temp dir.
+		backupDir := engineCfg.BackupPath
+		if backupDir == "" {
+			backupDir = filepath.Join(cfg.Output.Directory, ".backups")
+		}
+		if err := backupGenerator.SetWorkingDirectory(backupDir); err != nil {
+			return nil, err
+		}
 	}
 
 	if engineCfg.EnableRollback {
@@ -299,26 +365,22 @@ func newEngineInternal(engineCfg EngineConfig) *Engine {
 		sqlTransformer = transformation.NewSQLTransformer(transformConfig)
 	}
 
-	// Initialize AI analyzer with proper error handling
-	var aiAnalyzer *ai.Analyzer
-	if analyzer, err := ai.NewAnalyzer(); err != nil {
-		logger.Warn("AI analyzer initialization failed: %v", err)
-		logger.Warn("AI-powered features will be unavailable (semantic analysis, dead code detection, etc.)")
-		logger.Warn("To enable AI features, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or AZURE_OPENAI_ENDPOINT")
-		aiAnalyzer = nil // Explicitly set to nil instead of returning error
-	} else {
-		aiAnalyzer = analyzer
-		providers := analyzer.GetAvailableProviders()
-		logger.Info("☑ AI analyzer initialized with providers: %v", providers)
-	}
+	// Initialize validators
+	preFlightValidator := validation.NewPreFlightValidator()
+	postFlightValidator := validation.NewPostFlightValidator()
 
 	return &Engine{
 		// Core components
 		config:     cfg,
+		version:    version,
 		lifecycles: make(map[string]*tracking.ObjectLifecycle),
 		warnings:   []string{},
-		aiAnalyzer: aiAnalyzer,
 		prodDB:     db,
+		ctx:        engineContext,
+
+		// Validators
+		preFlightValidator:  preFlightValidator,
+		postFlightValidator: postFlightValidator,
 
 		// Enhanced components
 		metadataManager:      metaMgr,
@@ -329,10 +391,11 @@ func newEngineInternal(engineCfg EngineConfig) *Engine {
 		logger:               logger,
 
 		// Transformation components
-		backupGenerator: backupGenerator,
-		rollbackManager: rollbackManager,
-		sqlTransformer:  sqlTransformer,
-		rollbackPath:    rollbackPath,
+		backupGenerator:     backupGenerator,
+		rollbackManager:     rollbackManager,
+		sqlTransformer:      sqlTransformer,
+		rollbackPath:        rollbackPath,
+		backupRetentionDays: engineCfg.BackupRetentionDays,
 
 		// Processing state
 		processedFiles:       make(map[string]bool),
@@ -350,92 +413,210 @@ func newEngineInternal(engineCfg EngineConfig) *Engine {
 		progressCb:          progressCallback,
 		stats:               &SquashStats{},
 
-		enableCycleDetection: engineCfg.EnableCycleDetection,
-		showCycleDetails:     engineCfg.ShowCycleDetails,
-		cycleDetectionDepth:  engineCfg.CycleDetectionDepth,
-	}
+		enableCycleDetection:    engineCfg.EnableCycleDetection,
+		showCycleDetails:        engineCfg.ShowCycleDetails,
+		cycleDetectionDepth:     engineCfg.CycleDetectionDepth,
+		excludeDataFromBaseline: engineCfg.ExcludeDataFromBaseline,
+	}, nil
 }
 
-// NewSquasherRuleEngine creates a rule engine for the given safety level
-func NewSquasherRuleEngine(safetyLevel SafetyLevel) *consolidation.ConsolidationRuleEngine {
-	engine := consolidation.NewConsolidationRuleEngine()
+// NewSquasherRuleEngine creates a rule engine for the given safety level.
+//
+// The rule sets form a strict subset ladder (stricter level = fewer rules):
+//
+//	paranoid ⊂ conservative ⊂ standard ⊂ aggressive
+//
+// ruleOverrides force-enables (true) or force-disables (false) specific named
+// rules relative to that baseline. Names must match the consolidation rule
+// registry (see ValidateRuleOverrides); unknown names are rejected. A nil map
+// applies the baseline unchanged.
+//
+// Invalid safety levels are rejected with an error instead of silently
+// producing an engine with no consolidation rules.
+func NewSquasherRuleEngine(safetyLevel SafetyLevel, ruleOverrides map[string]bool) (*consolidation.ConsolidationRuleEngine, error) {
+	if err := ValidateSafetyLevel(safetyLevel); err != nil {
+		return nil, err
+	}
+
+	// Build the safety-level baseline ladder as an ordered list first, so rule
+	// overrides can be applied before the rules are frozen into the engine.
 
 	// Always add external dependency filter (reduces noise)
-	engine.AddRule(consolidation.NewExternalDependencyFilterRule())
-
-	// Add safety-appropriate rules based on level
-	switch safetyLevel {
-	case Conservative:
-		engine.AddRule(&consolidation.DOBlockEnumTypeRule{})
-		engine.AddRule(&consolidation.DOBlockAlterTableRule{})
-		engine.AddRule(&consolidation.EnumDeduplicationRule{})
-		engine.AddRule(&consolidation.PublicationDeduplicationRule{})
-
-		// Standard rules
-		engine.AddRule(&consolidation.MultipleCreateConsolidationRule{})
-		engine.AddRule(&consolidation.CreateAlterConsolidationRule{})
-		engine.AddRule(&consolidation.ColumnEvolutionRule{})
-		engine.AddRule(&consolidation.ConditionalSchemaRule{})
-		engine.AddRule(&consolidation.AdvancedColumnLifecycleRule{})
-	case Standard:
-		engine.AddRule(&consolidation.DOBlockEnumTypeRule{})
-		engine.AddRule(&consolidation.DOBlockAlterTableRule{})
-		engine.AddRule(&consolidation.EnumDeduplicationRule{})
-		engine.AddRule(&consolidation.PublicationDeduplicationRule{})
-
-		// Standard rules
-		engine.AddRule(&consolidation.MultipleCreateConsolidationRule{})
-		engine.AddRule(&consolidation.CreateAlterConsolidationRule{})
-		engine.AddRule(&consolidation.ColumnEvolutionRule{})
-		engine.AddRule(&consolidation.ConditionalSchemaRule{})
-		engine.AddRule(&consolidation.AdvancedColumnLifecycleRule{})
-		engine.AddRule(&consolidation.DropCreateCycleRule{}) // Now handles VIEWs
-		engine.AddRule(&consolidation.RLSConsolidationRule{})
-		engine.AddRule(&consolidation.TransactionBoundaryRule{})
-	case Aggressive:
-		engine.AddRule(&consolidation.DOBlockEnumTypeRule{})
-		engine.AddRule(&consolidation.DOBlockAlterTableRule{})
-		engine.AddRule(&consolidation.EnumDeduplicationRule{})
-		engine.AddRule(&consolidation.PublicationDeduplicationRule{})
-
-		// Standard rules
-		engine.AddRule(&consolidation.MultipleCreateConsolidationRule{})
-		engine.AddRule(&consolidation.CreateAlterConsolidationRule{})
-		engine.AddRule(&consolidation.ColumnEvolutionRule{})
-		engine.AddRule(&consolidation.ConditionalSchemaRule{})
-		engine.AddRule(&consolidation.AdvancedColumnLifecycleRule{})
-		engine.AddRule(&consolidation.DropCreateCycleRule{}) // Now handles VIEWs
-		engine.AddRule(&consolidation.RLSConsolidationRule{})
-		engine.AddRule(&consolidation.TransactionBoundaryRule{})
-		engine.AddRule(&consolidation.FunctionDeduplicationRule{})
-	case Paranoid:
-		engine.AddRule(&consolidation.DOBlockEnumTypeRule{})
-		engine.AddRule(&consolidation.DOBlockAlterTableRule{})
-		engine.AddRule(&consolidation.EnumDeduplicationRule{})
-		engine.AddRule(&consolidation.PublicationDeduplicationRule{})
-
-		// Standard rules
-		engine.AddRule(&consolidation.MultipleCreateConsolidationRule{})
-		engine.AddRule(&consolidation.CreateAlterConsolidationRule{})
-		engine.AddRule(&consolidation.ColumnEvolutionRule{})
-		engine.AddRule(&consolidation.ConditionalSchemaRule{})
-		engine.AddRule(&consolidation.AdvancedColumnLifecycleRule{})
-		engine.AddRule(&consolidation.DropCreateCycleRule{}) // Now handles VIEWs
-		engine.AddRule(&consolidation.RLSConsolidationRule{})
-		engine.AddRule(&consolidation.TransactionBoundaryRule{})
-		engine.AddRule(&consolidation.FunctionDeduplicationRule{})
-		engine.AddRule(&consolidation.DeadCodeRemovalRule{})
+	ladder := []consolidation.ConsolidationRule{
+		consolidation.NewExternalDependencyFilterRule(),
 	}
 
-	// Add error recovery as the last rule to catch any failures from primary consolidation rules
-	recoveryMode := "conservative"
-	if safetyLevel == Aggressive || safetyLevel == Paranoid {
-		recoveryMode = "aggressive"
-	}
-	errorRecovery := consolidation.NewErrorRecoveryRule(3, recoveryMode, true)
-	engine.AddRule(errorRecovery)
+	// Paranoid base set: normalization/deduplication rules that never change
+	// the effective schema (DO-block unwrapping, duplicate elimination).
+	ladder = append(ladder,
+		&consolidation.DOBlockEnumTypeRule{},
+		&consolidation.DOBlockAlterTableRule{},
+		&consolidation.EnumDeduplicationRule{},
+		&consolidation.PublicationDeduplicationRule{},
+	)
 
-	return engine
+	// Conservative adds structural consolidation of CREATE/ALTER histories.
+	if safetyLevel == Conservative || safetyLevel == Standard || safetyLevel == Aggressive {
+		ladder = append(ladder,
+			&consolidation.MultipleCreateConsolidationRule{},
+			&consolidation.CreateAlterConsolidationRule{},
+			&consolidation.ColumnEvolutionRule{},
+			&consolidation.ConditionalSchemaRule{},
+			&consolidation.AdvancedColumnLifecycleRule{},
+		)
+	}
+
+	// Standard adds cycle elimination, RLS consolidation and transaction boundaries.
+	if safetyLevel == Standard || safetyLevel == Aggressive {
+		ladder = append(ladder,
+			&consolidation.DropCreateCycleRule{}, // Now handles VIEWs
+			&consolidation.RLSConsolidationRule{},
+			&consolidation.TransactionBoundaryRule{},
+		)
+	}
+
+	// Aggressive adds function deduplication.
+	if safetyLevel == Aggressive {
+		ladder = append(ladder, &consolidation.FunctionDeduplicationRule{})
+	}
+
+	// NOTE: DeadCodeRemovalRule was removed entirely. It claimed database-backed
+	// usage analysis but ran on static analysis alone (the ConsolidationEngine
+	// interface exposes no DB handle). Dead-code removal will only be
+	// reintroduced once a real database-statistics check exists.
+
+	ladder, includeErrorRecovery, err := applyRuleOverrides(ladder, ruleOverrides)
+	if err != nil {
+		return nil, err
+	}
+
+	engine := consolidation.NewConsolidationRuleEngine()
+	for _, rule := range ladder {
+		engine.AddRule(rule)
+	}
+
+	// Add error recovery as the last rule to catch any failures from primary
+	// consolidation rules. Only Aggressive uses aggressive recovery; stricter
+	// levels (including Paranoid) always recover conservatively.
+	if includeErrorRecovery {
+		recoveryMode := "conservative"
+		if safetyLevel == Aggressive {
+			recoveryMode = "aggressive"
+		}
+		engine.AddRule(consolidation.NewErrorRecoveryRule(3, recoveryMode, true))
+	}
+
+	return engine, nil
+}
+
+// errorRecoveryRuleName is the registry name of the always-last recovery rule;
+// it is handled specially because it must remain the final ladder entry.
+const errorRecoveryRuleName = "error_recovery"
+
+// ValidateRuleOverrides checks that every override key names a rule known to
+// the consolidation rule registry (the same catalog served by
+// pkg/rules.GetRegistry). Unknown names are an error, never silently ignored.
+func ValidateRuleOverrides(overrides map[string]bool) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+
+	registry := consolidation.GetRegistry()
+	// Ensure the core catalog is present even when no rule engine has been
+	// constructed yet in this process (registration is idempotent).
+	if err := consolidation.RegisterCoreRules(registry); err != nil {
+		return err
+	}
+
+	var unknown []string
+	for name := range overrides {
+		if _, err := registry.GetRule(name); err != nil {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+
+	valid := make([]string, 0)
+	for _, registered := range registry.GetAllRules() {
+		valid = append(valid, registered.Metadata.Name)
+	}
+	sort.Strings(valid)
+
+	return errors.NewError(
+		errors.ErrorCodeValidationFailed,
+		fmt.Sprintf("unknown consolidation rule name(s): %s", strings.Join(unknown, ", ")),
+		errors.SeverityError,
+		errors.CategoryValidation,
+	).WithSuggestion(fmt.Sprintf("Valid rule names: %s", strings.Join(valid, ", ")))
+}
+
+// applyRuleOverrides applies per-rule enable/disable overrides to a safety
+// baseline ladder. Rule identity is resolved through the consolidation rule
+// registry: a disable removes every ladder rule of the named rule's dynamic
+// type, an enable appends the registry's rule instance when the type is not
+// already present. The returned bool reports whether the error-recovery rule
+// (always appended last by the caller) should be included.
+func applyRuleOverrides(
+	ladder []consolidation.ConsolidationRule,
+	overrides map[string]bool,
+) ([]consolidation.ConsolidationRule, bool, error) {
+	includeErrorRecovery := true
+	if len(overrides) == 0 {
+		return ladder, includeErrorRecovery, nil
+	}
+
+	if err := ValidateRuleOverrides(overrides); err != nil {
+		return nil, false, err
+	}
+
+	registry := consolidation.GetRegistry()
+
+	// Deterministic application order regardless of map iteration.
+	names := slices.Sorted(maps.Keys(overrides))
+	for _, name := range names {
+		enabled := overrides[name]
+
+		if name == errorRecoveryRuleName {
+			// Error recovery is appended after all other rules; overriding its
+			// position would break the recovery-last invariant, so only its
+			// presence is configurable.
+			includeErrorRecovery = enabled
+			continue
+		}
+
+		registered, err := registry.GetRule(name)
+		if err != nil {
+			return nil, false, err // unreachable after validation; keep fail-closed
+		}
+		ruleType := reflect.TypeOf(registered.Rule)
+
+		if enabled {
+			present := false
+			for _, rule := range ladder {
+				if reflect.TypeOf(rule) == ruleType {
+					present = true
+					break
+				}
+			}
+			if !present {
+				ladder = append(ladder, registered.Rule)
+			}
+			continue
+		}
+
+		filtered := ladder[:0]
+		for _, rule := range ladder {
+			if reflect.TypeOf(rule) != ruleType {
+				filtered = append(filtered, rule)
+			}
+		}
+		ladder = filtered
+	}
+
+	return ladder, includeErrorRecovery, nil
 }
 
 // GetTracker returns the tracker for use by consolidation rules
@@ -452,13 +633,9 @@ func (e *Engine) GetSafetyLevel() string {
 }
 
 // GetConfig returns the configuration for use by consolidation rules
-func (e *Engine) GetConfig() interface{} {
+// GetConfig returns the configuration for use by consolidation rules
+func (e *Engine) GetConfig() *config.Config {
 	return e.config
-}
-
-// GetAIAnalyzer returns the AI analyzer if available, nil otherwise
-func (e *Engine) GetAIAnalyzer() interface{} {
-	return e.aiAnalyzer
 }
 
 // GetAuthCompatibilitySQL returns the auth compatibility SQL for Docker validation
@@ -467,15 +644,25 @@ func (e *Engine) GetAuthCompatibilitySQL() string {
 }
 
 // Close gracefully shuts down the engine
-func (e *Engine) Close() {
+func (e *Engine) Close() error {
+	var errs []error
 	if e.prodDB != nil {
-		_ = e.prodDB.Close()
+		if err := e.prodDB.Close(); err != nil {
+			e.logger.Error("Failed to close production database connection: %v", err)
+			errs = append(errs, err)
+		}
 	}
 	if e.enableStreaming && e.streamingTracker != nil {
 		if err := e.streamingTracker.Stop(); err != nil {
 			e.logger.Info("Warning: failed to stop streaming tracker: %v", err)
+			errs = append(errs, err)
 		}
 	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("engine close errors: %v", errs)
+	}
+	return nil
 }
 
 func (e *Engine) generateCycleResolutionSuggestions(cycle tracking.DDLCycle) []string {
@@ -543,13 +730,12 @@ func (e *Engine) generateCycleResolutionSuggestions(cycle tracking.DDLCycle) []s
 }
 
 // Squash processes migrations using enhanced patterns and modern PostgreSQL conventions
-func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
-	// Use streaming approach if enabled
-	if e.enableStreaming {
-		return e.SquashStreaming(migrations)
+// Squash processes migrations using enhanced patterns and modern PostgreSQL conventions
+func (e *Engine) Squash(migrations map[int]string) (*SquashResult, error) {
+	ctx := e.ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-
-	ctx := context.Background()
 	startTime := time.Now()
 
 	e.logger.Info("Starting enhanced squashing process with %d migration files", len(migrations))
@@ -563,26 +749,27 @@ func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
 		e.progressCb(0, e.stats.TotalMigrations, "Initializing")
 	}
 
-	// PHASE 0: Initialize Plugin System
-	// This must happen BEFORE parsing to enable plugin enrichment
-	if err := e.initializePlugins(ctx, migrations); err != nil {
-		e.logger.Info("Warning: Plugin initialization failed: %v", err)
-		e.warnings = append(e.warnings, fmt.Sprintf("Plugin initialization warning: %v", err))
+	// PHASE 0: Initialize Plugin System and analyze extensions.
+	// This must happen BEFORE parsing to enable plugin enrichment,
+	// and runs for both regular and streaming modes.
+	extAnalysis := e.prepareMigrationEnvironment(ctx, migrations)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	// Analyze extensions required for validation
-	extDetector := NewExtensionDetector()
-	extAnalysis := extDetector.AnalyzeMigrations(migrations)
-	if len(extAnalysis.RequiredExtensions) > 0 {
-		e.logger.Info("Detected extensions: %v", extAnalysis.RequiredExtensions)
-		e.logger.Info("Recommended Docker image: %s", extAnalysis.RecommendedDockerBase)
-		e.warnings = append(e.warnings, fmt.Sprintf("Required extensions: %v", extAnalysis.RequiredExtensions))
+	// Phase 0.5: Pre-Flight Validation (Static Analysis)
+	if e.preFlightValidator != nil {
+		e.logger.Info("Running pre-flight validation on %d migrations...", len(migrations))
+		if err := e.runPreFlightValidation(ctx, migrations); err != nil {
+			// For now, we log warnings but don't abort unless strict mode is enabled (future)
+			e.logger.Warn("Pre-flight validation found issues: %v", err)
+			e.warnings = append(e.warnings, fmt.Sprintf("Pre-flight validation: %v", err))
+		}
 	}
 
-	// Store auth compatibility SQL for validation
-	if extAnalysis.AuthCompatibilitySQL != "" {
-		e.authCompatibilitySQL = extAnalysis.AuthCompatibilitySQL
-		e.logger.Info("Generated auth compatibility layer for: %s", extAnalysis.AuthService)
+	// Use streaming approach if enabled
+	if e.enableStreaming {
+		return e.SquashStreaming(migrations)
 	}
 
 	// Pre-processing: Generate backup if enabled
@@ -591,7 +778,7 @@ func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
 		// Use database connection string from config
 		backupResult, err := e.backupGenerator.GeneratePreMigrationBackup(ctx, e.config.ProdDBDSN)
 		if err != nil {
-			return "", nil, errors.NewError(
+			return nil, errors.NewError(
 				errors.ErrorCodeBackupGenerationFailed,
 				"failed to generate backup",
 				errors.SeverityError,
@@ -600,31 +787,52 @@ func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
 		}
 		e.logger.Info("Backup created at: %s", backupResult.BackupPath)
 		e.warnings = append(e.warnings, fmt.Sprintf("Backup created: %s", backupResult.BackupPath))
+
+		// Apply retention policy inside the dedicated backup directory only.
+		if e.backupRetentionDays > 0 {
+			maxAge := time.Duration(e.backupRetentionDays) * 24 * time.Hour
+			if cleanupErr := e.backupGenerator.CleanupOldBackups(maxAge, 0); cleanupErr != nil {
+				e.logger.Warn("Failed to clean up old backups: %v", cleanupErr)
+				e.warnings = append(e.warnings, fmt.Sprintf("Backup retention cleanup failed: %v", cleanupErr))
+			}
+		}
 	}
 
 	// Initialize rollback manager if enabled
 	if e.rollbackManager != nil {
-		// Parse migrations to extract statements for rollback planning
+		// Parse migrations to extract statements for rollback planning.
+		// A migration that fails to parse would leave the rollback plan silently
+		// incomplete, so surface the failure instead of skipping the file.
 		var allStatements []types.Statement
 		for id, migrationSQL := range migrations {
 			filename := fmt.Sprintf("migration_%d.sql", id)
-			migration, err := parser.ParseMigration(migrationSQL, filename)
-			if err == nil {
-				allStatements = append(allStatements, migration.Statements...)
+			migration, err := parser.ParseMigrationWithContext(ctx, migrationSQL, filename)
+			if err != nil {
+				return nil, errors.NewError(
+					errors.ErrorCodeRollbackGenerationFailed,
+					fmt.Sprintf("rollback plan requested but migration %d could not be parsed", id),
+					errors.SeverityError,
+					errors.CategoryRollback,
+				).WithInnerError(err).WithSuggestion("Fix the migration SQL or rerun without --rollback")
 			}
+			allStatements = append(allStatements, migration.Statements...)
 		}
 
-		// Create a rollback plan
+		// Create a rollback plan. Rollback was explicitly requested, so a plan
+		// that cannot be created is a hard failure, not a warning.
 		planName := fmt.Sprintf("squash_%d", startTime.Unix())
 		plan, err := e.rollbackManager.CreateRollbackPlan(ctx, planName, allStatements)
 		if err != nil {
-			e.logger.Info("Warning: Failed to create rollback plan: %v", err)
-			e.warnings = append(e.warnings, fmt.Sprintf("Rollback plan creation failed: %v", err))
-		} else {
-			planPath := filepath.Join(e.rollbackPath, "rollback_plans", fmt.Sprintf("%s.json", plan.ID))
-			e.logger.Info("Rollback plan '%s' created successfully at %s", planName, planPath)
-			e.warnings = append(e.warnings, fmt.Sprintf("Rollback script generated: %s (%d operations)", planPath, len(plan.Scripts)))
+			return nil, errors.NewError(
+				errors.ErrorCodeRollbackGenerationFailed,
+				"failed to create rollback plan",
+				errors.SeverityError,
+				errors.CategoryRollback,
+			).WithInnerError(err).WithSuggestion("Check rollback path permissions or rerun without --rollback")
 		}
+		planPath := filepath.Join(e.rollbackPath, "rollback_plans", fmt.Sprintf("%s.json", plan.ID))
+		e.logger.Info("Rollback plan '%s' created successfully at %s", planName, planPath)
+		e.warnings = append(e.warnings, fmt.Sprintf("Rollback script generated: %s (%d operations)", planPath, len(plan.Scripts)))
 	}
 
 	// Phase 1: Parse and build object lifecycles
@@ -633,12 +841,15 @@ func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
 	}
 
 	if err := e.parseAndTrackMigrations(ctx, migrations); err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeAnalysisError,
 			"parse and track migrations",
 			errors.SeverityError,
 			errors.CategoryParsing,
 		).WithInnerError(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	e.stats.MigrationsProcessed = e.stats.TotalMigrations
@@ -648,12 +859,15 @@ func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
 
 	// Phase 2: Analyze dependencies and detect issues
 	if err := e.analyzeDependenciesAndRisks(ctx); err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeDependencyError,
 			"analyze dependencies",
 			errors.SeverityError,
 			errors.CategoryDependency,
 		).WithInnerError(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Phase 3: Apply consolidation rules
@@ -663,12 +877,15 @@ func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
 
 	consolidatedObjects, err := e.applyConsolidationRules(ctx)
 	if err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeConsolidationFailed,
 			"apply consolidation rules",
 			errors.SeverityError,
 			errors.CategoryConsolidation,
 		).WithInnerError(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Phase 4: Generate optimized SQL with modern formatting
@@ -678,36 +895,66 @@ func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
 
 	finalSQL, err := e.generateOptimizedSQL(ctx, consolidatedObjects)
 	if err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeSQLGenerationFailed,
 			"generate optimized SQL",
 			errors.SeverityError,
 			errors.CategoryConsolidation,
 		).WithInnerError(err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-	// Phase 4.5: Apply SQL transformations if enabled
+	// Phase 4.5: Apply SQL transformations if enabled.
+	// Transformation was explicitly enabled; shipping untransformed SQL after a
+	// silent failure would misrepresent the output, so fail the squash instead.
 	if e.sqlTransformer != nil {
 		e.logger.Info("Applying SQL transformations...")
 		transformResult, err := e.sqlTransformer.Transform(ctx, finalSQL)
 		if err != nil {
-			e.logger.Info("Warning: SQL transformation failed: %v", err)
-			e.warnings = append(e.warnings, fmt.Sprintf("SQL transformation warning: %v", err))
-		} else {
-			finalSQL = transformResult.TransformedSQL
-			if len(transformResult.Transformations) > 0 {
-				e.logger.Info("Applied %d SQL transformations", len(transformResult.Transformations))
-				for _, transformation := range transformResult.Transformations {
-					e.warnings = append(e.warnings, fmt.Sprintf("Transformation: %s", transformation.Description))
-				}
+			return nil, errors.NewError(
+				errors.ErrorCodeSQLGenerationFailed,
+				"SQL transformation failed",
+				errors.SeverityError,
+				errors.CategoryTransformation,
+			).WithInnerError(err).WithSuggestion("Rerun with --transform=false to skip SQL modernization")
+		}
+		finalSQL = transformResult.TransformedSQL
+		if len(transformResult.Transformations) > 0 {
+			e.logger.Info("Applied %d SQL transformations", len(transformResult.Transformations))
+			for _, tr := range transformResult.Transformations {
+				e.warnings = append(e.warnings, fmt.Sprintf("Transformation: %s", tr.Description))
 			}
 		}
 	}
 
-	// Phase 5: Perform database validation if in paranoid mode
+	// Phase 4.6: Post-Flight Validation
+	if e.postFlightValidator != nil {
+		e.logger.Info("Running post-flight validation on squashed SQL...")
+		violations, err := e.runPostFlightValidation(ctx, finalSQL)
+		if err != nil {
+			e.logger.Warn("Failed to run post-flight validation: %v", err)
+		} else if len(violations) > 0 {
+			for _, v := range violations {
+				msg := fmt.Sprintf("Post-flight Issue [%s]: %s", v.Code, v.Message)
+				e.warnings = append(e.warnings, msg)
+				e.logger.Warn("%s", msg)
+			}
+		}
+	}
+
+	// Phase 5: Perform database validation if in paranoid mode.
+	// This validation is the defining feature of the paranoid level; a failed
+	// check must fail the squash rather than degrade to a warning.
 	if e.config.SafetyLevel == string(Paranoid) && e.prodDB != nil {
 		if err := e.validateAgainstDatabase(ctx, finalSQL); err != nil {
-			e.warnings = append(e.warnings, fmt.Sprintf("Database validation warning: %v", err))
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"paranoid database validation failed",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(err)
 		}
 	}
 
@@ -720,16 +967,35 @@ func (e *Engine) Squash(migrations map[int]string) (string, []string, error) {
 		e.progressCb(e.stats.MigrationsProcessed, e.stats.TotalMigrations, "Completed")
 	}
 
-	return finalSQL, e.warnings, nil
+	e.logger.Info("Squashing completed")
+
+	// Construct result
+	return &SquashResult{
+		BaselineSQL:          finalSQL,
+		Warnings:             e.warnings,
+		AuthCompatibilitySQL: e.GetAuthCompatibilitySQL(),
+		Extensions:           extAnalysis.RequiredExtensions,
+	}, nil
 }
 
 // SquashWithSeparateFiles performs squashing and returns separate files for DDL and data operations
 func (e *Engine) SquashWithSeparateFiles(migrations map[int]string) (*SquashResult, error) {
+	// Configure engine to exclude data from baseline for this operation
+	// We want the baseline to be DDL-only, and data to be in the separate file
+	originalExclude := e.excludeDataFromBaseline
+	e.excludeDataFromBaseline = true
+	defer func() { e.excludeDataFromBaseline = originalExclude }()
+
 	// Perform regular squashing to get baseline DDL
-	baselineSQL, warnings, err := e.Squash(migrations)
+	squashRes, err := e.Squash(migrations)
 	if err != nil {
 		return nil, err
 	}
+	if err := e.ctx.Err(); err != nil {
+		return nil, err
+	}
+	baselineSQL := squashRes.BaselineSQL
+	warnings := squashRes.Warnings
 
 	// Generate separate data operations SQL
 	dataSQL, err := e.generateDataOperationsSQL()
@@ -746,9 +1012,10 @@ func (e *Engine) SquashWithSeparateFiles(migrations map[int]string) (*SquashResu
 	detector := NewExtensionDetector()
 	analysis := detector.AnalyzeMigrations(migrations)
 
-	// Create provenance tracker
+	// Create provenance tracker. The version comes from the engine config
+	// (callers stamp their release metadata); the fallback is "dev".
 	provenance := NewProvenanceTracker(
-		"0.9.0", // TODO: Get from version constant
+		e.version,
 		e.config.SafetyLevel,
 		e.config.PostgreSQLFeatures.TargetVersion,
 		analysis.RequiredExtensions,
@@ -775,20 +1042,22 @@ func (e *Engine) SquashWithSeparateFiles(migrations map[int]string) (*SquashResu
 
 	// Build result
 	result := &SquashResult{
-		BaselineSQL:       baselineSQL,
-		DataOperationsSQL: dataSQL,
-		Warnings:          warnings,
-		ProvenanceMap:     provenance.GetSquashMap(),
-		Extensions:        analysis.RequiredExtensions,
+		BaselineSQL:          baselineSQL,
+		DataOperationsSQL:    dataSQL,
+		Warnings:             warnings,
+		ProvenanceMap:        provenance.GetSquashMap(),
+		Extensions:           analysis.RequiredExtensions,
+		AuthCompatibilitySQL: analysis.AuthCompatibilitySQL,
 	}
 
 	return result, nil
 }
 
 // SquashStreaming processes migrations with streaming approach for large datasets
-func (e *Engine) SquashStreaming(migrations map[int]string) (string, []string, error) {
+// SquashStreaming processes migrations with streaming approach for large datasets
+func (e *Engine) SquashStreaming(migrations map[int]string) (*SquashResult, error) {
 	if !e.enableStreaming {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeValidationFailed,
 			"streaming not enabled for this engine instance",
 			errors.SeverityError,
@@ -797,17 +1066,35 @@ func (e *Engine) SquashStreaming(migrations map[int]string) (string, []string, e
 	}
 
 	startTime := time.Now()
-	ctx := context.Background()
+	ctx := e.ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	e.updatePhase("Initializing")
 	e.stats.TotalMigrations = int64(len(migrations))
 
 	e.logger.Info("Starting streaming squash process with %d migrations", len(migrations))
 
+	// Streaming does not execute the SQL transformation or post-flight
+	// validation phases. Transformation is rejected at construction time
+	// (streaming + EnableTransformation is an error); post-flight validation
+	// has no user-facing toggle, so its absence is surfaced as a result
+	// warning instead of being silently skipped.
+	e.warnings = append(e.warnings,
+		"Streaming mode: post-flight validation is not executed (run 'pgsquash lint' or a non-streaming squash to validate the output)")
+
+	// Phase 0: Plugin initialization + extension analysis (no-op when already
+	// performed by Squash() before delegating to the streaming path).
+	extAnalysis := e.prepareMigrationEnvironment(ctx, migrations)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Phase 1: Stream process migrations using batching
 	e.updatePhase("Parsing and Tracking")
 	if err := e.streamProcessMigrations(ctx, migrations); err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeConsolidationFailed,
 			"stream process migrations",
 			errors.SeverityError,
@@ -832,7 +1119,7 @@ func (e *Engine) SquashStreaming(migrations map[int]string) (string, []string, e
 	// Continue with existing engine phases
 	e.updatePhase("Analyzing Dependencies")
 	if err := e.analyzeDependenciesAndRisks(ctx); err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeDependencyError,
 			"analyze dependencies",
 			errors.SeverityError,
@@ -843,7 +1130,7 @@ func (e *Engine) SquashStreaming(migrations map[int]string) (string, []string, e
 	e.updatePhase("Applying Consolidations")
 	consolidatedObjects, err := e.applyConsolidationRules(ctx)
 	if err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeConsolidationFailed,
 			"apply consolidation rules",
 			errors.SeverityError,
@@ -856,7 +1143,7 @@ func (e *Engine) SquashStreaming(migrations map[int]string) (string, []string, e
 	e.updatePhase("Generating SQL")
 	finalSQL, err := e.generateOptimizedSQL(ctx, consolidatedObjects)
 	if err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeSQLGenerationFailed,
 			"generate final SQL",
 			errors.SeverityError,
@@ -878,13 +1165,18 @@ func (e *Engine) SquashStreaming(migrations map[int]string) (string, []string, e
 	e.logger.Info("Streaming squash completed in %v (%.2f migrations/sec)",
 		e.stats.ProcessingTime, e.stats.ThroughputMPS)
 
-	return finalSQL, e.warnings, nil
+	return &SquashResult{
+		BaselineSQL:          finalSQL,
+		Warnings:             e.warnings,
+		AuthCompatibilitySQL: e.GetAuthCompatibilitySQL(),
+		Extensions:           extAnalysis.RequiredExtensions,
+	}, nil
 }
 
 // SquashFromDirectory processes migrations from a directory using streaming
-func (e *Engine) SquashFromDirectory(dir string) (string, []string, error) {
+func (e *Engine) SquashFromDirectory(dir string) (*SquashResult, error) {
 	if !e.enableStreaming {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeValidationFailed,
 			"streaming not enabled for this engine instance",
 			errors.SeverityError,
@@ -893,15 +1185,39 @@ func (e *Engine) SquashFromDirectory(dir string) (string, []string, error) {
 	}
 
 	startTime := time.Now()
-	ctx := context.Background()
+
+	ctx := e.ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	e.updatePhase("Initializing")
 	e.logger.Info("Starting streaming squash process from directory: %s", dir)
 
+	// Same contract as SquashStreaming: post-flight validation does not run in
+	// streaming mode, so record that in the result instead of skipping silently.
+	e.warnings = append(e.warnings,
+		"Streaming mode: post-flight validation is not executed (run 'pgsquash lint' or a non-streaming squash to validate the output)")
+
+	// Phase 0: Plugin initialization + extension analysis. Directory streaming
+	// must run the same plugin enrichment and extension detection as the
+	// in-memory paths, so load file contents once for analysis.
+	migrationContents, err := loadMigrationContentsFromDir(dir)
+	if err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			fmt.Sprintf("failed to read migration files from directory %s", dir),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+	extAnalysis := e.prepareMigrationEnvironment(ctx, migrationContents)
+	migrationContents = nil // release for GC before streaming begins
+
 	// Phase 1: Stream parse and track migrations
 	e.updatePhase("Parsing and Tracking")
 	if err := e.streamParseAndTrack(ctx, dir); err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeConsolidationFailed,
 			"stream parse and track",
 			errors.SeverityError,
@@ -918,7 +1234,7 @@ func (e *Engine) SquashFromDirectory(dir string) (string, []string, error) {
 	// Phase 2: Analyze dependencies (using existing engine logic)
 	e.updatePhase("Analyzing Dependencies")
 	if err := e.analyzeDependenciesAndRisks(ctx); err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeDependencyError,
 			"analyze dependencies",
 			errors.SeverityError,
@@ -930,7 +1246,7 @@ func (e *Engine) SquashFromDirectory(dir string) (string, []string, error) {
 	e.updatePhase("Applying Consolidations")
 	consolidatedObjects, err := e.applyConsolidationRules(ctx)
 	if err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeConsolidationFailed,
 			"apply consolidation rules",
 			errors.SeverityError,
@@ -944,7 +1260,7 @@ func (e *Engine) SquashFromDirectory(dir string) (string, []string, error) {
 	e.updatePhase("Generating SQL")
 	finalSQL, err := e.generateOptimizedSQL(ctx, consolidatedObjects)
 	if err != nil {
-		return "", nil, errors.NewError(
+		return nil, errors.NewError(
 			errors.ErrorCodeSQLGenerationFailed,
 			"generate final SQL",
 			errors.SeverityError,
@@ -961,7 +1277,78 @@ func (e *Engine) SquashFromDirectory(dir string) (string, []string, error) {
 	}
 
 	e.logger.Info("Streaming squash completed in %v", e.stats.ProcessingTime)
-	return finalSQL, e.warnings, nil
+	return &SquashResult{
+		BaselineSQL:          finalSQL,
+		Warnings:             e.warnings,
+		AuthCompatibilitySQL: e.GetAuthCompatibilitySQL(),
+		Extensions:           extAnalysis.RequiredExtensions,
+	}, nil
+}
+
+// loadMigrationContentsFromDir reads the contents of all .sql files in a
+// directory (sorted by filename) keyed by their sequence position. It is used
+// by directory streaming to run plugin detection and extension analysis.
+func loadMigrationContentsFromDir(dir string) (map[int]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".sql") {
+			continue
+		}
+		files = append(files, entry.Name())
+	}
+	sort.Strings(files)
+
+	contents := make(map[int]string, len(files))
+	for i, name := range files {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", name, err)
+		}
+		contents[i] = string(data)
+	}
+
+	return contents, nil
+}
+
+// prepareMigrationEnvironment initializes plugins and analyzes required
+// extensions exactly once per engine instance. It is shared by the regular and
+// streaming squash paths so streaming runs get the same plugin enrichment and
+// extension metadata as regular runs.
+func (e *Engine) prepareMigrationEnvironment(ctx context.Context, migrations map[int]string) *ExtensionAnalysis {
+	if e.envPrepared {
+		return e.extAnalysis
+	}
+	e.envPrepared = true
+
+	// Initialize plugin system. Failures stay warnings (plugins are optional),
+	// but they are recorded in the result warnings list.
+	if err := e.initializePlugins(ctx, migrations); err != nil {
+		e.logger.Warn("Plugin initialization failed: %v", err)
+		e.warnings = append(e.warnings, fmt.Sprintf("Plugin initialization warning: %v", err))
+	}
+
+	// Analyze extensions required for validation.
+	extDetector := NewExtensionDetector()
+	extAnalysis := extDetector.AnalyzeMigrations(migrations)
+	if len(extAnalysis.RequiredExtensions) > 0 {
+		e.logger.Info("Detected extensions: %v", extAnalysis.RequiredExtensions)
+		e.logger.Info("Recommended Docker image: %s", extAnalysis.RecommendedDockerBase)
+		e.warnings = append(e.warnings, fmt.Sprintf("Required extensions: %v", extAnalysis.RequiredExtensions))
+	}
+
+	// Store auth compatibility SQL for validation.
+	if extAnalysis.AuthCompatibilitySQL != "" {
+		e.authCompatibilitySQL = extAnalysis.AuthCompatibilitySQL
+		e.logger.Info("Generated auth compatibility layer for: %s", extAnalysis.AuthService)
+	}
+
+	e.extAnalysis = extAnalysis
+	return extAnalysis
 }
 
 // initializePlugins discovers and initializes plugins from migrations
@@ -1004,8 +1391,15 @@ func (e *Engine) initializePlugins(ctx context.Context, migrations map[int]strin
 func (e *Engine) parseAndTrackMigrations(ctx context.Context, migrations map[int]string) error {
 	e.logger.Info("Parsing %d migration files with enhanced tracking", len(migrations))
 
-	for sequence, migrationContent := range migrations {
-		migration, err := parser.ParseMigration(migrationContent, fmt.Sprintf("migration_%d", sequence))
+	var sequences []int
+	for seq := range migrations {
+		sequences = append(sequences, seq)
+	}
+	sort.Ints(sequences)
+
+	for _, sequence := range sequences {
+		migrationContent := migrations[sequence]
+		migration, err := parser.ParseMigration(migrationContent, fmt.Sprintf("migration_%05d", sequence))
 		if err != nil {
 			return errors.NewError(
 				errors.ErrorCodeSyntaxError,
@@ -1020,13 +1414,20 @@ func (e *Engine) parseAndTrackMigrations(ctx context.Context, migrations map[int
 
 		// Collect data operations separately (INSERT/UPDATE/DELETE)
 		for stmtIndex, stmt := range migration.Statements {
-			if stmt.IsDataOp {
+			if stmt.IsDataOp || stmt.ObjectType == types.TypeDoBlock {
+				trackedStmt := stmt
+				if !trackedStmt.IsDataOp {
+					// Data-category DO blocks are non-idempotent mutation scripts and must
+					// be emitted in 010_data.sql instead of baseline DDL.
+					trackedStmt.IsDataOp = true
+				}
+
 				// Analyze pragmas for data operations too
 				sa := parser.NewStatementAnalyzer(e.config.PostgreSQLFeatures.TargetVersion)
-				sa.AnalyzeStatement(&stmt)
-				sa.AnalyzePragmas(&stmt)
+				sa.AnalyzeStatement(&trackedStmt)
+				sa.AnalyzePragmas(&trackedStmt)
 
-				if err := e.dataOperationTracker.AddOperation(stmt, sequence, stmtIndex); err != nil {
+				if err := e.dataOperationTracker.AddOperation(trackedStmt, sequence, stmtIndex); err != nil {
 					e.logger.Info("Warning: failed to track data operation at migration %d, statement %d: %v", sequence, stmtIndex, err)
 				}
 			}
@@ -1187,7 +1588,45 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 
 	consolidatedObjects := make(map[string]*tracking.ConsolidationResult)
 
+	// Build a set of terminally dropped tables so dependent objects (indexes,
+	// policies, triggers, etc.) can also be skipped. PostgreSQL cascades these
+	// drops implicitly, but lifecycle tracking may still contain create events.
+	droppedTables := make(map[string]struct{})
+	for _, lifecycle := range e.lifecycles {
+		if lifecycle.Type != types.TypeTable || len(lifecycle.History) == 0 {
+			continue
+		}
+		if lifecycle.History[len(lifecycle.History)-1].Operation != types.OpDrop {
+			continue
+		}
+
+		tableName := strings.ToLower(strings.TrimSpace(lifecycle.Name))
+		if tableName == "" {
+			continue
+		}
+		droppedTables[tableName] = struct{}{}
+		if !strings.Contains(tableName, ".") {
+			droppedTables["public."+tableName] = struct{}{}
+		}
+	}
+
 	for key, lifecycle := range e.lifecycles {
+		// Objects that end in DROP must not appear in baseline output.
+		// Guard at engine level so no consolidation rule can accidentally
+		// resurrect dropped objects (e.g., CREATE+ALTER rules on eventually-dropped tables).
+		if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+			e.logger.Info("Skipping dropped object lifecycle: %s", key)
+			continue
+		}
+
+		// Also skip objects that depend on terminally dropped tables.
+		// Example: DROP TABLE ... CASCADE removes indexes implicitly; if we keep
+		// index CREATE statements, baseline replay fails with "relation does not exist".
+		if lifecycleDependsOnDroppedTables(lifecycle, droppedTables) {
+			e.logger.Info("Skipping object lifecycle %s because it depends on a dropped table", key)
+			continue
+		}
+
 		// Skip if already processed
 		if _, exists := e.consolidationResults[key]; exists {
 			continue
@@ -1204,6 +1643,30 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 					ConsolidatedSQL:    lifecycle.GetFinalState().SQL,
 					Optimizations:      []string{"preserved_after_rule_failure"},
 					Warnings:           []string{fmt.Sprintf("Rule application failed: %v", err)},
+					RiskLevel:          tracking.RiskLevelLow,
+				}
+			}
+		} else if result == nil && (lifecycle.Type == types.TypeData || lifecycle.Type == types.TypeDoBlock) {
+			// Force consolidation for Data operations
+			// CRITICAL: We must accumulate SQL from ALL history events, not just the final state
+			// Data operations across multiple migrations (like profiles inserts in 04 and 54)
+			// are grouped into a single lifecycle object. Using GetFinalState() only returns the last one.
+			var allSQL strings.Builder
+			var allStmts []types.Statement
+
+			for i, event := range lifecycle.History {
+				if i > 0 {
+					allSQL.WriteString("\n")
+				}
+				allSQL.WriteString(event.Statement.SQL)
+				allStmts = append(allStmts, event.Statement)
+			}
+
+			if allSQL.Len() > 0 {
+				result = &tracking.ConsolidationResult{
+					OriginalStatements: allStmts,
+					ConsolidatedSQL:    allSQL.String(),
+					Optimizations:      []string{"data_aggregation"},
 					RiskLevel:          tracking.RiskLevelLow,
 				}
 			}
@@ -1279,11 +1742,183 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 	return consolidatedObjects, nil
 }
 
+func lifecycleDependsOnDroppedTables(lifecycle *tracking.ObjectLifecycle, droppedTables map[string]struct{}) bool {
+	if len(droppedTables) == 0 || lifecycle == nil {
+		return false
+	}
+
+	matchesDroppedTable := func(candidate string) bool {
+		c := strings.ToLower(strings.TrimSpace(candidate))
+		if c == "" {
+			return false
+		}
+
+		if _, ok := droppedTables[c]; ok {
+			return true
+		}
+
+		if !strings.Contains(c, ".") {
+			_, ok := droppedTables["public."+c]
+			return ok
+		}
+
+		return false
+	}
+
+	// Direct object target check (important for data operations on dropped tables).
+	if matchesDroppedTable(lifecycle.Name) {
+		return true
+	}
+	for _, event := range lifecycle.History {
+		if matchesDroppedTable(event.Statement.ObjectName) {
+			return true
+		}
+	}
+
+	// SQL text fallback for statements where dependency extraction is incomplete
+	// (e.g., UPDATE ... FROM dropped_table inside data lifecycles).
+	referencesDroppedTableInSQL := func(sqlText string) bool {
+		sqlLower := strings.ToLower(sqlText)
+		for dropped := range droppedTables {
+			d := strings.ToLower(strings.TrimSpace(dropped))
+			if d == "" {
+				continue
+			}
+
+			bare := d
+			if idx := strings.LastIndex(d, "."); idx >= 0 && idx+1 < len(d) {
+				bare = d[idx+1:]
+			}
+
+			patterns := []string{
+				"from " + bare,
+				"join " + bare,
+				"update " + bare,
+				"into " + bare,
+				"from " + d,
+				"join " + d,
+				"update " + d,
+				"into " + d,
+				"on " + bare + "(",
+				"on " + d + "(",
+			}
+
+			for _, p := range patterns {
+				if strings.Contains(sqlLower, p) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	for _, event := range lifecycle.History {
+		if referencesDroppedTableInSQL(event.Statement.SQL) {
+			return true
+		}
+	}
+
+	normalizeDependency := func(dep string) string {
+		d := strings.TrimSpace(dep)
+		if d == "" {
+			return ""
+		}
+		if idx := strings.Index(d, ":"); idx >= 0 && idx+1 < len(d) {
+			d = d[idx+1:]
+		}
+		return strings.TrimSpace(strings.Trim(d, `"`))
+	}
+
+	// Primary check: statement dependency list.
+	for _, event := range lifecycle.History {
+		for _, dep := range event.Statement.Dependencies {
+			if matchesDroppedTable(normalizeDependency(dep)) {
+				return true
+			}
+		}
+	}
+
+	// Fallback for index lifecycles: parse `ON <table>` directly from SQL.
+	// Some index statements may lack dependency metadata in edge parsing paths.
+	if lifecycle.Type == types.TypeIndex {
+		for _, event := range lifecycle.History {
+			parseTree := event.Statement.ParseTree
+			if parseTree == nil {
+				var err error
+				parseTree, err = pg_query.Parse(event.Statement.SQL)
+				if err != nil {
+					continue
+				}
+			}
+
+			if parseTree == nil {
+				continue
+			}
+
+			for _, rawStmt := range parseTree.Stmts {
+				if rawStmt == nil || rawStmt.Stmt == nil {
+					continue
+				}
+
+				indexStmt := rawStmt.Stmt.GetIndexStmt()
+				if indexStmt == nil || indexStmt.Relation == nil {
+					continue
+				}
+
+				tableRef := strings.TrimSpace(indexStmt.Relation.Relname)
+				schemaRef := strings.TrimSpace(indexStmt.Relation.Schemaname)
+
+				if schemaRef != "" && matchesDroppedTable(schemaRef+"."+tableRef) {
+					return true
+				}
+
+				if matchesDroppedTable(tableRef) {
+					return true
+				}
+			}
+		}
+	}
+
+	// Policy object names can encode table context as schema.table.policy.
+	if lifecycle.Type == types.TypePolicy {
+		parts := strings.Split(strings.ToLower(strings.TrimSpace(lifecycle.Name)), ".")
+		if len(parts) >= 3 {
+			tableRef := strings.Join(parts[:2], ".")
+			if matchesDroppedTable(tableRef) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // generateOptimizedSQL generates the final optimized SQL with modern formatting
 func (e *Engine) generateOptimizedSQL(ctx context.Context, consolidatedObjects map[string]*tracking.ConsolidationResult) (string, error) {
 	e.logger.Info("Generating optimized SQL for %d consolidated objects", len(consolidatedObjects))
 
 	e.sqlBuilder.Reset()
+
+	// Track terminally dropped tables so fallback emission does not reintroduce
+	// dependent objects (e.g., indexes removed by DROP TABLE ... CASCADE).
+	droppedTablesForGeneration := make(map[string]struct{})
+	for _, lifecycle := range e.lifecycles {
+		if lifecycle == nil || lifecycle.Type != types.TypeTable || len(lifecycle.History) == 0 {
+			continue
+		}
+		if lifecycle.History[len(lifecycle.History)-1].Operation != types.OpDrop {
+			continue
+		}
+
+		tableName := strings.ToLower(strings.TrimSpace(lifecycle.Name))
+		if tableName == "" {
+			continue
+		}
+		droppedTablesForGeneration[tableName] = struct{}{}
+		if !strings.Contains(tableName, ".") {
+			droppedTablesForGeneration["public."+tableName] = struct{}{}
+		}
+	}
 
 	// Add header comment
 	e.sqlBuilder.Comment("Generated by pgsquash with modern PostgreSQL patterns")
@@ -1406,28 +2041,17 @@ $$`)
 		e.sqlBuilder.NL().NL()
 	}
 
-	// Build column evolution map for VIEW rewriting
-	// This map tracks column renames across consolidation (e.g., rooms.size -> rooms.size_sqm)
-	// Used to rewrite VIEW SELECT clauses when underlying table columns are renamed
-	columnEvolutions := e.buildColumnEvolutionMap()
-	if len(columnEvolutions) > 0 {
-		e.logger.Info("Built column evolution map with %d tables having column changes", len(columnEvolutions))
-		for tableName, evolutions := range columnEvolutions {
-			e.logger.Info("  Table %s: %d column evolutions", tableName, len(evolutions))
-		}
-	}
-
 	// Group by category for organized output - CRITICAL: Order must ensure dependencies are created first
-	// Standard PostgreSQL DDL order: Extensions -> Tables -> Functions -> Triggers -> etc.
-	// Functions that RETURN SETOF table_name must come after tables
+	// Standard PostgreSQL DDL order: Extensions -> Types/Functions/Tables -> Constraints -> Triggers -> etc.
+	// Functions are in CategoryFoundation and ordered BEFORE tables (CHECK constraints may reference functions)
 	categories := []types.Category{
 		types.CategoryExtensions,  // 1. Extensions first (CREATE EXTENSION)
-		types.CategoryFoundation,  // 2. Tables, views, sequences (CREATE TABLE) - must exist before functions that return them
-		types.CategoryFunctions,   // 3. Functions (CREATE FUNCTION) - can reference tables in RETURNS SETOF
-		types.CategoryConstraints, // 4. Constraints (ALTER TABLE ADD CONSTRAINT) - can reference functions in CHECK
-		types.CategoryTriggers,    // 5. Triggers (CREATE TRIGGER) - triggers reference functions
-		types.CategoryIndexes,     // 6. Indexes (CREATE INDEX)
-		types.CategorySecurity,    // 7. RLS Policies (CREATE POLICY)
+		types.CategoryFoundation,  // 2. Types, functions, tables, views, sequences - functions before tables for CHECK constraints
+		types.CategoryConstraints, // 3. Constraints (ALTER TABLE ADD CONSTRAINT)
+		types.CategoryIndexes,     // 4. Indexes (CREATE INDEX)
+		types.CategoryTriggers,    // 5. Triggers (CREATE TRIGGER)
+		types.CategorySecurity,    // 6. RLS Policies (CREATE POLICY) (Before comments)
+		types.CategoryComments,    // 7. Comments (COMMENT ON)
 		// Data operations are NOT included here - they go to separate file
 	}
 
@@ -1529,9 +2153,7 @@ $$`)
 		}
 
 		if category == types.CategorySecurity && len(deferredSecurity) > 0 {
-			for key, result := range deferredSecurity {
-				categoryObjectsMap[key] = result
-			}
+			maps.Copy(categoryObjectsMap, deferredSecurity)
 			// Clear after merging to avoid re-adding in future iterations
 			deferredSecurity = make(map[string]*tracking.ConsolidationResult)
 		}
@@ -1558,21 +2180,6 @@ $$`)
 			if len(result.OriginalStatements) > 0 && strings.Contains(result.OriginalStatements[0].ObjectName, "idx_profiles_coordinates") {
 				e.logger.Info("[OUTPUT-DEBUG-CATEGORIZED] Category=%s, ObjectName=%s", category, result.OriginalStatements[0].ObjectName)
 				e.logger.Info("[OUTPUT-DEBUG-CATEGORIZED] ConsolidatedSQL = %s", sql)
-			}
-
-			// Rewrite VIEW column references if columns were renamed during consolidation
-			// This fixes the issue where VIEWs reference old column names after table consolidation
-			if category == types.CategoryFoundation && len(columnEvolutions) > 0 {
-				// Check if this SQL is a CREATE VIEW statement
-				upperSQL := strings.ToUpper(sql)
-				if strings.Contains(upperSQL, "CREATE VIEW") || strings.Contains(upperSQL, "CREATE OR REPLACE VIEW") {
-					// Apply column evolution rewrites to this view
-					rewrittenSQL := e.rewriteViewColumnReferences(sql, columnEvolutions)
-					if rewrittenSQL != sql {
-						e.logger.Info("Applied column evolution rewrites to view")
-						sql = rewrittenSQL
-					}
-				}
 			}
 
 			// Apply CASCADE enhancement for extension objects
@@ -1640,6 +2247,11 @@ $$`)
 	uncategorizedObjects := make(map[string]*tracking.ConsolidationResult)
 	for key, result := range consolidatedObjects {
 		if !addedObjects[key] {
+			if e.excludeDataFromBaseline {
+				if lifecycle, exists := e.lifecycles[key]; exists && (lifecycle.Type == types.TypeData || lifecycle.Type == types.TypeDoBlock) {
+					continue
+				}
+			}
 			uncategorizedObjects[key] = result
 			uncategorizedCount++
 		}
@@ -1648,33 +2260,98 @@ $$`)
 	// Only add header if there are uncategorized objects
 	if uncategorizedCount > 0 {
 		e.sqlBuilder.NL().Comment("=== UNCATEGORIZED OBJECTS ===").NL()
-		for key, result := range uncategorizedObjects {
-			// DEBUG: Log idx_profiles_coordinates SQL being output
-			if strings.Contains(key, "idx_profiles_coordinates") {
-				e.logger.Info("[OUTPUT-DEBUG] Writing idx_profiles_coordinates, ConsolidatedSQL = %s", result.ConsolidatedSQL)
+
+		// Sort keys for deterministic output order matching migration sequence
+		var keys []string
+		for key := range uncategorizedObjects {
+			keys = append(keys, key)
+		}
+
+		sort.Slice(keys, func(i, j int) bool {
+			l1 := e.lifecycles[keys[i]]
+			l2 := e.lifecycles[keys[j]]
+
+			// Safety check
+			if len(l1.History) == 0 || len(l2.History) == 0 {
+				return keys[i] < keys[j]
 			}
+
+			h1 := l1.History[0]
+			h2 := l2.History[0]
+
+			if h1.Migration != h2.Migration {
+				return h1.Migration < h2.Migration
+			}
+			return h1.Sequence < h2.Sequence
+		})
+
+		for _, key := range keys {
+			result := uncategorizedObjects[key]
 			e.sqlBuilder.Statement(result.ConsolidatedSQL)
 			e.sqlBuilder.NL().NL()
 		}
-		e.logger.Info("Added %d uncategorized objects to output", uncategorizedCount)
 	}
 
-	// Add any non-consolidated objects (legacy fallback)
-	for key, lifecycle := range e.lifecycles {
+	// Add any non-consolidated objects through the default preservation path.
+	// CRITICAL FIX: Sort objects deterministically based on their first appearance
+	// This ensures that data operations (INSERTs) preserve their original order
+	// and satisfy foreign key dependencies (e.g. markets before properties/listings)
+	var preservedKeys []string
+	for key := range e.lifecycles {
 		if _, consolidated := consolidatedObjects[key]; !consolidated {
-			// DEBUG: Log if idx_profiles_coordinates goes through legacy path
-			if strings.Contains(key, "idx_profiles_coordinates") {
-				finalState := lifecycle.GetFinalState()
-				if finalState != nil {
-					e.logger.Info("[OUTPUT-DEBUG] idx_profiles_coordinates going through LEGACY FALLBACK path")
-					e.logger.Info("[OUTPUT-DEBUG] FinalState.SQL = %s", finalState.SQL)
-					e.logger.Info("[OUTPUT-DEBUG] IndexHadExplicitAccessMethod = %v", finalState.IndexHadExplicitAccessMethod)
-				}
-			}
+			preservedKeys = append(preservedKeys, key)
+		}
+	}
+
+	sort.Slice(preservedKeys, func(i, j int) bool {
+		lifecycleI := e.lifecycles[preservedKeys[i]]
+		lifecycleJ := e.lifecycles[preservedKeys[j]]
+
+		// Safety check for empty history
+		if len(lifecycleI.History) == 0 || len(lifecycleJ.History) == 0 {
+			return preservedKeys[i] < preservedKeys[j]
+		}
+
+		eventI := lifecycleI.History[0]
+		eventJ := lifecycleJ.History[0]
+
+		// Sort by migration file (maintains file order)
+		if eventI.Migration != eventJ.Migration {
+			return eventI.Migration < eventJ.Migration
+		}
+
+		// Sort by sequence within migration (maintains statement order)
+		if eventI.Sequence != eventJ.Sequence {
+			return eventI.Sequence < eventJ.Sequence
+		}
+
+		// Fallback to key
+		return preservedKeys[i] < preservedKeys[j]
+	})
+
+	for _, key := range preservedKeys {
+		lifecycle := e.lifecycles[key]
+
+		if lifecycle == nil {
+			continue
+		}
+
+		if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+			continue
+		}
+
+		if lifecycleDependsOnDroppedTables(lifecycle, droppedTablesForGeneration) {
+			continue
+		}
+
+		// Skip data operations if configured to exclude them (e.g. for separate file output)
+		if (lifecycle.Type == types.TypeData || lifecycle.Type == types.TypeDoBlock) && e.excludeDataFromBaseline {
+			continue
+		}
+
+		if lifecycle.GetFinalState() != nil {
 			e.sqlBuilder.Comment(fmt.Sprintf("Original object: %s", key))
-			if lifecycle.GetFinalState() != nil {
-				e.sqlBuilder.FromStatement(*lifecycle.GetFinalState()).NL().NL()
-			}
+			e.sqlBuilder.FromStatement(*lifecycle.GetFinalState()).NL().NL()
 		}
 	}
 
@@ -1698,16 +2375,6 @@ $$`)
 
 	finalSQL := e.sqlBuilder.String()
 
-	// DEBUG: Check for concatenated function patterns before postprocessing
-	pattern := regexp.MustCompile(`\$\$;(?:STABLE|VOLATILE|IMMUTABLE);\s*CREATE`)
-	matches := pattern.FindAllString(finalSQL, -1)
-	if len(matches) > 0 {
-		e.logger.Info("Found %d concatenated function patterns BEFORE postprocessing", len(matches))
-	}
-
-	// Build enum replacements map
-	// enumReplacements := e.buildEnumReplacementsMap() // DISABLED - not needed without postprocessor
-
 	// DISABLED - Postprocessor corrupts functions
 	// The postprocessor calls FixMissingLanguageClauses() which:
 	// - Adds "LANGUAGE plpgsql" when LANGUAGE is already at the end
@@ -1723,6 +2390,15 @@ $$`)
 	// 	return "", err
 	// } // DISABLED
 
+	// CRITICAL FIX: Ensure extension ordering is correct (e.g. cube before earthdistance)
+	// This is a safe string-manipulation fix that doesn't involve complex AST processing
+	// and is required for correct database initialization.
+	finalSQL = postprocessing.FixExtensionOrder(finalSQL)
+
+	// CRITICAL FIX: Fix corrupted DROP POLICY statements from pg_query deparser
+	// This cleans up "DROP POLICY schema.table.policy ON schema.table" -> "DROP POLICY policy ON schema.table"
+	finalSQL = postprocessing.FixDropPolicyDeparseCorruption(finalSQL)
+
 	// Note: enum replacements are not critical for function preservation,
 	// so we can safely skip the entire postprocessor
 
@@ -1733,99 +2409,14 @@ $$`)
 		finalSQL = strings.ReplaceAll(finalSQL, "char_char_length", "char_length")
 	}
 
-	// AST-BASED INDEX TYPE OPTIMIZATION
-	// Use actual column types from tracker to set appropriate index access methods
-	// Replaces broken regex-based "safety net" that guessed types from column names
-	finalSQL = e.optimizeIndexTypes(finalSQL)
+	// NOTE: Disabled destructive regex-based index pruning.
+	// The heuristic parser for CREATE TABLE/INDEX statements produced widespread
+	// false positives and removed valid indexes, causing severe schema drift.
+	// Index validity should be validated by PostgreSQL during apply/validation,
+	// not by lossy regex pruning at generation time.
+	e.logger.Info("SAFETY NET: Skipping regex-based index pruning to preserve schema fidelity")
 
-	// Rewrite views with renamed columns from schema evolution
-	// When tables evolve via multiple CREATE TABLE IF NOT EXISTS with changing column names,
-	// views may reference old or new column names inconsistently.
-	// Strategy: Detect which column name actually exists in the rooms table, then rewrite views
-	//
-	// Step 1: Check if rooms table has size_sqm or size column
-	hasSizeSqm := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+rooms\s*\([^;]*\bsize_sqm\b`).MatchString(finalSQL)
-	hasSize := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+rooms\s*\([^;]*\bsize\s+`).MatchString(finalSQL)
-
-	e.logger.Info("SAFETY NET: rooms table columns detected: size=%v, size_sqm=%v", hasSize, hasSizeSqm)
-
-	// Step 2: Rewrite views based on what the table actually has
-	if hasSizeSqm && !hasSize {
-		// Table has size_sqm, views might reference r.size - rewrite to r.size_sqm
-		roomsSizePattern := regexp.MustCompile(`(?i)(\br\.size)([^_a-z0-9]|$)`)
-		roomsSizeMatches := roomsSizePattern.FindAllString(finalSQL, -1)
-		if len(roomsSizeMatches) > 0 {
-			e.logger.Info("SAFETY NET: Found %d references to r.size (should be r.size_sqm) - rewriting...", len(roomsSizeMatches))
-			finalSQL = roomsSizePattern.ReplaceAllString(finalSQL, "${1}_sqm$2")
-			e.logger.Info("SAFETY NET: Rewrote r.size to r.size_sqm in views")
-		}
-	} else if hasSize && !hasSizeSqm {
-		// Table has size, views might reference r.size_sqm - rewrite to r.size
-		roomsSizeSqmPattern := regexp.MustCompile(`(?i)\br\.size_sqm\b`)
-		roomsSizeSqmMatches := roomsSizeSqmPattern.FindAllString(finalSQL, -1)
-		if len(roomsSizeSqmMatches) > 0 {
-			e.logger.Info("SAFETY NET: Found %d references to r.size_sqm (should be r.size) - rewriting...", len(roomsSizeSqmMatches))
-			finalSQL = roomsSizeSqmPattern.ReplaceAllString(finalSQL, "r.size")
-			e.logger.Info("SAFETY NET: Rewrote r.size_sqm to r.size in views")
-		}
-	} else {
-		e.logger.Info("SAFETY NET: rooms table has ambiguous size columns (size=%v, size_sqm=%v), skipping view rewrite", hasSize, hasSizeSqm)
-	}
-
-	// Remove invalid CHECK constraints from buddy_connections
-	// When tables evolve via multiple CREATE TABLE IF NOT EXISTS with conflicting schemas,
-	// CHECK constraints may reference columns inconsistently.
-	// Example: buddy_connections has complex schema evolution with buddyup_name/name column
-	//
-	// Pattern: CHECK constraint in buddy_connections table that references name or buddyup_name
-	// Strategy: Remove the problematic CHECK constraint entirely to prevent validation errors
-	// The constraint checks: connection_type = 'direct' OR (connection_type = 'buddyup' AND name/buddyup_name IS NOT NULL)
-	// This is a business logic constraint that can be safely removed - the application layer should enforce it
-	buddyupTablePattern := regexp.MustCompile(`(?is)(CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+buddy_connections\s*\([^;]+?)CHECK\s*\(\s*connection_type\s*=\s*'direct'\s+OR\s+\([^)]+?(buddyup_name|name)\s+IS\s+NOT\s+NULL\s*\)\s*\)\s*,?\s*([^;]+;)`)
-	buddyupCheckMatches := buddyupTablePattern.FindAllString(finalSQL, -1)
-	if len(buddyupCheckMatches) > 0 {
-		e.logger.Info("SAFETY NET: Found %d buddy_connections tables with problematic CHECK constraints - removing constraint...", len(buddyupCheckMatches))
-		// Remove the CHECK constraint by replacing it with empty space
-		finalSQL = regexp.MustCompile(`(?i),?\s*CHECK\s*\(\s*connection_type\s*=\s*'direct'\s+OR\s+\([^)]+?(buddyup_name|name)\s+IS\s+NOT\s+NULL\s*\)\s*\)`).ReplaceAllString(finalSQL, "")
-		e.logger.Info("SAFETY NET: Removed problematic CHECK constraint from buddy_connections")
-	}
-
-	// Rewrite function bodies referencing buddy_connections.buddyup_name -> buddy_connections.name
-	// The buddy_connections table evolved: buddyup_name -> name -> buddyup_name across migrations
-	// After consolidation, table has "name" column, but functions may reference "buddyup_name"
-	//
-	// Strategy: Detect which column the consolidated buddy_connections table has, then rewrite function bodies
-	//
-	// Step 1: Check if buddy_connections table has buddyup_name or name column
-	hasBuddyupName := regexp.MustCompile(`(?i)CREATE\s+TABLE[^;]*buddy_connections\s*\([^;]*\bbuddyup_name\b`).MatchString(finalSQL)
-	hasName := regexp.MustCompile(`(?i)CREATE\s+TABLE[^;]*buddy_connections\s*\([^;]*\bname\s+text`).MatchString(finalSQL)
-
-	e.logger.Info("SAFETY NET: buddy_connections table columns detected: name=%v, buddyup_name=%v", hasName, hasBuddyupName)
-
-	// Step 2: Rewrite function bodies based on actual table schema
-	if hasName && !hasBuddyupName {
-		// Table has name, functions might reference bc.buddyup_name - rewrite to bc.name
-		// Pattern: bc.buddyup_name or buddy_connections.buddyup_name in function bodies
-		buddyupNamePattern := regexp.MustCompile(`(?i)\b(bc|buddy_connections)\.buddyup_name\b`)
-		buddyupNameMatches := buddyupNamePattern.FindAllString(finalSQL, -1)
-		if len(buddyupNameMatches) > 0 {
-			e.logger.Info("SAFETY NET: Found %d references to buddyup_name (should be name) - rewriting...", len(buddyupNameMatches))
-			finalSQL = buddyupNamePattern.ReplaceAllString(finalSQL, "$1.name")
-			e.logger.Info("SAFETY NET: Rewrote buddyup_name to name in function bodies")
-		}
-	} else if hasBuddyupName && !hasName {
-		// Table has buddyup_name, functions might reference bc.name - rewrite to bc.buddyup_name
-		// This case is less common but included for completeness
-		namePattern := regexp.MustCompile(`(?i)\b(bc|buddy_connections)\.name\b`)
-		nameMatches := namePattern.FindAllString(finalSQL, -1)
-		if len(nameMatches) > 0 {
-			e.logger.Info("SAFETY NET: Found %d references to name (should be buddyup_name) - rewriting...", len(nameMatches))
-			finalSQL = namePattern.ReplaceAllString(finalSQL, "$1.buddyup_name")
-			e.logger.Info("SAFETY NET: Rewrote name to buddyup_name in function bodies")
-		}
-	} else {
-		e.logger.Info("SAFETY NET: buddy_connections table has ambiguous columns (name=%v, buddyup_name=%v), skipping function body rewrite", hasName, hasBuddyupName)
-	}
+	finalSQL = e.removeOrphanedFunctionStatements(finalSQL)
 
 	return finalSQL, nil
 }
@@ -1837,6 +2428,115 @@ func (e *Engine) generateDataOperationsSQL() (string, error) {
 
 	if len(sortedDataOps) == 0 {
 		return "", nil // No data operations
+	}
+
+	// Filter out data operations that reference tables which are terminally dropped.
+	// These are transitional backfill steps (e.g., UPDATE ... FROM legacy_scores)
+	// that become invalid once dropped tables are intentionally omitted from baseline.
+	droppedTables := make(map[string]struct{})
+	for _, lifecycle := range e.lifecycles {
+		if lifecycle == nil || lifecycle.Type != types.TypeTable || len(lifecycle.History) == 0 {
+			continue
+		}
+		if lifecycle.History[len(lifecycle.History)-1].Operation != types.OpDrop {
+			continue
+		}
+
+		tableName := strings.ToLower(strings.TrimSpace(lifecycle.Name))
+		if tableName == "" {
+			continue
+		}
+		droppedTables[tableName] = struct{}{}
+		if !strings.Contains(tableName, ".") {
+			droppedTables["public."+tableName] = struct{}{}
+		}
+	}
+
+	matchesDroppedTable := func(candidate string) bool {
+		c := strings.ToLower(strings.TrimSpace(candidate))
+		if c == "" {
+			return false
+		}
+		if _, ok := droppedTables[c]; ok {
+			return true
+		}
+		if !strings.Contains(c, ".") {
+			_, ok := droppedTables["public."+c]
+			return ok
+		}
+		return false
+	}
+
+	referencesDroppedTableInSQL := func(sqlText string) bool {
+		sqlLower := strings.ToLower(sqlText)
+		for dropped := range droppedTables {
+			d := strings.ToLower(strings.TrimSpace(dropped))
+			if d == "" {
+				continue
+			}
+			bare := d
+			if idx := strings.LastIndex(d, "."); idx >= 0 && idx+1 < len(d) {
+				bare = d[idx+1:]
+			}
+
+			patterns := []string{
+				"from " + bare,
+				"join " + bare,
+				"update " + bare,
+				"into " + bare,
+				"from " + d,
+				"join " + d,
+				"update " + d,
+				"into " + d,
+			}
+
+			for _, p := range patterns {
+				if strings.Contains(sqlLower, p) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	if len(droppedTables) > 0 {
+		filteredOps := make([]*tracking.DataOperation, 0, len(sortedDataOps))
+		skippedOps := 0
+
+		for _, dataOp := range sortedDataOps {
+			shouldSkip := false
+
+			if matchesDroppedTable(dataOp.Table) {
+				shouldSkip = true
+			}
+
+			if !shouldSkip {
+				if slices.ContainsFunc(dataOp.DependsOn, matchesDroppedTable) {
+					shouldSkip = true
+				}
+			}
+
+			if !shouldSkip && referencesDroppedTableInSQL(dataOp.Statement.SQL) {
+				shouldSkip = true
+			}
+
+			if shouldSkip {
+				skippedOps++
+				e.logger.Info("[DATA-OPS] Skipping %s on %s because it references a dropped table", dataOp.Operation, dataOp.Table)
+				continue
+			}
+
+			filteredOps = append(filteredOps, dataOp)
+		}
+
+		if skippedOps > 0 {
+			e.logger.Info("[DATA-OPS] Filtered %d data operation(s) referencing dropped tables", skippedOps)
+		}
+
+		sortedDataOps = filteredOps
+		if len(sortedDataOps) == 0 {
+			return "", nil
+		}
 	}
 
 	// ARCHITECTURAL DECISION: We do NOT build column evolution map for data operations
@@ -1893,200 +2593,6 @@ func (e *Engine) generateDataOperationsSQL() (string, error) {
 	return dataBuilder.String(), nil
 }
 
-// rewriteDataOperationColumns rewrites column names in INSERT/UPDATE statements
-func (e *Engine) rewriteDataOperationColumns(sql string, tableName string, columnEvolutions map[string]string) string {
-	if len(columnEvolutions) == 0 {
-		return sql
-	}
-
-	// Use regex to rewrite column names in INSERT and UPDATE statements
-	// Pattern 1: INSERT INTO table (col1, col2) -> rewrite column list
-	insertPattern := regexp.MustCompile(`(?i)INSERT\s+INTO\s+` + regexp.QuoteMeta(tableName) + `\s*\(([^)]+)\)`)
-	matches := insertPattern.FindStringSubmatch(sql)
-	if len(matches) > 1 {
-		columnList := matches[1]
-		columns := strings.Split(columnList, ",")
-		newColumns := make([]string, len(columns))
-		rewritten := false
-
-		for i, col := range columns {
-			colName := strings.TrimSpace(col)
-			colName = strings.Trim(colName, "\"'`") // Remove quotes
-			colNameLower := strings.ToLower(colName)
-
-			if newName, evolved := columnEvolutions[colNameLower]; evolved {
-				newColumns[i] = newName
-				rewritten = true
-				e.logger.Info("Rewriting column in %s INSERT: %s -> %s", tableName, colName, newName)
-			} else {
-				newColumns[i] = colName
-			}
-		}
-
-		if rewritten {
-			newColumnList := strings.Join(newColumns, ", ")
-			sql = insertPattern.ReplaceAllString(sql, "INSERT INTO "+tableName+" ("+newColumnList+")")
-		}
-	}
-
-	// Pattern 2: UPDATE table SET col1 = val1 -> rewrite column names in SET clause
-	if strings.Contains(strings.ToUpper(sql), "UPDATE") {
-		for oldCol, newCol := range columnEvolutions {
-			// Match: col = or col= (with or without space before =)
-			pattern := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(oldCol) + `\s*=`)
-			if pattern.MatchString(sql) {
-				sql = pattern.ReplaceAllString(sql, newCol+" =")
-				e.logger.Info("Rewriting column in %s UPDATE: %s -> %s", tableName, oldCol, newCol)
-			}
-		}
-	}
-
-	return sql
-}
-
-// rewriteViewColumnReferences rewrites column names in VIEW SELECT clauses to reflect column renames.
-//
-// Example:
-//   Original table: CREATE TABLE rooms (size DECIMAL(10,2));
-//   Renamed to:     CREATE TABLE rooms (size_sqm DECIMAL(6,2));  // via consolidation
-//   View (broken):  CREATE VIEW rooms_fairrent_ready AS SELECT r.size FROM rooms r;
-//   View (fixed):   CREATE VIEW rooms_fairrent_ready AS SELECT r.size_sqm FROM rooms r;
-//
-// The function uses AST parsing to identify table references and column selections,
-// then rewrites them according to the columnEvolutions map.
-func (e *Engine) rewriteViewColumnReferences(sql string, columnEvolutionsByTable map[string]map[string]string) string {
-	if len(columnEvolutionsByTable) == 0 {
-		return sql
-	}
-
-	// Parse the VIEW SQL to extract SELECT clause
-	upperSQL := strings.ToUpper(sql)
-	if !strings.Contains(upperSQL, "CREATE VIEW") && !strings.Contains(upperSQL, "CREATE OR REPLACE VIEW") {
-		return sql // Not a view
-	}
-
-	// Extract view name for logging
-	viewName := e.extractViewName(sql)
-	e.logger.Info("[VIEW-REWRITE] Checking view '%s' for column evolution rewrites", viewName)
-
-	// The deparser formats views as "viewname AS\nSELECT", not "viewname AS SELECT"
-	// So we need to find the AS that comes after the view name, not just any " AS " with spaces.
-	// Use regex to find: VIEW viewname AS (with optional whitespace after AS)
-	asPattern := regexp.MustCompile(`(?i)VIEW\s+[\w.]+\s+AS\s+`)
-	asMatch := asPattern.FindStringIndex(upperSQL)
-	if asMatch == nil {
-		e.logger.Debug("[VIEW-REWRITE] No AS clause found in view %s, skipping", viewName)
-		return sql
-	}
-
-	// asMatch[1] is the end of the match, which is right after "AS " (including trailing whitespace)
-	// We want to start from after "AS" but keep the whitespace in the SELECT clause
-	asEndIndex := asMatch[1]
-
-	// Extract the SELECT clause (everything after "AS ")
-	selectClause := sql[asEndIndex:]
-
-	// Rewrite column references in the SELECT clause
-	rewrittenSelect := selectClause
-	totalRewrites := 0
-
-	// For each table that has column evolutions
-	for tableName, evolutions := range columnEvolutionsByTable {
-		if len(evolutions) == 0 {
-			continue
-		}
-
-		// Check if this table is referenced in the view
-		// Common patterns: "FROM tablename", "JOIN tablename", "tablename alias"
-		tableRefPattern := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(tableName) + `\b\s+(\w+)?`)
-		if !tableRefPattern.MatchString(selectClause) {
-			continue // Table not referenced in this view
-		}
-
-		e.logger.Info("[VIEW-REWRITE] View '%s' references table '%s' with %d column evolutions", viewName, tableName, len(evolutions))
-
-		// Extract table alias if present
-		// Pattern: "FROM rooms r" or "FROM rooms AS r" -> alias is "r"
-		tableAliases := []string{tableName} // Default to table name
-		aliasMatches := tableRefPattern.FindAllStringSubmatch(selectClause, -1)
-		for _, match := range aliasMatches {
-			if len(match) > 1 && match[1] != "" && !isSQLKeyword(match[1]) {
-				tableAliases = append(tableAliases, match[1])
-			}
-		}
-
-		// Rewrite column references for each column evolution
-		for oldCol, newCol := range evolutions {
-			// Try rewriting with each possible alias/table reference
-			for _, alias := range tableAliases {
-				// Pattern 1: alias.columnname (qualified reference)
-				qualifiedPattern := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(alias) + `\.` + regexp.QuoteMeta(oldCol) + `\b`)
-				if qualifiedPattern.MatchString(rewrittenSelect) {
-					before := rewrittenSelect
-					rewrittenSelect = qualifiedPattern.ReplaceAllString(rewrittenSelect, alias+"."+newCol)
-					if before != rewrittenSelect {
-						e.logger.Info("[VIEW-REWRITE] Rewrote column reference in view '%s': %s.%s -> %s.%s", viewName, alias, oldCol, alias, newCol)
-						totalRewrites++
-					}
-				}
-
-				// Pattern 2: unqualified column name (if only one table)
-				// This is riskier, so we only do it if we're confident
-				if len(columnEvolutionsByTable) == 1 {
-					unqualifiedPattern := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(oldCol) + `\b`)
-					// Make sure we're not matching SQL keywords or function names
-					if unqualifiedPattern.MatchString(rewrittenSelect) {
-						before := rewrittenSelect
-						rewrittenSelect = unqualifiedPattern.ReplaceAllString(rewrittenSelect, newCol)
-						if before != rewrittenSelect {
-							e.logger.Info("[VIEW-REWRITE] Rewrote unqualified column in view '%s': %s -> %s", viewName, oldCol, newCol)
-							totalRewrites++
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if totalRewrites > 0 {
-		// Reconstruct the full VIEW SQL
-		rewrittenSQL := sql[:asEndIndex] + rewrittenSelect
-		e.logger.Info("[VIEW-REWRITE] ✓ Applied %d column rewrites to view '%s'", totalRewrites, viewName)
-		return rewrittenSQL
-	}
-
-	e.logger.Debug("[VIEW-REWRITE] No column rewrites needed for view '%s'", viewName)
-	return sql
-}
-
-// extractViewName extracts the view name from CREATE VIEW SQL
-func (e *Engine) extractViewName(sql string) string {
-	// Pattern: CREATE [OR REPLACE] VIEW [schema.]viewname
-	viewPattern := regexp.MustCompile(`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(?:([a-z_][a-z0-9_]*)\.)?\s*([a-z_][a-z0-9_]*)`)
-	matches := viewPattern.FindStringSubmatch(sql)
-	if len(matches) > 2 {
-		if matches[1] != "" {
-			return matches[1] + "." + matches[2] // schema.viewname
-		}
-		return matches[2] // viewname
-	}
-	return "unknown_view"
-}
-
-// isSQLKeyword checks if a word is a common SQL keyword to avoid false matches
-func isSQLKeyword(word string) bool {
-	keywords := map[string]bool{
-		"select": true, "from": true, "where": true, "join": true,
-		"inner": true, "outer": true, "left": true, "right": true,
-		"on": true, "and": true, "or": true, "as": true,
-		"order": true, "by": true, "group": true, "having": true,
-		"limit": true, "offset": true, "union": true, "intersect": true,
-		"except": true, "case": true, "when": true, "then": true,
-		"else": true, "end": true, "distinct": true, "all": true,
-	}
-	return keywords[strings.ToLower(word)]
-}
-
 func (e *Engine) getObjectsByCategory(consolidatedObjects map[string]*tracking.ConsolidationResult, category types.Category) []*tracking.ConsolidationResult {
 	var objects []*tracking.ConsolidationResult
 
@@ -2111,97 +2617,197 @@ func (e *Engine) getObjectsByCategoryAsMap(consolidatedObjects map[string]*track
 	return objects
 }
 
-// buildEnumReplacementsMap builds a map of eliminated ENUM names to their primary replacements.
-// This is used during post-processing to rewrite references to eliminated ENUMs.
-func (e *Engine) buildEnumReplacementsMap() map[string]string {
-	enumReplacements := make(map[string]string)
+func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
+	if strings.TrimSpace(rawSQL) == "" {
+		return rawSQL
+	}
 
-	// Iterate through all consolidation results to find eliminated ENUMs
+	e.logger.Info("SAFETY NET: Scanning final SQL for orphaned function statements via AST")
+	aliveFunctions := make(map[string]bool)
+
 	for key, result := range e.consolidationResults {
-		lifecycle, exists := e.lifecycles[key]
-		if !exists {
+		if !strings.HasSuffix(key, "::FUNCTION") {
 			continue
 		}
 
-		// Check if this is an ENUM type
-		if lifecycle.Type != types.TypeEnum && lifecycle.Type != types.TypeType {
+		trimmed := strings.TrimSpace(strings.ToUpper(result.ConsolidatedSQL))
+		if strings.HasPrefix(trimmed, "DROP") || len(trimmed) == 0 {
 			continue
 		}
 
-		// Check if it was eliminated (ConsolidatedSQL is a comment)
-		if strings.HasPrefix(strings.TrimSpace(result.ConsolidatedSQL), "-- Duplicate ENUM eliminated:") {
-			// Parse the warning to extract the mapping
-			// Warning format: "ENUM <eliminated> is a duplicate of <primary> - eliminated to prevent conflicts"
-			for _, warning := range result.Warnings {
-				if strings.Contains(warning, "is a duplicate of") && strings.Contains(warning, "eliminated to prevent conflicts") {
-					// Extract eliminated and primary names
-					// Format: "ENUM verification_status_enum is a duplicate of verification_status - eliminated to prevent conflicts"
-					parts := strings.Split(warning, " is a duplicate of ")
-					if len(parts) == 2 {
-						eliminatedName := strings.TrimPrefix(parts[0], "ENUM ")
-						primaryName := strings.Split(parts[1], " - ")[0]
+		parts := strings.Split(key, "::")
+		if len(parts) == 0 {
+			continue
+		}
 
-						enumReplacements[eliminatedName] = primaryName
-						e.logger.Info("Enum mapping: %s → %s", eliminatedName, primaryName)
+		fullName := normalizeFunctionIdentifier(parts[0])
+		if fullName == "" {
+			continue
+		}
+
+		aliveFunctions[fullName] = true
+		if idx := strings.LastIndex(fullName, "."); idx >= 0 && idx+1 < len(fullName) {
+			aliveFunctions[fullName[idx+1:]] = true
+		}
+	}
+
+	parseResult, err := pg_query.Parse(rawSQL)
+	if err != nil || parseResult == nil {
+		e.logger.Warn("SAFETY NET: Failed to parse final SQL for orphaned-function filtering: %v", err)
+		return rawSQL
+	}
+
+	type statementRange struct {
+		start int
+		end   int
+	}
+
+	toRemove := make([]statementRange, 0)
+
+	for _, rawStmt := range parseResult.Stmts {
+		if rawStmt == nil || rawStmt.Stmt == nil {
+			continue
+		}
+
+		start := int(rawStmt.StmtLocation)
+		end := start + int(rawStmt.StmtLen)
+		if start < 0 || start >= len(rawSQL) {
+			continue
+		}
+		if end <= start || end > len(rawSQL) {
+			end = len(rawSQL)
+		}
+
+		node := rawStmt.Stmt.GetNode()
+		shouldRemove := false
+		reason := ""
+
+		switch typed := node.(type) {
+		case *pg_query.Node_CommentStmt:
+			commentStmt := typed.CommentStmt
+			if commentStmt != nil && commentStmt.Objtype == pg_query.ObjectType_OBJECT_FUNCTION {
+				fn := normalizeFunctionIdentifier(extractFunctionNameFromObjectNode(commentStmt.Object))
+				if fn != "" && !aliveFunctions[fn] {
+					if idx := strings.LastIndex(fn, "."); idx >= 0 && idx+1 < len(fn) && aliveFunctions[fn[idx+1:]] {
+						break
 					}
+					shouldRemove = true
+					reason = fmt.Sprintf("orphaned COMMENT ON FUNCTION '%s'", fn)
+				}
+			}
+
+		case *pg_query.Node_GrantStmt:
+			grantStmt := typed.GrantStmt
+			if grantStmt != nil && grantStmt.Objtype == pg_query.ObjectType_OBJECT_FUNCTION {
+				for _, obj := range grantStmt.Objects {
+					fn := normalizeFunctionIdentifier(extractFunctionNameFromObjectNode(obj))
+					if fn == "" {
+						continue
+					}
+
+					if aliveFunctions[fn] {
+						continue
+					}
+					if idx := strings.LastIndex(fn, "."); idx >= 0 && idx+1 < len(fn) && aliveFunctions[fn[idx+1:]] {
+						continue
+					}
+
+					shouldRemove = true
+					reason = fmt.Sprintf("orphaned GRANT/REVOKE ON FUNCTION '%s'", fn)
+					break
 				}
 			}
 		}
+
+		if shouldRemove {
+			e.logger.Warn("SAFETY NET: Removing %s", reason)
+			toRemove = append(toRemove, statementRange{start: start, end: end})
+		}
 	}
 
-	if len(enumReplacements) > 0 {
-		e.logger.Info("Built ENUM replacements map with %d entries", len(enumReplacements))
+	if len(toRemove) == 0 {
+		return rawSQL
 	}
 
-	return enumReplacements
+	sort.Slice(toRemove, func(i, j int) bool {
+		return toRemove[i].start < toRemove[j].start
+	})
+
+	merged := make([]statementRange, 0, len(toRemove))
+	for _, r := range toRemove {
+		if len(merged) == 0 {
+			merged = append(merged, r)
+			continue
+		}
+
+		last := &merged[len(merged)-1]
+		if r.start <= last.end {
+			if r.end > last.end {
+				last.end = r.end
+			}
+			continue
+		}
+
+		merged = append(merged, r)
+	}
+
+	var rebuilt strings.Builder
+	cursor := 0
+	for _, r := range merged {
+		if r.start > cursor {
+			rebuilt.WriteString(rawSQL[cursor:r.start])
+		}
+		if r.end > cursor {
+			cursor = r.end
+		}
+	}
+	if cursor < len(rawSQL) {
+		rebuilt.WriteString(rawSQL[cursor:])
+	}
+
+	return rebuilt.String()
 }
 
-// buildColumnEvolutionMap builds a map of column renames from consolidation results.
-// This is used to rewrite INSERT/UPDATE operations to use final column names.
-func (e *Engine) buildColumnEvolutionMap() map[string]map[string]string {
-	// Map structure: table -> (oldColumn -> newColumn)
-	columnEvolutionsByTable := make(map[string]map[string]string)
+func extractFunctionNameFromObjectNode(node *pg_query.Node) string {
+	if node == nil {
+		return ""
+	}
 
-	// Iterate through all consolidation results to find column evolutions
-	for key, result := range e.consolidationResults {
-		lifecycle, exists := e.lifecycles[key]
-		if !exists {
-			continue
-		}
-
-		// Only process table types
-		if lifecycle.Type != types.TypeTable {
-			continue
-		}
-
-		// Check if this result has column evolution info
-		if result.ColumnEvolutions == nil || len(result.ColumnEvolutions) == 0 {
-			continue
-		}
-
-		// Extract evolutions for this table
-		for _, evolution := range result.ColumnEvolutions {
-			tableName := strings.ToLower(evolution.TableName)
-
-			if columnEvolutionsByTable[tableName] == nil {
-				columnEvolutionsByTable[tableName] = make(map[string]string)
+	parts := make([]string, 0)
+	if list := node.GetList(); list != nil {
+		for _, item := range list.Items {
+			if str := item.GetString_(); str != nil {
+				parts = append(parts, str.Sval)
 			}
-
-			// Map all names in the rename chain to the final name
-			for _, oldName := range evolution.RenameChain[:len(evolution.RenameChain)-1] {
-				columnEvolutionsByTable[tableName][strings.ToLower(oldName)] = strings.ToLower(evolution.FinalName)
-			}
-
-			e.logger.Info("Column evolution: %s.%s -> %s",
-				evolution.TableName, evolution.OriginalName, evolution.FinalName)
 		}
 	}
 
-	if len(columnEvolutionsByTable) > 0 {
-		e.logger.Info("Built column evolution map for %d table(s)", len(columnEvolutionsByTable))
+	if args := node.GetObjectWithArgs(); args != nil {
+		parts = parts[:0]
+		for _, item := range args.Objname {
+			if str := item.GetString_(); str != nil {
+				parts = append(parts, str.Sval)
+			}
+		}
 	}
 
-	return columnEvolutionsByTable
+	return strings.Join(parts, ".")
+}
+
+func normalizeFunctionIdentifier(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return ""
+	}
+
+	segments := strings.Split(trimmed, ".")
+	for i, segment := range segments {
+		clean := strings.TrimSpace(segment)
+		clean = strings.Trim(clean, `"`)
+		segments[i] = strings.ToLower(clean)
+	}
+
+	return strings.Join(segments, ".")
 }
 
 // optimizeIndexTypes uses column type information from the tracker to set appropriate index types
@@ -2289,10 +2895,14 @@ func (e *Engine) optimizeIndexTypes(sql string) string {
 		}
 
 		// Get actual column type from tracker
-		colInfo := e.tracker.GetColumnType(fullTableName, columnName)
+		// Prefer unqualified table name first because migrations commonly define tables
+		// without schema qualification (e.g., "profiles"), while index statements are often
+		// schema-qualified (e.g., "public.profiles"). Using unqualified metadata first avoids
+		// stale/mismatched type lookups across duplicated CREATE TABLE IF NOT EXISTS variants.
+		colInfo := e.tracker.GetColumnType(tableName, columnName)
 		if colInfo == nil {
-			// Try without schema prefix
-			colInfo = e.tracker.GetColumnType(tableName, columnName)
+			// Fallback to schema-qualified name
+			colInfo = e.tracker.GetColumnType(fullTableName, columnName)
 		}
 
 		if colInfo == nil {
@@ -2310,11 +2920,7 @@ func (e *Engine) optimizeIndexTypes(sql string) string {
 		var newAccessMethod string
 		var reason string
 
-		if colInfo.IsSpatial {
-			// Spatial types (point, geometry, geography) should use gist
-			newAccessMethod = "gist"
-			reason = "spatial type"
-		} else if colInfo.IsArray {
+		if colInfo.IsArray {
 			// Arrays can use GIN for array operations (containment, overlap)
 			// Arrays CANNOT use GiST without operator class
 			// Keep current access method if it's gin (likely correct for array operations)
@@ -2336,6 +2942,13 @@ func (e *Engine) optimizeIndexTypes(sql string) string {
 				e.logger.Debug("[INDEX-OPT] %s.%s: %s already correct for tsvector", fullTableName, columnName, currentMethod)
 				continue
 			}
+		} else if colInfo.IsSpatial {
+			// Do NOT force-rewrite spatial indexes from btree -> gist automatically.
+			// The source migration may intentionally use btree (or another method), and
+			// forcing gist can produce invalid SQL when table schemas drift across legacy
+			// CREATE TABLE IF NOT EXISTS variants.
+			e.logger.Debug("[INDEX-OPT] %s.%s: keeping %s for spatial type (no forced rewrite)", fullTableName, columnName, currentMethod)
+			continue
 		} else {
 			// Regular types: keep current access method
 			// Don't change unless there's a specific reason
@@ -2535,8 +3148,15 @@ func (e *Engine) streamParseAndTrack(ctx context.Context, dir string) error {
 func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int]string) error {
 	migrationFiles := make([]*performance.MigrationFile, 0, len(migrations))
 
-	// Convert migrations to MigrationFile format
-	for sequence, content := range migrations {
+	var sequences []int
+	for seq := range migrations {
+		sequences = append(sequences, seq)
+	}
+	sort.Ints(sequences)
+
+	// Stream process each migration in sequential order
+	for _, sequence := range sequences {
+		content := migrations[sequence]
 		migrationFile := &performance.MigrationFile{
 			Path:     fmt.Sprintf("migration_%d.sql", sequence),
 			Content:  []byte(content),
@@ -2613,8 +3233,16 @@ func (e *Engine) updatePhase(phase string) {
 
 // GetStats returns current squashing statistics
 func (e *Engine) GetStats() SquashStats {
+	if e == nil {
+		return SquashStats{}
+	}
+
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+
+	if e.stats == nil {
+		return SquashStats{}
+	}
 
 	stats := *e.stats
 
@@ -2644,7 +3272,7 @@ func (e *Engine) GetMemoryStats() performance.MemoryStats {
 }
 
 // OptimizedSquashForLargeDatasets provides a high-level interface for large migration sets
-func OptimizedSquashForLargeDatasets(cfg *config.Config, migrations map[int]string, memoryLimitMB int) (string, []string, error) {
+func OptimizedSquashForLargeDatasets(cfg *config.Config, migrations map[int]string, memoryLimitMB int) (*SquashResult, error) {
 	engineConfig := EngineConfig{
 		Config:              cfg,
 		EnableStreaming:     true,
@@ -2660,14 +3288,17 @@ func OptimizedSquashForLargeDatasets(cfg *config.Config, migrations map[int]stri
 		},
 	}
 
-	engine := NewEngine(engineConfig)
+	engine, err := NewEngine(engineConfig)
+	if err != nil {
+		return nil, err
+	}
 	defer engine.Close()
 
 	return engine.SquashStreaming(migrations)
 }
 
 // OptimizedSquashFromDirectory provides a high-level interface for directory processing
-func OptimizedSquashFromDirectory(cfg *config.Config, dir string, memoryLimitMB int) (string, []string, error) {
+func OptimizedSquashFromDirectory(cfg *config.Config, dir string, memoryLimitMB int) (*SquashResult, error) {
 	engineConfig := EngineConfig{
 		Config:              cfg,
 		EnableStreaming:     true,
@@ -2680,7 +3311,10 @@ func OptimizedSquashFromDirectory(cfg *config.Config, dir string, memoryLimitMB 
 		},
 	}
 
-	engine := NewEngine(engineConfig)
+	engine, err := NewEngine(engineConfig)
+	if err != nil {
+		return nil, err
+	}
 	defer engine.Close()
 
 	return engine.SquashFromDirectory(dir)

@@ -17,6 +17,10 @@ type MultipleCreateConsolidationRule struct{}
 
 // CanApply checks if the rule can be applied to the given lifecycle
 func (r *MultipleCreateConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool {
+	if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+		return false
+	}
+
 	createCount := 0
 	for _, event := range lifecycle.History {
 		if event.Operation == types.OpCreate {
@@ -26,11 +30,11 @@ func (r *MultipleCreateConsolidationRule) CanApply(lifecycle *tracking.ObjectLif
 
 	// Debug logging for profiles
 	if strings.ToLower(lifecycle.Name) == "profiles" {
-		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("DEBUG MultipleCreateConsolidationRule.CanApply: profiles (type=%s) has %d events total, %d CREATE operations", lifecycle.Type, len(lifecycle.History), createCount)
+		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Debug("profiles (type=%s) has %d events total, %d CREATE operations", lifecycle.Type, len(lifecycle.History), createCount)
 		for i, event := range lifecycle.History {
-			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  Event %d: Operation=%s (%v)", i, event.Operation, event.Operation)
+			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Debug("  Event %d: Operation=%s (%v)", i, event.Operation, event.Operation)
 		}
-		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  Returning %v (need createCount > 1)", createCount > 1)
+		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Debug("  Returning %v (need createCount > 1)", createCount > 1)
 	}
 
 	return createCount > 1
@@ -39,13 +43,32 @@ func (r *MultipleCreateConsolidationRule) CanApply(lifecycle *tracking.ObjectLif
 // Apply applies the consolidation rule to the given lifecycle
 func (r *MultipleCreateConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "MultipleCreateConsolidationRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "MultipleCreateConsolidationRule"})
 	}
 
 	// Collect all CREATE statements
+	// IMPORTANT: If there's a DROP in the history, only collect CREATEs AFTER the last DROP
+	// because DROP invalidates all previous CREATEs (they were dropped!)
 	var allCreateStmts []types.Statement
 	var alterStmts []types.Statement
-	for _, event := range lifecycle.History {
+
+	// Find the index of the last DROP operation (if any)
+	lastDropIndex := -1
+	for i, event := range lifecycle.History {
+		if event.Operation == types.OpDrop {
+			lastDropIndex = i
+		}
+	}
+
+	// Collect CREATEs and ALTERs, but only those AFTER the last DROP (if there was one)
+	startIndex := 0
+	if lastDropIndex >= 0 {
+		startIndex = lastDropIndex + 1
+		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("Found DROP at index %d for %s, only considering events after DROP", lastDropIndex, lifecycle.Name)
+	}
+
+	for i := startIndex; i < len(lifecycle.History); i++ {
+		event := lifecycle.History[i]
 		if event.Operation == types.OpCreate {
 			allCreateStmts = append(allCreateStmts, event.Statement)
 		} else if event.Operation == types.OpAlter && !event.HasDataOps {
@@ -56,25 +79,25 @@ func (r *MultipleCreateConsolidationRule) Apply(lifecycle *tracking.ObjectLifecy
 
 	// Safety check: if no CREATE statements found, this shouldn't happen due to CanApply check
 	if len(allCreateStmts) == 0 {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statements found in lifecycle", map[string]interface{}{"object": lifecycle.Name})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statements found in lifecycle", map[string]any{"object": lifecycle.Name})
 	}
 
 	// Debug logging for profiles and viewing_requests
 	tableName := strings.ToLower(lifecycle.Name)
 	if tableName == "profiles" || tableName == "viewing_requests" {
-		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("DEBUG MultipleCreateConsolidationRule.Apply: %s has %d CREATE statements and %d ALTER statements", lifecycle.Name, len(allCreateStmts), len(alterStmts))
+		utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Debug("%s has %d CREATE statements and %d ALTER statements", lifecycle.Name, len(allCreateStmts), len(alterStmts))
 		for i, stmt := range allCreateStmts {
 			if tableName == "profiles" {
 				hasCity := strings.Contains(strings.ToLower(stmt.SQL), "city")
 				hasAuthProvider := strings.Contains(strings.ToLower(stmt.SQL), "auth_provider")
 				columnCount := strings.Count(stmt.SQL, ",")
-				utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  CREATE %d: has 'city'=%v, 'auth_provider'=%v, columns~%d, SQL length=%d", i, hasCity, hasAuthProvider, columnCount, len(stmt.SQL))
+				utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Debug("  CREATE %d: has 'city'=%v, 'auth_provider'=%v, columns~%d, SQL length=%d", i, hasCity, hasAuthProvider, columnCount, len(stmt.SQL))
 			} else {
-				utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  CREATE %d: SQL length=%d, first 150 chars: %.150s", i, len(stmt.SQL), stmt.SQL)
+				utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Debug("  CREATE %d: SQL length=%d, first 150 chars: %.150s", i, len(stmt.SQL), stmt.SQL)
 			}
 		}
 		for i, stmt := range alterStmts {
-			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  ALTER %d: %.200s", i, stmt.SQL)
+			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Debug("  ALTER %d: %.200s", i, stmt.SQL)
 		}
 	}
 
@@ -86,9 +109,12 @@ func (r *MultipleCreateConsolidationRule) Apply(lifecycle *tracking.ObjectLifecy
 
 	// For tables with more than one CREATE, merge columns from all CREATE statements
 	if len(allCreateStmts) > 1 && lifecycle.Type == types.TypeTable {
-		consolidatedSQL = mergeMultipleCreateStatements(allCreateStmts, lifecycle.Name)
+		// FIXED: Use cumulative merge instead of last-one-wins for multiple CREATEs
+		// This handles cases where older migrations have columns (e.g. coordinates) that
+		// are missing from newer "snapshot" migrations, ensuring we don't drop valid columns.
+		consolidatedSQL = mergeCumulativeCreateStatements(allCreateStmts, lifecycle.Name)
 		if strings.ToLower(lifecycle.Name) == "profiles" {
-			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  Merged %d CREATE statements into unified schema", len(allCreateStmts))
+			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  Merged %d CREATE statements into unified schema (cumulative)", len(allCreateStmts))
 		}
 	}
 
@@ -170,6 +196,88 @@ func (r *MultipleCreateConsolidationRule) Risk() tracking.RiskLevel {
 	return tracking.RiskLevelLow
 }
 
+// mergeCumulativeCreateStatements merges multiple CREATE statements, accumulating columns from ALL statements.
+// This is different from mergeMultipleCreateStatements which only respects columns from the LAST statement.
+func mergeCumulativeCreateStatements(createStmts []types.Statement, tableName string) string {
+	if len(createStmts) == 0 {
+		return ""
+	}
+
+	// Start with the first statement as the effective baseline
+	effectiveStmt := createStmts[0]
+	utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info("  Starting with schema from CREATE statement 0 (Base)")
+
+	// Iterate through subsequent statements
+	for i := 1; i < len(createStmts); i++ {
+		stmt := createStmts[i]
+
+		isConditional := hasCreateTableIfNotExists(stmt.SQL)
+
+		if isConditional {
+			// IF NOT EXISTS: The statement does nothing if the table exists.
+			// Since we have a prior CREATE (effectiveStmt), the table exists.
+			// Thus, this statement is a no-op schem-wise and should NOT override the definition.
+			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info(
+				"  Skipping CREATE statement %d (IF NOT EXISTS type) - preserving prior effective schema", i)
+		} else {
+			// Hard CREATE: This implies the table is arguably being redefined forcibly
+			// or was dropped (though this loop usually runs on post-drop segments).
+			// We apply "Last Write Wins" logic for explicit hard creates.
+			utils.GetDefaultLogger().WithPrefix("MULTIPLE-CREATE").Info(
+				"  Overriding schema with CREATE statement %d (Hard CREATE detected)", i)
+			effectiveStmt = stmt
+		}
+	}
+
+	return effectiveStmt.SQL
+}
+
+func hasCreateTableIfNotExists(sql string) bool {
+	lower := strings.ToLower(sql)
+	idx := strings.Index(lower, "create")
+	if idx == -1 {
+		return false
+	}
+
+	pos := skipMultipleCreateWhitespace(lower, idx+len("create"))
+	if strings.HasPrefix(lower[pos:], "temp") {
+		pos = skipMultipleCreateWhitespace(lower, pos+len("temp"))
+	} else if strings.HasPrefix(lower[pos:], "temporary") {
+		pos = skipMultipleCreateWhitespace(lower, pos+len("temporary"))
+	} else if strings.HasPrefix(lower[pos:], "unlogged") {
+		pos = skipMultipleCreateWhitespace(lower, pos+len("unlogged"))
+	}
+
+	if !strings.HasPrefix(lower[pos:], "table") {
+		return false
+	}
+	pos = skipMultipleCreateWhitespace(lower, pos+len("table"))
+
+	if !strings.HasPrefix(lower[pos:], "if") {
+		return false
+	}
+
+	pos = skipMultipleCreateWhitespace(lower, pos+len("if"))
+	if !strings.HasPrefix(lower[pos:], "not") {
+		return false
+	}
+
+	pos = skipMultipleCreateWhitespace(lower, pos+len("not"))
+	return strings.HasPrefix(lower[pos:], "exists")
+}
+
+func skipMultipleCreateWhitespace(value string, pos int) int {
+	for pos < len(value) {
+		switch value[pos] {
+		case ' ', '\t', '\n', '\r', '\f', '\v':
+			pos++
+		default:
+			return pos
+		}
+	}
+	return pos
+}
+
 // Note: mergeMultipleCreateStatements is defined in drop_create_rule.go
 // and shared across multiple rules
 
@@ -181,10 +289,11 @@ func (r *MultipleCreateConsolidationRule) Risk() tracking.RiskLevel {
 // CREATE events for the table.
 //
 // Example:
-//   Migration 01: CREATE TABLE communities (...);
-//                 CREATE INDEX idx_creator_id ON communities (creator_id);
-//                 CREATE INDEX idx_type ON communities (type);
-//   Migration 02: CREATE TABLE communities (...); -- Different schema
+//
+//	Migration 01: CREATE TABLE communities (...);
+//	              CREATE INDEX idx_creator_id ON communities (creator_id);
+//	              CREATE INDEX idx_type ON communities (type);
+//	Migration 02: CREATE TABLE communities (...); -- Different schema
 //
 // Without this fix: Only 1 index survives (from last CREATE)
 // With this fix: All 3 indexes are preserved and deduplicated

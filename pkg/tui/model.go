@@ -38,6 +38,7 @@ func NewModel(migrationDir, configPath string) *Model {
 	m.views[ViewConfig] = views.NewConfigView(configPath)
 	m.views[ViewDependencyGraph] = views.NewDependencyGraphView(migrationDir)
 	m.views[ViewProgress] = views.NewProgressView(migrationDir, configPath)
+	m.views[ViewValidation] = views.NewValidationView()
 	m.views[ViewHelp] = views.NewHelpView()
 
 	// Start with dashboard
@@ -191,10 +192,7 @@ func (m *Model) renderStatusBar() string {
 
 	// Calculate padding
 	totalWidth := lipgloss.Width(leftSection) + lipgloss.Width(rightSection)
-	padding := m.width - totalWidth
-	if padding < 0 {
-		padding = 0
-	}
+	padding := max(m.width-totalWidth, 0)
 
 	statusContent := lipgloss.JoinHorizontal(
 		lipgloss.Left,
@@ -221,6 +219,8 @@ func (m *Model) getViewName(vt ViewType) string {
 		return "Dependency Graph"
 	case ViewProgress:
 		return "Progress"
+	case ViewValidation:
+		return "Validation"
 	case ViewHelp:
 		return "Help"
 	default:

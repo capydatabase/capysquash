@@ -1,0 +1,31 @@
+cases:
+  - name: breaking_drop_column
+    sql: "ALTER TABLE users DROP COLUMN legacy_name;"
+    expected_codes:
+      - "CSQ.BREAKING.DROP_COLUMN"
+
+  - name: breaking_rename_column
+    sql: "ALTER TABLE users RENAME COLUMN name TO display_name;"
+    expected_codes:
+      - "CSQ.BREAKING.RENAME_COLUMN"
+
+  - name: breaking_type_change
+    sql: "ALTER TABLE users ALTER COLUMN age TYPE BIGINT;"
+    expected_codes:
+      - "CSQ.BREAKING.TYPE_CHANGE"
+
+  - name: safety_missing_where
+    sql: "DELETE FROM users;"
+    expected_codes:
+      - "CSQ.SAFETY.MISSING_WHERE"
+
+  - name: unused_ignore_reported
+    sql: |
+      -- capysquash-ignore:CSQ.BREAKING.DROP_COLUMN
+      CREATE TABLE users (id BIGINT);
+    expected_codes:
+      - "CSQ.META.UNUSED_IGNORE_DIRECTIVE"
+
+  - name: valid_no_violations
+    sql: "CREATE TABLE users (id BIGINT PRIMARY KEY);"
+    expected_codes: []

@@ -5,6 +5,7 @@ package volatility
 import (
 	"strings"
 
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
@@ -26,8 +27,7 @@ func (vf *ASTVolatilityFixer) Fix(sql string) (string, error) {
 	// Parse the SQL into AST
 	parseResult, err := pg_query.Parse(sql)
 	if err != nil {
-		// If parsing fails, return original SQL (graceful degradation)
-		return sql, nil
+		return "", errors.New(errors.ErrorCodeInvalidSQL, errors.CategoryParsing, "failed to parse SQL for volatility fixing", map[string]any{"error": err.Error()})
 	}
 
 	// Track whether we made any changes
@@ -129,8 +129,8 @@ func addVolatilityToFunction(sql string, funcName string, volatility VolatilityT
 
 		// Check if this line starts the target function
 		if !functionStarted && strings.Contains(upperLine, "CREATE") &&
-		   strings.Contains(upperLine, "FUNCTION") &&
-		   containsFunctionName(line, funcName) {
+			strings.Contains(upperLine, "FUNCTION") &&
+			containsFunctionName(line, funcName) {
 			functionStarted = true
 			inFunction = true
 		}

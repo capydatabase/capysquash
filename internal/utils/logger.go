@@ -67,7 +67,7 @@ func (l *Logger) WithPrefix(prefix string) *Logger {
 }
 
 // log formats and writes a log message
-func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
+func (l *Logger) log(level LogLevel, format string, args ...any) {
 	if level < l.minLevel {
 		return
 	}
@@ -85,37 +85,34 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 		logLine = fmt.Sprintf("[%s] [%s] %s\n", timestamp, level.String(), message)
 	}
 
+	// Explicitly ignore error as we cannot escalate logging errors further
 	_, _ = l.output.Write([]byte(logLine))
-
-	// If fatal, exit
-	if level == LogLevelFatal {
-		os.Exit(1)
-	}
 }
 
 // Debug logs a debug message
-func (l *Logger) Debug(format string, args ...interface{}) {
+func (l *Logger) Debug(format string, args ...any) {
 	l.log(LogLevelDebug, format, args...)
 }
 
 // Info logs an info message
-func (l *Logger) Info(format string, args ...interface{}) {
+func (l *Logger) Info(format string, args ...any) {
 	l.log(LogLevelInfo, format, args...)
 }
 
 // Warn logs a warning message
-func (l *Logger) Warn(format string, args ...interface{}) {
+func (l *Logger) Warn(format string, args ...any) {
 	l.log(LogLevelWarn, format, args...)
 }
 
 // Error logs an error message
-func (l *Logger) Error(format string, args ...interface{}) {
+func (l *Logger) Error(format string, args ...any) {
 	l.log(LogLevelError, format, args...)
 }
 
-// Fatal logs a fatal message and exits
-func (l *Logger) Fatal(format string, args ...interface{}) {
-	l.log(LogLevelFatal, format, args...)
+// Fatal logs a fatal message
+// Deprecated: excessive process termination. Use Error instead and handle returns.
+func (l *Logger) Fatal(format string, args ...any) {
+	l.log(LogLevelError, format, args...)
 }
 
 // StandardLogger returns a stdlib log.Logger that writes to this logger

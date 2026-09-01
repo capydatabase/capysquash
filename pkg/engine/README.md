@@ -5,7 +5,7 @@ Use pgsquash as a Go library in your own applications.
 ## Installation
 
 ```bash
-go get github.com/CAPYSQUASH/pgsquash-engine
+go get github.com/capysquash/pgsquash-engine
 ```
 
 ## Quick Start
@@ -17,7 +17,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+    "github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {
@@ -28,7 +28,7 @@ func main() {
     }
 
     fmt.Printf("Squashed %d files\n", result.FilesProcessed)
-    fmt.Println(result.SQL)
+    fmt.Println(result.BaselineSQL)
 }
 ```
 
@@ -44,7 +44,6 @@ type Config struct {
     OutputFormat    OutputFormat  // FormatSingle, FormatSplit
     EnableStreaming bool          // Enable memory-efficient processing
     MemoryLimitMB   int          // Memory limit for streaming (default: 256)
-    EnableAI        bool          // Enable AI analysis (requires API keys)
     Verbose         bool          // Enable detailed logging
 }
 ```
@@ -66,7 +65,6 @@ config := engine.DefaultConfig()
 // OutputFormat: FormatSingle
 // EnableStreaming: false
 // MemoryLimitMB: 256
-// EnableAI: false
 // Verbose: false
 ```
 
@@ -77,10 +75,12 @@ config := engine.DefaultConfig()
 Consolidates all `.sql` files in a directory.
 
 **Parameters:**
+
 - `directory` - Path to migrations directory
 - `config` - Configuration (use `nil` for defaults)
 
 **Returns:**
+
 - `*SquashResult` - Results with SQL, warnings, and stats
 - `error` - Error if squashing failed
 
@@ -95,7 +95,7 @@ if err != nil {
     log.Fatal(err)
 }
 
-fmt.Println(result.SQL)
+fmt.Println(result.BaselineSQL)
 fmt.Printf("Processed %d files\n", result.FilesProcessed)
 fmt.Printf("Warnings: %v\n", result.Warnings)
 ```
@@ -105,6 +105,7 @@ fmt.Printf("Warnings: %v\n", result.Warnings)
 Consolidates specific migration files.
 
 **Parameters:**
+
 - `migrations` - Map of migration order to file paths
 - `config` - Configuration (use `nil` for defaults)
 
@@ -125,10 +126,12 @@ result, err := engine.SquashFiles(migrations, nil)
 Analyzes migrations without making modifications.
 
 **Parameters:**
+
 - `directory` - Path to migrations directory
 - `config` - Configuration (use `nil` for defaults)
 
 **Returns:**
+
 - `*AnalysisResult` - Analysis with redundancies, stats, and warnings
 - `error` - Error if analysis failed
 
@@ -155,7 +158,7 @@ for _, r := range analysis.Redundancies {
 
 ```go
 type SquashResult struct {
-    SQL                 string   // Consolidated SQL
+    BaselineSQL         string   // Consolidated SQL
     Warnings            []string // Warnings generated
     FilesProcessed      int      // Number of files processed
     ObjectsConsolidated int      // Number of objects consolidated
@@ -199,7 +202,7 @@ import (
     "log"
     "os"
 
-    "github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+    "github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {
@@ -209,7 +212,7 @@ func main() {
     }
 
     // Write to file
-    err = os.WriteFile("squashed.sql", []byte(result.SQL), 0644)
+    err = os.WriteFile("squashed.sql", []byte(result.BaselineSQL), 0644)
     if err != nil {
         log.Fatal(err)
     }
@@ -227,7 +230,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+    "github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {
@@ -235,7 +238,6 @@ func main() {
         SafetyLevel:     engine.Conservative,
         OutputFormat:    engine.FormatSingle,
         EnableStreaming: false,
-        EnableAI:        true,
         Verbose:         true,
     }
 
@@ -244,7 +246,7 @@ func main() {
         log.Fatal(err)
     }
 
-    fmt.Println(result.SQL)
+    fmt.Println(result.BaselineSQL)
 
     if len(result.Warnings) > 0 {
         fmt.Println("\nWarnings:")
@@ -264,7 +266,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+    "github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {
@@ -294,7 +296,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+    "github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {
@@ -331,7 +333,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+    "github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {
@@ -352,7 +354,7 @@ func main() {
         log.Fatal(err)
     }
 
-    fmt.Println(result.SQL)
+    fmt.Println(result.BaselineSQL)
 }
 ```
 
@@ -366,7 +368,7 @@ import (
     "log"
     "os"
 
-    "github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+    "github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {
@@ -391,7 +393,7 @@ func main() {
     }
 
     // Write output
-    err = os.WriteFile("squashed/migration.sql", []byte(result.SQL), 0644)
+    err = os.WriteFile("squashed/migration.sql", []byte(result.BaselineSQL), 0644)
     if err != nil {
         log.Fatal(err)
     }
@@ -399,14 +401,6 @@ func main() {
     fmt.Printf("✅ CI passed - %d files squashed\n", result.FilesProcessed)
 }
 ```
-
-## Environment Variables
-
-When `EnableAI: true`, pgsquash requires AI provider credentials:
-
-- `ANTHROPIC_API_KEY` - For Claude AI
-- `OPENAI_API_KEY` - For OpenAI GPT
-- `AZURE_OPENAI_ENDPOINT` - For Azure OpenAI
 
 ## Error Handling
 
@@ -456,7 +450,6 @@ config := &engine.Config{
 ```go
 config := &engine.Config{
     SafetyLevel: engine.Conservative, // Careful consolidation
-    EnableAI:    false,                // Faster, no API calls
 }
 ```
 
@@ -476,13 +469,13 @@ go engine.SquashFiles(migrations2, nil)
 
 ## Comparison: Library vs CLI
 
-| Feature | Library API | CLI |
-|---------|-------------|-----|
-| **Use Case** | Programmatic integration | Command-line usage |
-| **Configuration** | Go structs | JSON config file |
-| **Output** | In-memory results | Files on disk |
-| **Integration** | Import as package | Shell scripts |
-| **Flexibility** | Full Go control | Command flags |
+| Feature           | Library API              | CLI                |
+| ----------------- | ------------------------ | ------------------ |
+| **Use Case**      | Programmatic integration | Command-line usage |
+| **Configuration** | Go structs               | JSON config file   |
+| **Output**        | In-memory results        | Files on disk      |
+| **Integration**   | Import as package        | Shell scripts      |
+| **Flexibility**   | Full Go control          | Command flags      |
 
 ## Next Steps
 
@@ -493,5 +486,5 @@ go engine.SquashFiles(migrations2, nil)
 ## Support
 
 - 📖 [Full Documentation](https://capysquash.dev/docs)
-- 🐛 [Report Issues](https://github.com/CAPYSQUASH/pgsquash-engine/issues)
-- 💬 [Discussions](https://github.com/CAPYSQUASH/pgsquash-engine/discussions)
+- 🐛 [Report Issues](https://github.com/capysquash/pgsquash-engine/issues)
+- 💬 [Discussions](https://github.com/capysquash/pgsquash-engine/discussions)

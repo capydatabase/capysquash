@@ -1,4 +1,5 @@
 # Test fixture: fk_cycles
+
 # Tests circular foreign key detection and resolution
 
 This fixture tests how pgsquash handles circular foreign key dependencies:
@@ -9,9 +10,9 @@ This fixture tests how pgsquash handles circular foreign key dependencies:
 
 ## Original migrations:
 
-001_create_posts.sql: Creates posts table
-002_create_comments.sql: Creates comments table with FK to posts
-003_create_post_reactions.sql: Creates post_reactions table with FK to posts and comments
+001_create_posts.sql: Creates posts table.
+002_create_comments.sql: Creates comments table with FK to posts.
+003_create_post_reactions.sql: Creates post_reactions table with FK to posts and comments.
 004_add_user_mention.sql: Creates user_mentions table with FKs to multiple tables (creates cycle)
 
 ## Expected behavior:

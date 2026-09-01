@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 
@@ -11,14 +12,14 @@ import (
 
 // RuleMetadata provides descriptive information about a consolidation rule
 type RuleMetadata struct {
-	Name        string   // Unique rule name (e.g., "create_alter_consolidation")
-	Description string   // Human-readable description
+	Name        string       // Unique rule name (e.g., "create_alter_consolidation")
+	Description string       // Human-readable description
 	Category    RuleCategory // Rule category for organization
-	Priority    int      // Execution priority (higher = executed first)
-	Provider    string   // Provider name (e.g., "core", "supabase", "clerk")
-	Tags        []string // Tags for filtering (e.g., "aggressive", "safe", "auth")
-	Enabled     bool     // Whether rule is enabled
-	Version     string   // Rule version for compatibility
+	Priority    int          // Execution priority (higher = executed first)
+	Provider    string       // Provider name (e.g., "core", "supabase", "clerk")
+	Tags        []string     // Tags for filtering (e.g., "aggressive", "safe", "auth")
+	Enabled     bool         // Whether rule is enabled
+	Version     string       // Rule version for compatibility
 }
 
 // RuleCategory represents the category of a consolidation rule
@@ -43,11 +44,11 @@ type RegisteredRule struct {
 
 // RuleRegistry manages dynamic rule registration with priorities and filtering
 type RuleRegistry struct {
-	mu             sync.RWMutex
-	rules          map[string]*RegisteredRule // Key: rule name
+	mu              sync.RWMutex
+	rules           map[string]*RegisteredRule // Key: rule name
 	rulesByCategory map[RuleCategory][]*RegisteredRule
 	rulesByProvider map[string][]*RegisteredRule
-	conflictPolicy ConflictPolicy
+	conflictPolicy  ConflictPolicy
 }
 
 // ConflictPolicy defines how to handle rule conflicts
@@ -351,11 +352,11 @@ func (r *RuleRegistry) GetStats() RegistryStats {
 	defer r.mu.RUnlock()
 
 	stats := RegistryStats{
-		TotalRules:       len(r.rules),
-		EnabledRules:     0,
-		DisabledRules:    0,
-		RulesByCategory:  make(map[RuleCategory]int),
-		RulesByProvider:  make(map[string]int),
+		TotalRules:      len(r.rules),
+		EnabledRules:    0,
+		DisabledRules:   0,
+		RulesByCategory: make(map[RuleCategory]int),
+		RulesByProvider: make(map[string]int),
 	}
 
 	for _, registered := range r.rules {
@@ -403,12 +404,7 @@ func (r *RuleRegistry) removeFromSlice(slice []*RegisteredRule, target *Register
 }
 
 func (r *RuleRegistry) hasTag(tags []string, tag string) bool {
-	for _, t := range tags {
-		if t == tag {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tags, tag)
 }
 
 // RegisterCoreRules registers all core consolidation rules with metadata
@@ -496,19 +492,6 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 			},
 		},
 		{
-			rule: &DeadCodeRemovalRule{},
-			metadata: RuleMetadata{
-				Name:        "dead_code_removal",
-				Description: "Removes unreferenced functions and objects",
-				Category:    CategoryDeadCode,
-				Priority:    70,
-				Provider:    "core",
-				Tags:        []string{"aggressive", "cleanup"},
-				Enabled:     false, // Disabled by default (aggressive)
-				Version:     "0.9.7",
-			},
-		},
-		{
 			rule: &EnumDeduplicationRule{},
 			metadata: RuleMetadata{
 				Name:        "enum_deduplication",
@@ -530,6 +513,19 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Priority:    65,
 				Provider:    "core",
 				Tags:        []string{"standard", "schema"},
+				Enabled:     true,
+				Version:     "0.9.7",
+			},
+		},
+		{
+			rule: NewAdvancedColumnLifecycleRule(),
+			metadata: RuleMetadata{
+				Name:        "advanced_column_lifecycle",
+				Description: "Handles complex column evolution patterns with renames, drops, and data type changes",
+				Category:    CategoryTableOps,
+				Priority:    60, // Between ColumnEvolutionRule (65) and DOBlockEnumTypeRule (55)
+				Provider:    "core",
+				Tags:        []string{"standard", "schema", "column-evolution"},
 				Enabled:     true,
 				Version:     "0.9.7",
 			},
@@ -615,6 +611,13 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 	}
 
 	for _, cr := range coreRules {
+		// Core rules are registered once per process into the global registry.
+		// Every ConsolidationRuleEngine construction calls this function, so
+		// re-registration of an already-present core rule is a no-op instead of
+		// a conflict error (which used to poison every engine after the first).
+		if _, err := registry.GetRule(cr.metadata.Name); err == nil {
+			continue
+		}
 		if err := registry.Register(cr.rule, cr.metadata); err != nil {
 			return errors.NewError(
 				errors.ErrorCodeConsolidationFailed,

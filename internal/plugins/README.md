@@ -53,17 +53,25 @@ Result: Clerk active, Supabase excluded
 No configuration required - plugins detect themselves:
 
 ```bash
+
 # Prisma project
+
 ./pgsquash squash prisma/migrations/*/migration.sql
+
 # [plugins] Detected: prisma
 
 # Drizzle project
+
 ./pgsquash squash drizzle/*/migration.sql
+
 # [plugins] Detected: drizzle
 
 # Clerk + Prisma project
+
 ./pgsquash squash migrations/*.sql
+
 # [plugins] Detected: clerk, prisma
+
 ```
 
 ---
@@ -227,25 +235,35 @@ CREATE TABLE "products" (
 ```
 internal/plugins/
 ├── plugin.go             # Plugin interface (12 lifecycle hooks)
+
 ├── registry.go           # Global registry with auto-discovery
+
 ├── README.md             # This file
+
 │
 ├── clerk/                # Clerk authentication
+
 │   ├── clerk.go          # Detection, enrichment, validation
+
 │   ├── consolidation.go  # Consolidation rules
+
 │   └── transformations.go # SQL transformations
+
 │
 ├── supabase/             # Supabase Platform
+
 │   ├── supabase.go
 │   ├── consolidation.go
 │   └── transformations.go
 │
 ├── prisma/               # Prisma ORM
+
 │   ├── prisma.go
 │   ├── consolidation.go
 │   └── transformations.go
 │
 └── drizzle/              # Drizzle ORM
+
     ├── drizzle.go
     ├── consolidation.go
     └── transformations.go
@@ -316,31 +334,45 @@ internal/plugins/
 
 ```bash
 ./pgsquash --version
+
 # [plugins] Registered plugin: clerk (priority: 95)
+
 # [plugins] Registered plugin: supabase (priority: 90)
+
 # [plugins] Registered plugin: prisma (priority: 75)
+
 # [plugins] Registered plugin: drizzle (priority: 75)
+
 ```
 
 ### Auto-Detection (Recommended)
 
 ```bash
+
 # Plugins detect automatically
+
 ./pgsquash squash migrations/*.sql
 
 # With verbose logging
+
 ./pgsquash squash migrations/*.sql --config pgsquash.config.json
+
 # (set plugins.verbose: true in config)
+
 ```
 
 ### Test Detection
 
 ```bash
+
 # Create test migration with Prisma pattern
+
 echo "CREATE TABLE _prisma_migrations (...)" > test.sql
 
 ./pgsquash analyze test.sql --verbose
+
 # [plugins] Detected: prisma
+
 ```
 
 ---
@@ -361,8 +393,8 @@ package myservice
 
 import (
     "context"
-    "github.com/CAPYSQUASH/pgsquash-engine/internal/plugins"
-    "github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+    "github.com/capysquash/pgsquash-engine/internal/plugins"
+    "github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 type MyServicePlugin struct {
@@ -425,16 +457,22 @@ func (p *MyServicePlugin) ValidateSchema(ctx context.Context, db *sql.DB) error 
 
 ### Step 3: Register Plugin
 
-```go
-// cmd/pgsquash/main.go
-import "github.com/CAPYSQUASH/pgsquash-engine/internal/plugins/myservice"
+Add the plugin to `builtinPlugins()` in `pkg/plugins/detection.go`. That list
+is the single source of truth for built-in plugins — `plugins.RegisterDefault()`
+registers from it, and the public detection/compatibility APIs derive from it:
 
-func registerPlugins() {
-    plugins.Register(clerk.NewClerkPlugin())
-    plugins.Register(supabase.NewSupabasePlugin())
-    plugins.Register(prisma.NewPrismaPlugin())
-    plugins.Register(drizzle.NewDrizzlePlugin())
-    plugins.Register(myservice.NewMyServicePlugin())  // ← Add here
+```go
+// pkg/plugins/detection.go
+import "github.com/capysquash/pgsquash-engine/internal/plugins/myservice"
+
+func builtinPlugins() []internal_plugins.Plugin {
+    return []internal_plugins.Plugin{
+        clerk.NewClerkPlugin(),
+        supabase.NewSupabasePlugin(),
+        prisma.NewPrismaPlugin(),
+        drizzle.NewDrizzlePlugin(),
+        myservice.NewMyServicePlugin(), // ← Add here
+    }
 }
 ```
 
@@ -443,6 +481,7 @@ func registerPlugins() {
 ```bash
 go build -o pgsquash cmd/pgsquash/main.go
 ./pgsquash --version  # Should show your plugin
+
 ./pgsquash analyze test-migrations/*.sql --verbose
 ```
 
@@ -453,29 +492,46 @@ go build -o pgsquash cmd/pgsquash/main.go
 ### ✅ Completed (v0.9.7)
 
 - [x] **Core Infrastructure**
-  - [x] Plugin interface (12 lifecycle hooks)
-  - [x] Global registry with auto-discovery
-  - [x] Priority-based conflict resolution
-  - [x] Lazy initialization
-  - [x] Shared types package (import cycle resolution)
+
+- [x] Plugin interface (12 lifecycle hooks)
+
+- [x] Global registry with auto-discovery
+
+- [x] Priority-based conflict resolution
+
+- [x] Lazy initialization
+
+- [x] Shared types package (import cycle resolution)
 
 - [x] **Integration Points**
-  - [x] Parser integration (statement enrichment)
-  - [x] Transformer integration (pre-parse transformations)
-  - [x] Validator integration (compatibility layers)
-  - [x] Squasher integration (consolidation rules)
-  - [x] Main registration
+
+- [x] Parser integration (statement enrichment)
+
+- [x] Transformer integration (pre-parse transformations)
+
+- [x] Validator integration (compatibility layers)
+
+- [x] Squasher integration (consolidation rules)
+
+- [x] Main registration
 
 - [x] **Auth Plugins** (2/4)
-  - [x] Clerk (JWT v2, organization claims)
-  - [x] Supabase (auth.uid(), RLS, storage)
-  - [ ] Auth0 (enterprise RBAC)
-  - [ ] NextAuth (Next.js adapters)
+
+- [x] Clerk (JWT v2, organization claims)
+
+- [x] Supabase (auth.uid(), RLS, storage)
+
+- [ ] Auth0 (enterprise RBAC)
+
+- [ ] NextAuth (Next.js adapters)
 
 - [x] **ORM Plugins** (2/3)
-  - [x] Prisma (migration metadata, enums)
-  - [x] Drizzle (IDENTITY columns, generated)
-  - [ ] TypeORM (decorators, entities)
+
+- [x] Prisma (migration metadata, enums)
+
+- [x] Drizzle (IDENTITY columns, generated)
+
+- [ ] TypeORM (decorators, entities)
 
 ### 📋 Planned (Future Phases)
 
@@ -513,7 +569,7 @@ Before: parser → plugins → parser (CYCLE!)
 After:  parser → types ← plugins (NO CYCLE!)
 ```
 
-Implementation: `internal/types/parser_types.go`
+**Implementation:** `internal/types/parser_types.go`
 
 ### Type Aliases for Backward Compatibility
 
@@ -589,6 +645,6 @@ func TestMyPluginWorkflow(t *testing.T) {
 
 ---
 
-_Last Updated: 2025-10-06_
-_Version: 0.9.7_
-_Plugins: 4 production-ready (Clerk, Supabase, Prisma, Drizzle)_
+_Last Updated: 2025-10-06_.
+_Version: 0.9.7_.
+_Plugins: 4 production-ready (Clerk, Supabase, Prisma, Drizzle)_.

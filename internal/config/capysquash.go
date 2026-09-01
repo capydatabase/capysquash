@@ -42,22 +42,22 @@ type CapySquashConfig struct {
 
 // PRCommentConfig configures how PR comments are formatted and posted
 type PRCommentConfig struct {
-	Enabled              bool `yaml:"enabled" json:"enabled"`                             // Post comments on PRs
-	UpdateExisting       bool `yaml:"update_existing" json:"update_existing"`             // Update existing comment vs create new
-	IncludeStats         bool `yaml:"include_stats" json:"include_stats"`                 // Include file reduction stats
-	IncludeWarnings      bool `yaml:"include_warnings" json:"include_warnings"`           // Include warnings section
+	Enabled                bool `yaml:"enabled" json:"enabled"`                                 // Post comments on PRs
+	UpdateExisting         bool `yaml:"update_existing" json:"update_existing"`                 // Update existing comment vs create new
+	IncludeStats           bool `yaml:"include_stats" json:"include_stats"`                     // Include file reduction stats
+	IncludeWarnings        bool `yaml:"include_warnings" json:"include_warnings"`               // Include warnings section
 	IncludeRecommendations bool `yaml:"include_recommendations" json:"include_recommendations"` // Include actionable recommendations
 }
 
 // ChecksConfig configures pass/fail thresholds for GitHub checks
 type ChecksConfig struct {
-	MaxWarnings           int  `yaml:"max_warnings" json:"max_warnings"`                       // Fail PR if warnings exceed this
-	FailOnCritical        bool `yaml:"fail_on_critical" json:"fail_on_critical"`               // Fail PR if critical warnings found
-	FailOnWarnings        bool `yaml:"fail_on_warnings" json:"fail_on_warnings"`               // Fail on any warnings
-	FailOnDataLoss        bool `yaml:"fail_on_data_loss" json:"fail_on_data_loss"`             // Fail on data loss operations
-	MinReductionPercent   int  `yaml:"min_reduction_percent" json:"min_reduction_percent"`     // Require minimum file reduction percentage
-	RequireOptimization   bool `yaml:"require_optimization" json:"require_optimization"`       // Fail if no migrations are optimized
-	RequiredIndexes       []RequiredIndex `yaml:"required_indexes" json:"required_indexes"` // Require specific indexes
+	MaxWarnings         int             `yaml:"max_warnings" json:"max_warnings"`                   // Fail PR if warnings exceed this
+	FailOnCritical      bool            `yaml:"fail_on_critical" json:"fail_on_critical"`           // Fail PR if critical warnings found
+	FailOnWarnings      bool            `yaml:"fail_on_warnings" json:"fail_on_warnings"`           // Fail on any warnings
+	FailOnDataLoss      bool            `yaml:"fail_on_data_loss" json:"fail_on_data_loss"`         // Fail on data loss operations
+	MinReductionPercent int             `yaml:"min_reduction_percent" json:"min_reduction_percent"` // Require minimum file reduction percentage
+	RequireOptimization bool            `yaml:"require_optimization" json:"require_optimization"`   // Fail if no migrations are optimized
+	RequiredIndexes     []RequiredIndex `yaml:"required_indexes" json:"required_indexes"`           // Require specific indexes
 }
 
 // RequiredIndex specifies an index that must exist
@@ -74,9 +74,9 @@ type NotificationsConfig struct {
 
 // AutoApplyConfig configures automatic application of optimizations
 type AutoApplyConfig struct {
-	Enabled            bool     `yaml:"enabled" json:"enabled"`                           // Enable auto-apply
-	Branches           []string `yaml:"branches" json:"branches"`                         // Branches to auto-apply on
-	ExcludeBranches    []string `yaml:"exclude_branches" json:"exclude_branches"`         // Branches to never auto-apply
+	Enabled             bool     `yaml:"enabled" json:"enabled"`                             // Enable auto-apply
+	Branches            []string `yaml:"branches" json:"branches"`                           // Branches to auto-apply on
+	ExcludeBranches     []string `yaml:"exclude_branches" json:"exclude_branches"`           // Branches to never auto-apply
 	RequireApprovalFrom []string `yaml:"require_approval_from" json:"require_approval_from"` // Require approval from users
 }
 
@@ -89,7 +89,7 @@ type ProjectConfig struct {
 
 // BranchConfig configures branch-specific settings
 type BranchConfig struct {
-	SafetyLevel    string `yaml:"safety_level" json:"safety_level"`       // Safety level for this branch
+	SafetyLevel    string `yaml:"safety_level" json:"safety_level"`         // Safety level for this branch
 	FailOnWarnings bool   `yaml:"fail_on_warnings" json:"fail_on_warnings"` // Fail on warnings for this branch
 }
 
@@ -109,10 +109,10 @@ func DefaultCapySquashConfig() *CapySquashConfig {
 			"**/*_rollback.sql",
 		},
 		PRComment: PRCommentConfig{
-			Enabled:              true,
-			UpdateExisting:       true,
-			IncludeStats:         true,
-			IncludeWarnings:      true,
+			Enabled:                true,
+			UpdateExisting:         true,
+			IncludeStats:           true,
+			IncludeWarnings:        true,
 			IncludeRecommendations: true,
 		},
 		Checks: ChecksConfig{
@@ -129,9 +129,9 @@ func DefaultCapySquashConfig() *CapySquashConfig {
 			SlackChannel: "",
 		},
 		AutoApply: AutoApplyConfig{
-			Enabled:            false,
-			Branches:           []string{},
-			ExcludeBranches:    []string{"main", "master", "production"},
+			Enabled:             false,
+			Branches:            []string{},
+			ExcludeBranches:     []string{"main", "master", "production"},
 			RequireApprovalFrom: []string{},
 		},
 		Projects: []ProjectConfig{},

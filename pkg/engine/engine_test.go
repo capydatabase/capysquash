@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +10,17 @@ import (
 	"testing"
 	"time"
 )
+
+func TestEngineHonorsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	config := DefaultConfig()
+	config.Context = ctx
+	_, err := SquashFiles(map[int]string{1: "CREATE TABLE users (id bigint PRIMARY KEY);"}, config)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
 
 func TestNewEngine(t *testing.T) {
 	tests := []struct {
@@ -51,7 +64,7 @@ func TestNewEngine(t *testing.T) {
 			config: &Config{
 				SafetyLevel:         Standard,
 				EnableBackup:        true,
-				BackupPath:          "./test-backups",
+				BackupPath:          t.TempDir(),
 				BackupRetentionDays: 7,
 			},
 			wantErr: false,
@@ -61,7 +74,7 @@ func TestNewEngine(t *testing.T) {
 			config: &Config{
 				SafetyLevel:    Standard,
 				EnableRollback: true,
-				RollbackPath:   "./test-rollbacks",
+				RollbackPath:   t.TempDir(),
 			},
 			wantErr: false,
 		},
@@ -164,12 +177,12 @@ func TestEngine_SquashFiles(t *testing.T) {
 					t.Errorf("FilesProcessed = %d, want %d", result.FilesProcessed, len(tt.migrations))
 				}
 
-				if result.SQL == "" && result.BaselineSQL == "" {
+				if result.BaselineSQL == "" {
 					t.Error("SquashFiles() returned empty SQL")
 				}
 
-				if tt.checkSQL != nil && result.SQL != "" && !tt.checkSQL(result.SQL) {
-					t.Errorf("SquashFiles() SQL validation failed. Got:\n%s", result.SQL)
+				if tt.checkSQL != nil && result.BaselineSQL != "" && !tt.checkSQL(result.BaselineSQL) {
+					t.Errorf("SquashFiles() SQL validation failed. Got:\n%s", result.BaselineSQL)
 				}
 			}
 		})
@@ -345,7 +358,7 @@ func TestEngine_GetResult(t *testing.T) {
 	// After squashing attempt, check if result is populated
 	result := eng.GetResult()
 	if result != nil {
-		if result.SQL == "" && result.BaselineSQL == "" {
+		if result.BaselineSQL == "" {
 			t.Error("GetResult() returned result but SQL is empty")
 		}
 		t.Logf("GetResult() successfully returned result with %d files processed", result.FilesProcessed)
@@ -543,7 +556,6 @@ func TestEngine_GetSafetyLevel(t *testing.T) {
 		{"conservative", Conservative},
 		{"standard", Standard},
 		{"aggressive", Aggressive},
-		{"paranoid", Paranoid},
 	}
 
 	for _, tt := range tests {
@@ -561,6 +573,19 @@ func TestEngine_GetSafetyLevel(t *testing.T) {
 				t.Errorf("GetSafetyLevel() = %v, want %v", got, tt.safetyLevel)
 			}
 		})
+	}
+}
+
+func TestEngine_ParanoidRequiresDSN(t *testing.T) {
+	// Paranoid is documented as "requires DB": constructing an engine without
+	// PROD_DB_DSN must fail closed instead of degrading to a simulated mode.
+	t.Setenv("PROD_DB_DSN", "")
+
+	config := DefaultConfig()
+	config.SafetyLevel = Paranoid
+
+	if _, err := NewEngine(config); err == nil {
+		t.Fatal("NewEngine() with paranoid safety level and no PROD_DB_DSN should fail")
 	}
 }
 

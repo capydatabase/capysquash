@@ -7,36 +7,50 @@ For complete development environment setup, use the root docker-compose.yml file
 ### Core Development
 
 ```bash
+
 # From project root
+
 cd ../..
 docker compose up -d
 
 # Services: pgsquash + postgres-primary
+
 # RAM: ~500MB
+
 ```
 
 ### With Multi-Version Testing
 
 ```bash
+
 # From project root
+
 cd ../..
 docker compose -f docker-compose.yml -f docker-compose.testing.yml up -d
 
 # Services: core + PostgreSQL 17, 15, 13
+
 # RAM: ~1.5GB
+
 ```
 
 ### With Development Tools
 
 ```bash
+
 # From project root
+
 cd ../..
 docker compose -f docker-compose.yml -f docker-compose.tools.yml up -d
 
 # Services: core + pgAdmin + Filebrowser
+
 # RAM: ~800MB
+
 # Access pgAdmin: http://localhost:5050
+
 # Access Filebrowser: http://localhost:8081
+
 ```
 
 ## Alternative: Simplified Dev Compose
@@ -44,11 +58,15 @@ docker compose -f docker-compose.yml -f docker-compose.tools.yml up -d
 This directory contains `full-stack.yml` - a simplified alternative to the root compose files:
 
 ```bash
+
 # From this directory
+
 docker compose -f full-stack.yml up -d
 
 # Services: pgsquash + postgres + pgadmin (with profile)
+
 # RAM: ~500MB
+
 ```
 
 ## Documentation
@@ -76,35 +94,49 @@ nano .env
 ### Local Development
 
 ```bash
+
 # Core services only
+
 docker compose up -d
 
 # With pgAdmin for database management
+
 docker compose -f docker-compose.yml -f docker-compose.tools.yml up -d
 ```
 
 ### Testing
 
 ```bash
+
 # Multi-version PostgreSQL testing
+
 docker compose -f docker-compose.yml -f docker-compose.testing.yml up -d
 
 # Run validation tests
+
 docker compose exec pgsquash pgsquash validate /app/migrations/*.sql
 ```
 
 ### Full Stack
 
 ```bash
+
 # All services (core + testing + tools)
+
 docker compose -f docker-compose.yml -f docker-compose.testing.yml -f docker-compose.tools.yml up -d
 
 # Services: 7 total
+
 # - pgsquash
+
 # - postgres-primary
+
 # - postgres-17, postgres-15, postgres-13
+
 # - pgAdmin
+
 # - Filebrowser
+
 ```
 
 ## See Also

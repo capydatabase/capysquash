@@ -20,6 +20,14 @@ func (r *ConditionalSchemaRule) CanApply(lifecycle *tracking.ObjectLifecycle) bo
 	conditionalOps := 0
 	createOps := 0
 
+	// CRITICAL FIX: If the object is ultimately DROPPED (last event is OpDrop),
+	// we must NOT apply this rule. Using this rule would consolidate intermediate
+	// conditional logic into a "creation" (or keep it), ignoring the final deletion.
+	// We want the Engine-level dropped-object skip to handle the final DROP.
+	if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+		return false
+	}
+
 	for _, event := range lifecycle.History {
 		sql := strings.ToUpper(event.Statement.SQL)
 		if strings.Contains(sql, "IF NOT EXISTS") ||
@@ -39,7 +47,7 @@ func (r *ConditionalSchemaRule) CanApply(lifecycle *tracking.ObjectLifecycle) bo
 // Apply applies the consolidation rule to the given lifecycle
 func (r *ConditionalSchemaRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "ConditionalSchemaRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "ConditionalSchemaRule"})
 	}
 
 	// Analyze conditional operations and determine final desired state
@@ -58,6 +66,14 @@ func (r *ConditionalSchemaRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 
 	// Generate consolidated conditional statement
 	consolidatedSQL := r.generateConditionalSQL(lifecycle, finalState)
+
+	if consolidatedSQL == "" {
+		// If explicit empty result is returned (e.g. Created then Dropped), return nil to allow engine to skip this object
+		// Rules returning nil allow the engine to proceed to the default preservation path.
+		// Since GetFinalState() returns nil for dropped objects, the default preservation path will also produce nothing,
+		// correctly removing the object.
+		return nil, nil
+	}
 
 	result := &tracking.ConsolidationResult{
 		OriginalStatements: originalStmts,
@@ -88,12 +104,14 @@ type ConditionalState struct {
 	UseReplace   bool
 	FinalSQL     string
 	Dependencies []string
+	WasCreated   bool
 }
 
 func (r *ConditionalSchemaRule) analyzeFinalConditionalState(lifecycle *tracking.ObjectLifecycle) *ConditionalState {
 	state := &ConditionalState{
 		ShouldExist: true, // Default assumption
 		UseReplace:  false,
+		WasCreated:  false,
 	}
 
 	// Track the final intention through the lifecycle
@@ -104,6 +122,7 @@ func (r *ConditionalSchemaRule) analyzeFinalConditionalState(lifecycle *tracking
 		case types.OpCreate:
 			state.ShouldExist = true
 			state.FinalSQL = event.Statement.SQL
+			state.WasCreated = true
 
 			// Prefer CREATE OR REPLACE over CREATE IF NOT EXISTS
 			if strings.Contains(sql, "CREATE OR REPLACE") {
@@ -132,6 +151,11 @@ func (r *ConditionalSchemaRule) analyzeFinalConditionalState(lifecycle *tracking
 
 func (r *ConditionalSchemaRule) generateConditionalSQL(lifecycle *tracking.ObjectLifecycle, state *ConditionalState) string {
 	if !state.ShouldExist {
+		// If the object was created and then dropped in this lifecycle, it shouldn't produce any output
+		if state.WasCreated {
+			return ""
+		}
+
 		// If final state is that object shouldn't exist, use DROP IF EXISTS
 		if lifecycle.Type == types.TypeUnknown || lifecycle.Type == "" {
 			// Cannot generate valid DROP statement for unknown object types
@@ -149,8 +173,13 @@ func (r *ConditionalSchemaRule) generateConditionalSQL(lifecycle *tracking.Objec
 				tableName = state.Dependencies[0]
 			}
 			if tableName != "" {
+				policyName := lifecycle.Name
+				if strings.Contains(policyName, ".") {
+					parts := strings.Split(policyName, ".")
+					policyName = parts[len(parts)-1]
+				}
 				return fmt.Sprintf("DROP %s IF EXISTS %s ON %s;",
-					strings.ToUpper(string(lifecycle.Type)), lifecycle.Name, tableName)
+					strings.ToUpper(string(lifecycle.Type)), policyName, tableName)
 			}
 		}
 

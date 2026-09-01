@@ -2,13 +2,14 @@ package consolidation
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/utils"
 
 	"github.com/capysquash/pgsquash-engine/internal/tracking"
 	"github.com/capysquash/pgsquash-engine/internal/types"
+
+	"sync"
 
 	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
@@ -20,6 +21,7 @@ type ErrorRecoveryRule struct {
 	ValidateSQL    bool
 	LogFailures    bool
 	FailureMetrics map[string]int
+	mutex          sync.RWMutex
 }
 
 // NewErrorRecoveryRule creates a new error recovery rule with specified configuration
@@ -45,8 +47,12 @@ func (rule *ErrorRecoveryRule) Apply(lifecycle *tracking.ObjectLifecycle, engine
 	}
 
 	// Track if this object has had failures before
+	// Track if this object has had failures before
 	objectKey := lifecycle.Key
+
+	rule.mutex.RLock()
 	failureCount, hasFailures := rule.FailureMetrics[objectKey]
+	rule.mutex.RUnlock()
 
 	// If we've exceeded max retries, apply fallback strategy
 	if hasFailures && failureCount >= rule.MaxRetries {
@@ -57,7 +63,10 @@ func (rule *ErrorRecoveryRule) Apply(lifecycle *tracking.ObjectLifecycle, engine
 	result, err := rule.attemptConsolidation(lifecycle, engine)
 	if err != nil {
 		// Record failure and attempt recovery
+		rule.mutex.Lock()
 		rule.FailureMetrics[objectKey] = failureCount + 1
+		rule.mutex.Unlock()
+
 		if rule.LogFailures {
 			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("Consolidation failed for %s (attempt %d/%d): %v",
 				objectKey, failureCount+1, rule.MaxRetries, err)
@@ -71,7 +80,9 @@ func (rule *ErrorRecoveryRule) Apply(lifecycle *tracking.ObjectLifecycle, engine
 	if rule.ValidateSQL && result != nil {
 		if validationErr := rule.validateConsolidatedSQL(result); validationErr != nil {
 			// Mark as failed and try recovery
+			rule.mutex.Lock()
 			rule.FailureMetrics[objectKey] = failureCount + 1
+			rule.mutex.Unlock()
 			return rule.attemptErrorRecovery(lifecycle, engine, validationErr)
 		}
 	}
@@ -89,13 +100,17 @@ func (rule *ErrorRecoveryRule) attemptConsolidation(lifecycle *tracking.ObjectLi
 	// This would delegate to other consolidation rules
 	// For now, return a basic result to allow testing of error recovery
 	if len(lifecycle.History) == 0 {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no operations to consolidate", map[string]interface{}{"object": lifecycle.Name})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no operations to consolidate", map[string]any{"object": lifecycle.Name})
 	}
 
 	// Try to create a basic consolidated statement
 	finalState := lifecycle.GetFinalState()
 	if finalState == nil {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no final state available for consolidation", map[string]interface{}{"object": lifecycle.Name})
+		// If the object was dropped (last op is drop), this is valid and not an error
+		if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+			return nil, nil
+		}
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no final state available for consolidation", map[string]any{"object": lifecycle.Name})
 	}
 
 	// DEBUG: Log SQL for cleanup_expired_memory_cards and current_clerk_org_id
@@ -119,9 +134,7 @@ func (rule *ErrorRecoveryRule) attemptConsolidation(lifecycle *tracking.ObjectLi
 		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("INDEX %s: SQL = %s", lifecycle.Name, consolidatedSQL)
 		// Check if SQL contains "USING btree" (case-insensitive)
 		if strings.Contains(strings.ToUpper(consolidatedSQL), " USING BTREE") {
-			// Remove "USING btree" - use regex to handle spacing variations
-			re := regexp.MustCompile(`(?i)\s+USING\s+btree\s*`)
-			consolidatedSQL = re.ReplaceAllString(consolidatedSQL, " ")
+			consolidatedSQL = stripErrorRecoveryUsingBtreeClause(consolidatedSQL)
 			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("Removed implicit USING btree from index %s", lifecycle.Name)
 		} else {
 			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("Index %s has no USING btree in SQL (length=%d)",
@@ -197,7 +210,13 @@ func (rule *ErrorRecoveryRule) applyFallbackStrategy(lifecycle *tracking.ObjectL
 
 	// Skip the object entirely or use minimal processing
 	if len(lifecycle.History) == 0 {
-		return nil, nil // Skip empty objects
+		// Skip empty objects by returning empty result
+		return &tracking.ConsolidationResult{
+			ConsolidatedSQL:    "",
+			OriginalStatements: []types.Statement{},
+			Optimizations:      []string{"skipped_empty"},
+			Warnings:           []string{"Skipped empty object in fallback"},
+		}, nil
 	}
 
 	// Return first valid operation
@@ -212,7 +231,7 @@ func (rule *ErrorRecoveryRule) applyFallbackStrategy(lifecycle *tracking.ObjectL
 		}
 	}
 
-	return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no valid operations found for fallback", map[string]interface{}{"object": lifecycle.Name})
+	return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no valid operations found for fallback", map[string]any{"object": lifecycle.Name})
 }
 
 // validateConsolidatedSQL performs basic SQL validation
@@ -239,7 +258,7 @@ func (rule *ErrorRecoveryRule) validateConsolidatedSQL(result *tracking.Consolid
 
 	for _, pattern := range dangerousPatterns {
 		if strings.Contains(strings.ToUpper(sql), pattern) {
-			return errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "potentially dangerous SQL detected", map[string]interface{}{"pattern": pattern})
+			return errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "potentially dangerous SQL detected", map[string]any{"pattern": pattern})
 		}
 	}
 
@@ -255,10 +274,82 @@ func (rule *ErrorRecoveryRule) extractStatements(history []tracking.LifecycleEve
 	return statements
 }
 
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
+func stripErrorRecoveryUsingBtreeClause(sql string) string {
+	if strings.TrimSpace(sql) == "" {
+		return sql
 	}
-	return b
+
+	lower := strings.ToLower(sql)
+	for i := 0; i < len(lower); i++ {
+		if !hasErrorRecoveryKeywordAt(lower, i, "using") {
+			continue
+		}
+
+		j := skipErrorRecoveryWhitespace(lower, i+len("using"))
+		if !hasErrorRecoveryKeywordAt(lower, j, "btree") {
+			continue
+		}
+
+		start := i
+		for start > 0 && isErrorRecoveryWhitespaceByte(lower[start-1]) {
+			start--
+		}
+
+		end := j + len("btree")
+		for end < len(lower) && isErrorRecoveryWhitespaceByte(lower[end]) {
+			end++
+		}
+
+		prefix := sql[:start]
+		suffix := sql[end:]
+
+		if prefix != "" && suffix != "" && !isErrorRecoveryWhitespaceByte(prefix[len(prefix)-1]) && !isErrorRecoveryWhitespaceByte(suffix[0]) {
+			return prefix + " " + suffix
+		}
+
+		return prefix + suffix
+	}
+
+	return sql
+}
+
+func hasErrorRecoveryKeywordAt(value string, pos int, keyword string) bool {
+	if pos < 0 || pos+len(keyword) > len(value) {
+		return false
+	}
+
+	if value[pos:pos+len(keyword)] != keyword {
+		return false
+	}
+
+	if pos > 0 && isErrorRecoveryIdentifierByte(value[pos-1]) {
+		return false
+	}
+
+	end := pos + len(keyword)
+	if end < len(value) && isErrorRecoveryIdentifierByte(value[end]) {
+		return false
+	}
+
+	return true
+}
+
+func skipErrorRecoveryWhitespace(value string, pos int) int {
+	for pos < len(value) && isErrorRecoveryWhitespaceByte(value[pos]) {
+		pos++
+	}
+	return pos
+}
+
+func isErrorRecoveryIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
+}
+
+func isErrorRecoveryWhitespaceByte(ch byte) bool {
+	switch ch {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	default:
+		return false
+	}
 }

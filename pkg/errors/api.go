@@ -70,8 +70,6 @@
 package errors
 
 import (
-	"context"
-
 	internal_errors "github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
@@ -198,8 +196,8 @@ const (
 // Error codes
 const (
 	// Parse errors
-	ErrorCodeSyntaxError    ErrorCode = internal_errors.ErrorCodeSyntaxError
-	ErrorCodeSemanticError  ErrorCode = internal_errors.ErrorCodeSemanticError
+	ErrorCodeSyntaxError     ErrorCode = internal_errors.ErrorCodeSyntaxError
+	ErrorCodeSemanticError   ErrorCode = internal_errors.ErrorCodeSemanticError
 	ErrorCodeDependencyError ErrorCode = internal_errors.ErrorCodeDependencyError
 
 	// Validation errors
@@ -208,9 +206,9 @@ const (
 	ErrorCodeInvalidObject    ErrorCode = internal_errors.ErrorCodeInvalidObject
 
 	// Transformation errors
-	ErrorCodeRollbackGenerationFailed   ErrorCode = internal_errors.ErrorCodeRollbackGenerationFailed
-	ErrorCodeBackupGenerationFailed     ErrorCode = internal_errors.ErrorCodeBackupGenerationFailed
-	ErrorCodeTransformationFailed       ErrorCode = internal_errors.ErrorCodeTransformationFailed
+	ErrorCodeRollbackGenerationFailed ErrorCode = internal_errors.ErrorCodeRollbackGenerationFailed
+	ErrorCodeBackupGenerationFailed   ErrorCode = internal_errors.ErrorCodeBackupGenerationFailed
+	ErrorCodeTransformationFailed     ErrorCode = internal_errors.ErrorCodeTransformationFailed
 
 	// Type errors
 	ErrorCodeInvalidType       ErrorCode = internal_errors.ErrorCodeInvalidType
@@ -296,63 +294,3 @@ var (
 //   FormatError(err *StructuredError) string
 //   FormatSummary(summary ErrorSummary) string
 //   FormatErrorList(errors []*StructuredError) string
-
-// Example usage patterns
-
-// ExampleBasicError demonstrates basic error creation
-func ExampleBasicError() {
-	err := NewParseError(
-		ErrorCodeSyntaxError,
-		"Invalid CREATE TABLE syntax",
-	).WithFile("001_init.sql").WithLine(42)
-
-	// Use error
-	_ = err.Error()
-	_ = err.Severity
-	_ = err.Category
-}
-
-// ExampleErrorCollection demonstrates error collection
-func ExampleErrorCollection() {
-	ctx := context.Background()
-	collector := NewErrorCollector(ctx)
-
-	// Add errors
-	collector.AddError(NewParseError(ErrorCodeSyntaxError, "Syntax error"))
-	collector.AddError(NewWarning(CategoryOptimization, "Consider adding index"))
-
-	if collector.HasErrors() {
-		summary := collector.Summary()
-		_ = summary.TotalErrors
-		_ = summary.TotalWarnings
-		_ = summary.Categories
-	}
-}
-
-// ExampleFluentBuilder demonstrates fluent error building
-func ExampleFluentBuilder() {
-	err := NewError(
-		ErrorCodeConsolidationFailed,
-		"Failed to consolidate table",
-		SeverityError,
-		CategoryConsolidation,
-	).WithObject("users", "table").
-		WithFile("003_users.sql").
-		WithLine(15).
-		WithSuggestion("Check for circular dependencies")
-
-	_ = err
-}
-
-// ExampleErrorFormatting demonstrates error formatting
-func ExampleErrorFormatting() {
-	formatter := NewErrorFormatter()
-	collector := NewErrorCollector(context.Background())
-
-	collector.AddError(NewParseError(ErrorCodeSyntaxError, "Error 1"))
-	collector.AddError(NewValidationError(ErrorCodeValidationFailed, "Error 2"))
-
-	summary := collector.Summary()
-	formatted := formatter.FormatSummary(summary)
-	_ = formatted
-}

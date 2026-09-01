@@ -1,7 +1,7 @@
 package postprocessing
 
 import (
-	"regexp"
+	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/config"
 	"github.com/capysquash/pgsquash-engine/internal/postprocessing/ast"
@@ -11,21 +11,19 @@ import (
 // Processor orchestrates all post-processing operations on consolidated SQL.
 // It applies fixes in a specific order to ensure correctness.
 type Processor struct {
-	logger              *utils.Logger
-	config              *config.Config
-	functionNormalizer  *ast.FunctionNormalizer
-	enumReplacer        *ast.EnumReplacer
-	useASTProcessing    bool // Feature flag for AST-based processing
+	logger           *utils.Logger
+	config           *config.Config
+	enumReplacer     *ast.EnumReplacer
+	useASTProcessing bool // Feature flag for AST-based processing
 }
 
 // NewProcessor creates a new post-processing processor with the given configuration.
 func NewProcessor(cfg *config.Config) *Processor {
 	return &Processor{
-		logger:             utils.GetDefaultLogger().WithPrefix("POSTPROCESS"),
-		config:             cfg,
-		functionNormalizer: ast.NewFunctionNormalizer(),
-		enumReplacer:       ast.NewEnumReplacer(nil), // Will set replacements later
-		useASTProcessing:   true, // Enable AST processing by default
+		logger:           utils.GetDefaultLogger().WithPrefix("POSTPROCESS"),
+		config:           cfg,
+		enumReplacer:     ast.NewEnumReplacer(nil), // Will set replacements later
+		useASTProcessing: true,                     // Enable AST processing by default
 	}
 }
 
@@ -58,34 +56,16 @@ func (p *Processor) Apply(sql string, enumReplacements map[string]string) (strin
 	p.logger.Info("Phase 2: Function language normalization")
 
 	// Debug: Check auth.jwt() function before post-processing
-	jwtPattern := regexp.MustCompile(`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+auth\.jwt\(\)[^\$]*AS\s+\$\$`)
-	if match := jwtPattern.FindString(sql); match != "" {
+	if match := extractFunctionSignatureSnippet(sql, "auth.jwt()"); match != "" {
 		p.logger.Info("BEFORE POST-PROCESSING - auth.jwt() signature: %s", match)
 	}
 
-	// Try AST-based normalization first (more accurate)
-	if p.useASTProcessing {
-		p.logger.Info("=== Attempting AST-based function normalization ===")
-		normalizedSQL, err := p.functionNormalizer.NormalizeAll(sql)
-		if err == nil && normalizedSQL != "" {
-			p.logger.Info("✓ AST-based function normalization succeeded")
-			sql = normalizedSQL
-			if match := jwtPattern.FindString(sql); match != "" {
-				p.logger.Info("AFTER AST NORMALIZATION - auth.jwt() signature: %s", match)
-			}
-		} else {
-			p.logger.Info("⚠ AST-based normalization failed (%v), falling back to regex", err)
-			// Fall through to regex-based approach
-		}
-	}
-
-	// Regex-based normalization DISABLED: It was creating duplicate LANGUAGE clauses
-	// and corrupting valid SQL. AST-based normalization is preferred.
-	if !p.useASTProcessing {
-		p.logger.Info("=== Regex-based function normalization DISABLED ===")
-		p.logger.Info("Reason: Creates duplicate LANGUAGE clauses and corrupts valid SQL")
-		p.logger.Info("Recommendation: Use AST-based processing or fix at consolidation layer")
-	}
+	// AST-based function normalization DISABLED: Package removed due to corruption issues
+	// The function_normalizer package was creating duplicate LANGUAGE clauses and corrupting valid SQL.
+	// Function normalization is now handled at the consolidation layer instead.
+	p.logger.Info("=== AST-based function normalization DISABLED ===")
+	p.logger.Info("Reason: Function normalizer package removed - was corrupting SQL")
+	p.logger.Info("Note: Function normalization handled at consolidation layer")
 
 	// ================================================================
 	// PHASE 3: Function Body Fixes
@@ -161,16 +141,11 @@ func fixEliminatedEnumReferences(sql string, enumReplacements map[string]string)
 	fixedCount := 0
 
 	for eliminatedName, primaryName := range enumReplacements {
-		// Pattern: Column type declarations in CREATE TABLE
-		// Example: status verification_status_enum DEFAULT
-		pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(eliminatedName) + `\b`)
-
-		// Count matches before replacement
-		matches := pattern.FindAllStringIndex(fixedSQL, -1)
-		if len(matches) > 0 {
-			fixedSQL = pattern.ReplaceAllString(fixedSQL, primaryName)
-			fixedCount += len(matches)
-			logger.Info("Replaced %d reference(s) to %s with %s", len(matches), eliminatedName, primaryName)
+		replaced, count := replaceWholeWord(fixedSQL, eliminatedName, primaryName)
+		if count > 0 {
+			fixedSQL = replaced
+			fixedCount += count
+			logger.Info("Replaced %d reference(s) to %s with %s", count, eliminatedName, primaryName)
 		}
 	}
 
@@ -179,4 +154,81 @@ func fixEliminatedEnumReferences(sql string, enumReplacements map[string]string)
 	}
 
 	return fixedSQL
+}
+
+func extractFunctionSignatureSnippet(sql string, functionName string) string {
+	if strings.TrimSpace(sql) == "" || strings.TrimSpace(functionName) == "" {
+		return ""
+	}
+
+	lower := strings.ToLower(sql)
+	fnLower := strings.ToLower(functionName)
+	fnIdx := strings.Index(lower, fnLower)
+	if fnIdx == -1 {
+		return ""
+	}
+
+	createIdx := strings.LastIndex(lower[:fnIdx], "create")
+	if createIdx == -1 {
+		createIdx = fnIdx
+	}
+
+	asIdx := strings.Index(lower[fnIdx:], "as $$")
+	if asIdx == -1 {
+		end := min(fnIdx+120, len(sql))
+		return strings.TrimSpace(sql[createIdx:end])
+	}
+
+	asIdx += fnIdx + len("as $$")
+	if asIdx > len(sql) {
+		asIdx = len(sql)
+	}
+
+	return strings.TrimSpace(sql[createIdx:asIdx])
+}
+
+func replaceWholeWord(input string, target string, replacement string) (string, int) {
+	if input == "" || target == "" {
+		return input, 0
+	}
+
+	var out strings.Builder
+	out.Grow(len(input))
+
+	count := 0
+	cursor := 0
+
+	for {
+		rel := strings.Index(input[cursor:], target)
+		if rel == -1 {
+			out.WriteString(input[cursor:])
+			break
+		}
+
+		idx := cursor + rel
+		end := idx + len(target)
+
+		beforeOK := idx == 0 || !isWordByte(input[idx-1])
+		afterOK := end >= len(input) || !isWordByte(input[end])
+
+		if beforeOK && afterOK {
+			out.WriteString(input[cursor:idx])
+			out.WriteString(replacement)
+			cursor = end
+			count++
+			continue
+		}
+
+		out.WriteString(input[cursor : idx+1])
+		cursor = idx + 1
+	}
+
+	return out.String(), count
+}
+
+func isWordByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') ||
+		(ch >= 'A' && ch <= 'Z') ||
+		(ch >= '0' && ch <= '9') ||
+		ch == '_'
 }

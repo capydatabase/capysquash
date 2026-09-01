@@ -8,8 +8,8 @@ import (
 // EnumReplacer provides AST-based ENUM type reference replacement.
 // It replaces regex-based word boundary matching with accurate AST traversal.
 type EnumReplacer struct {
-	replacements map[string]string // eliminated ENUM -> primary ENUM
-	logger       *utils.Logger
+	replacements  map[string]string // eliminated ENUM -> primary ENUM
+	logger        *utils.Logger
 	replacedCount int
 }
 

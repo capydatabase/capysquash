@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/google/go-github/v57/github"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/google/go-github/v88/github"
 )
 
 // AppClient wraps GitHub App authentication and provides multi-repository support
@@ -189,7 +189,15 @@ func (a *AppClient) GetInstallationClient(ctx context.Context, installationID in
 		).WithInnerError(err).WithAdditional("installation_id", installationID)
 	}
 
-	client := github.NewClient(&http.Client{Transport: transport})
+	client, err := newGitHubClient(transport)
+	if err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"failed to create installation GitHub client",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err).WithAdditional("installation_id", installationID)
+	}
 
 	installationClient := &InstallationClient{
 		installationID: installationID,
@@ -203,11 +211,34 @@ func (a *AppClient) GetInstallationClient(ctx context.Context, installationID in
 	return installationClient, nil
 }
 
+// newGitHubClient builds a go-github client backed by the given transport.
+func newGitHubClient(transport http.RoundTripper) (*github.Client, error) {
+	return github.NewClient(github.WithHTTPClient(&http.Client{Transport: transport}))
+}
+
+// appLevelClient builds a go-github client authenticated as the App itself
+// (JWT auth) for app-level endpoints such as listing installations.
+func (a *AppClient) appLevelClient() (*github.Client, error) {
+	client, err := newGitHubClient(a.transport)
+	if err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"failed to create app-level GitHub client",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+	return client, nil
+}
+
 // GetInstallationForRepo finds the installation ID for a specific repository
 func (a *AppClient) GetInstallationForRepo(ctx context.Context, owner, repo string) (int64, error) {
-	appClient := github.NewClient(&http.Client{Transport: a.transport})
+	appClient, err := a.appLevelClient()
+	if err != nil {
+		return 0, err
+	}
 
-	installation, _, err := appClient.Apps.FindRepositoryInstallation(ctx, owner, repo)
+	installation, _, err := appClient.Apps.GetRepositoryInstallation(ctx, owner, repo)
 	if err != nil {
 		return 0, errors.NewError(
 			errors.ErrorCodeValidationFailed,
@@ -241,7 +272,10 @@ func (a *AppClient) GetInstallationClientForRepo(ctx context.Context, owner, rep
 
 // ListInstallations lists all installations of the GitHub App
 func (a *AppClient) ListInstallations(ctx context.Context) ([]*github.Installation, error) {
-	appClient := github.NewClient(&http.Client{Transport: a.transport})
+	appClient, err := a.appLevelClient()
+	if err != nil {
+		return nil, err
+	}
 
 	opts := &github.ListOptions{PerPage: 100}
 	var allInstallations []*github.Installation
@@ -270,7 +304,10 @@ func (a *AppClient) ListInstallations(ctx context.Context) ([]*github.Installati
 
 // GetAppInfo returns information about the GitHub App
 func (a *AppClient) GetAppInfo(ctx context.Context) (*github.App, error) {
-	appClient := github.NewClient(&http.Client{Transport: a.transport})
+	appClient, err := a.appLevelClient()
+	if err != nil {
+		return nil, err
+	}
 
 	app, _, err := appClient.Apps.Get(ctx, "")
 	if err != nil {
@@ -285,7 +322,25 @@ func (a *AppClient) GetAppInfo(ctx context.Context) (*github.App, error) {
 	return app, nil
 }
 
-// InstallationClient methods that wrap the standard Client methods
+// PRFile represents a file in a pull request
+type PRFile struct {
+	Filename string `json:"filename"`
+	SHA      string `json:"sha"`
+	Status   string `json:"status"`
+}
+
+// PullRequest represents a GitHub pull request
+type PullRequest struct {
+	Number int    `json:"number"`
+	Head   Branch `json:"head"`
+	Base   Branch `json:"base"`
+}
+
+// Branch represents a git branch
+type Branch struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
+}
 
 // GetPRFiles retrieves files changed in a pull request
 func (ic *InstallationClient) GetPRFiles(ctx context.Context, owner, repo string, prNumber int) ([]PRFile, error) {
@@ -348,7 +403,7 @@ func (ic *InstallationClient) GetPullRequest(ctx context.Context, owner, repo st
 // PostPRComment posts a comment on a pull request
 func (ic *InstallationClient) PostPRComment(ctx context.Context, owner, repo string, prNumber int, body string) error {
 	comment := &github.IssueComment{
-		Body: github.String(body),
+		Body: github.Ptr(body),
 	}
 
 	_, _, err := ic.client.Issues.CreateComment(ctx, owner, repo, prNumber, comment)
@@ -402,11 +457,11 @@ func (ic *InstallationClient) GetFileContent(ctx context.Context, owner, repo, p
 
 // CreateCommitStatus creates a commit status (check run) for a specific commit
 func (ic *InstallationClient) CreateCommitStatus(ctx context.Context, owner, repo, sha string, status *CommitStatus) error {
-	repoStatus := &github.RepoStatus{
-		State:       github.String(status.State),
-		TargetURL:   github.String(status.TargetURL),
-		Description: github.String(status.Description),
-		Context:     github.String(status.Context),
+	repoStatus := github.RepoStatus{
+		State:       github.Ptr(status.State),
+		TargetURL:   github.Ptr(status.TargetURL),
+		Description: github.Ptr(status.Description),
+		Context:     github.Ptr(status.Context),
 	}
 
 	_, _, err := ic.client.Repositories.CreateStatus(ctx, owner, repo, sha, repoStatus)
@@ -430,28 +485,29 @@ func (ic *InstallationClient) CreateCheckRun(ctx context.Context, owner, repo st
 	}
 
 	if checkRun.Status != "" {
-		opts.Status = github.String(checkRun.Status)
+		opts.Status = github.Ptr(checkRun.Status)
 	}
 	if checkRun.Conclusion != "" {
-		opts.Conclusion = github.String(checkRun.Conclusion)
+		opts.Conclusion = github.Ptr(checkRun.Conclusion)
 	}
 	if checkRun.CompletedAt != nil {
 		opts.CompletedAt = &github.Timestamp{Time: *checkRun.CompletedAt}
 	}
 	if checkRun.DetailsURL != "" {
-		opts.DetailsURL = github.String(checkRun.DetailsURL)
+		opts.DetailsURL = github.Ptr(checkRun.DetailsURL)
 	}
 	if checkRun.ExternalID != "" {
-		opts.ExternalID = github.String(checkRun.ExternalID)
+		opts.ExternalID = github.Ptr(checkRun.ExternalID)
 	}
 
 	if checkRun.Output != nil {
 		opts.Output = &github.CheckRunOutput{
-			Title:   github.String(checkRun.Output.Title),
-			Summary: github.String(checkRun.Output.Summary),
+			Title:       github.Ptr(checkRun.Output.Title),
+			Summary:     github.Ptr(checkRun.Output.Summary),
+			Annotations: toGitHubAnnotations(checkRun.Output.Annotations),
 		}
 		if checkRun.Output.Text != "" {
-			opts.Output.Text = github.String(checkRun.Output.Text)
+			opts.Output.Text = github.Ptr(checkRun.Output.Text)
 		}
 	}
 
@@ -475,28 +531,29 @@ func (ic *InstallationClient) UpdateCheckRun(ctx context.Context, owner, repo st
 	}
 
 	if checkRun.Status != "" {
-		opts.Status = github.String(checkRun.Status)
+		opts.Status = github.Ptr(checkRun.Status)
 	}
 	if checkRun.Conclusion != "" {
-		opts.Conclusion = github.String(checkRun.Conclusion)
+		opts.Conclusion = github.Ptr(checkRun.Conclusion)
 	}
 	if checkRun.CompletedAt != nil {
 		opts.CompletedAt = &github.Timestamp{Time: *checkRun.CompletedAt}
 	}
 	if checkRun.DetailsURL != "" {
-		opts.DetailsURL = github.String(checkRun.DetailsURL)
+		opts.DetailsURL = github.Ptr(checkRun.DetailsURL)
 	}
 	if checkRun.ExternalID != "" {
-		opts.ExternalID = github.String(checkRun.ExternalID)
+		opts.ExternalID = github.Ptr(checkRun.ExternalID)
 	}
 
 	if checkRun.Output != nil {
 		opts.Output = &github.CheckRunOutput{
-			Title:   github.String(checkRun.Output.Title),
-			Summary: github.String(checkRun.Output.Summary),
+			Title:       github.Ptr(checkRun.Output.Title),
+			Summary:     github.Ptr(checkRun.Output.Summary),
+			Annotations: toGitHubAnnotations(checkRun.Output.Annotations),
 		}
 		if checkRun.Output.Text != "" {
-			opts.Output.Text = github.String(checkRun.Output.Text)
+			opts.Output.Text = github.Ptr(checkRun.Output.Text)
 		}
 	}
 
@@ -515,11 +572,9 @@ func (ic *InstallationClient) UpdateCheckRun(ctx context.Context, owner, repo st
 
 // CreateBranch creates a new branch
 func (ic *InstallationClient) CreateBranch(ctx context.Context, owner, repo, branch, sha string) error {
-	ref := &github.Reference{
-		Ref: github.String("refs/heads/" + branch),
-		Object: &github.GitObject{
-			SHA: github.String(sha),
-		},
+	ref := github.CreateRef{
+		Ref: "refs/heads/" + branch,
+		SHA: sha,
 	}
 
 	_, _, err := ic.client.Git.CreateRef(ctx, owner, repo, ref)
@@ -547,9 +602,9 @@ func (ic *InstallationClient) CreateOrUpdateFile(ctx context.Context, owner, rep
 
 	// Create or update file options
 	fileOpts := &github.RepositoryContentFileOptions{
-		Message: github.String(message),
+		Message: github.Ptr(message),
 		Content: []byte(content),
-		Branch:  github.String(branch),
+		Branch:  github.Ptr(branch),
 		SHA:     sha,
 	}
 
@@ -569,10 +624,10 @@ func (ic *InstallationClient) CreateOrUpdateFile(ctx context.Context, owner, rep
 // CreatePullRequest creates a new pull request
 func (ic *InstallationClient) CreatePullRequest(ctx context.Context, owner, repo, title, body, head, base string) (int, error) {
 	newPR := &github.NewPullRequest{
-		Title: github.String(title),
-		Head:  github.String(head),
-		Base:  github.String(base),
-		Body:  github.String(body),
+		Title: github.Ptr(title),
+		Head:  github.Ptr(head),
+		Base:  github.Ptr(base),
+		Body:  github.Ptr(body),
 	}
 
 	pr, _, err := ic.client.PullRequests.Create(ctx, owner, repo, newPR)
@@ -611,9 +666,46 @@ type CheckRun struct {
 
 // CheckRunOutput represents the output of a check run
 type CheckRunOutput struct {
-	Title   string
-	Summary string
-	Text    string
+	Title       string
+	Summary     string
+	Text        string
+	Annotations []CheckRunAnnotation
+}
+
+// CheckRunAnnotation represents a file-anchored annotation on a check run.
+// AnnotationLevel must be one of "notice", "warning", "failure" (GitHub API contract).
+type CheckRunAnnotation struct {
+	Path            string
+	StartLine       int
+	EndLine         int
+	AnnotationLevel string
+	Message         string
+	Title           string
+	RawDetails      string
+}
+
+func toGitHubAnnotations(annotations []CheckRunAnnotation) []*github.CheckRunAnnotation {
+	if len(annotations) == 0 {
+		return nil
+	}
+	result := make([]*github.CheckRunAnnotation, 0, len(annotations))
+	for _, a := range annotations {
+		ann := &github.CheckRunAnnotation{
+			Path:            github.Ptr(a.Path),
+			StartLine:       github.Ptr(a.StartLine),
+			EndLine:         github.Ptr(a.EndLine),
+			AnnotationLevel: github.Ptr(a.AnnotationLevel),
+			Message:         github.Ptr(a.Message),
+		}
+		if a.Title != "" {
+			ann.Title = github.Ptr(a.Title)
+		}
+		if a.RawDetails != "" {
+			ann.RawDetails = github.Ptr(a.RawDetails)
+		}
+		result = append(result, ann)
+	}
+	return result
 }
 
 // GetRateLimit returns the current API rate limit status for the installation

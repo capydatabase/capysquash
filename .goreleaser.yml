@@ -188,12 +188,12 @@ release:
 
     #### Homebrew (macOS & Linux)
     ```bash
-    brew install CAPYSQUASH/tap/pgsquash
+    brew install capysquash/tap/pgsquash
     ```
 
     #### Go Install
     ```bash
-    go install github.com/CAPYSQUASH/pgsquash-engine/cmd/pgsquash@{{ .Tag }}
+    go install github.com/capysquash/pgsquash-engine/cmd/pgsquash@{{ .Tag }}
     ```
 
     #### Docker

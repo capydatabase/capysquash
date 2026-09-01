@@ -2,51 +2,24 @@ package parser
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/errors"
 	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
-// Type aliases for backward compatibility - delegate to unified errors package
-type (
-	ErrorSeverity = errors.Severity
-	ErrorCategory = errors.Category
-)
-
-// Constants for backward compatibility
-const (
-	SeverityInfo     = errors.SeverityInfo
-	SeverityWarning  = errors.SeverityWarning
-	SeverityError    = errors.SeverityError
-	SeverityCritical = errors.SeverityCritical
-
-	CategorySyntax      = errors.CategorySyntax
-	CategorySemantic    = errors.CategorySemantic
-	CategoryDependency  = errors.CategoryDependency
-	CategoryNaming      = errors.CategoryNaming
-	CategoryPermission  = errors.CategoryPermission
-	CategoryConstraint  = errors.CategoryConstraint
-	CategoryDataType    = errors.CategoryDataType
-	CategoryFunction    = errors.CategoryFunction
-	CategoryIndex       = errors.CategoryIndex
-	CategoryPolicy      = errors.CategoryPolicy
-	CategoryExtension   = errors.CategoryExtension
-	CategoryPerformance = errors.CategoryPerformance
-)
-
 // ParseError represents a structured parsing error with context
-// This now wraps the unified StructuredError
 type ParseError struct {
 	*errors.StructuredError
 	Statement *types.Statement
 }
 
-// ParseContext is now an alias to errors.ErrorContext
+// ParseContext scopes errors.ErrorContext to parser operations.
 type ParseContext = errors.ErrorContext
 
 // NewParseError creates a new ParseError wrapping StructuredError
-func NewParseError(message string, severity ErrorSeverity, category ErrorCategory) *ParseError {
+func NewParseError(message string, severity errors.Severity, category errors.Category) *ParseError {
 	return &ParseError{
 		StructuredError: errors.NewError(
 			errors.ErrorCode(""),
@@ -79,8 +52,8 @@ func (ec *ErrorCollector) AddSyntaxError(message string, ctx *ParseContext, inne
 	structuredErr := errors.NewError(
 		errors.ErrorCodeSyntaxError,
 		message,
-		SeverityError,
-		CategorySyntax,
+		errors.SeverityError,
+		errors.CategorySyntax,
 	).WithContext(ctx).WithInnerError(innerErr).WithCanContinue(false)
 
 	ec.ErrorCollector.AddError(structuredErr)
@@ -91,8 +64,8 @@ func (ec *ErrorCollector) AddSemanticError(message, suggestion string, ctx *Pars
 	structuredErr := errors.NewError(
 		errors.ErrorCodeSemanticError,
 		message,
-		SeverityError,
-		CategorySemantic,
+		errors.SeverityError,
+		errors.CategorySemantic,
 	).WithContext(ctx).WithSuggestion(suggestion).WithCanContinue(true)
 
 	ec.ErrorCollector.AddError(structuredErr)
@@ -103,8 +76,8 @@ func (ec *ErrorCollector) AddDependencyError(message string, ctx *ParseContext) 
 	structuredErr := errors.NewError(
 		errors.ErrorCodeDependencyError,
 		message,
-		SeverityError,
-		CategoryDependency,
+		errors.SeverityError,
+		errors.CategoryDependency,
 	).WithContext(ctx).WithSuggestion("Check dependency order and ensure referenced objects exist").WithCanContinue(true)
 
 	ec.ErrorCollector.AddError(structuredErr)
@@ -115,8 +88,8 @@ func (ec *ErrorCollector) AddNamingWarning(message, suggestion string, ctx *Pars
 	structuredErr := errors.NewError(
 		errors.ErrorCode(""),
 		message,
-		SeverityWarning,
-		CategoryNaming,
+		errors.SeverityWarning,
+		errors.CategoryNaming,
 	).WithContext(ctx).WithSuggestion(suggestion).WithCanContinue(true)
 
 	ec.ErrorCollector.AddError(structuredErr)
@@ -127,8 +100,8 @@ func (ec *ErrorCollector) AddPerformanceWarning(message, suggestion string, ctx 
 	structuredErr := errors.NewError(
 		errors.ErrorCode(""),
 		message,
-		SeverityWarning,
-		CategoryPerformance,
+		errors.SeverityWarning,
+		errors.CategoryPerformance,
 	).WithContext(ctx).WithSuggestion(suggestion).WithCanContinue(true)
 
 	ec.ErrorCollector.AddError(structuredErr)
@@ -242,8 +215,8 @@ func (eh *ErrorHandler) HandleParseError(err error, ctx *ParseContext) *ParseErr
 		StructuredError: errors.NewError(
 			errors.ErrorCodeSyntaxError,
 			enhancedMsg,
-			SeverityError,
-			CategorySyntax,
+			errors.SeverityError,
+			errors.CategorySyntax,
 		).WithContext(ctx).WithInnerError(err).WithCanContinue(false).WithSuggestion(suggestion),
 	}
 
@@ -295,8 +268,8 @@ func (eh *ErrorHandler) HandleValidationError(message string, ctx *ParseContext)
 		StructuredError: errors.NewError(
 			errors.ErrorCodeSemanticError,
 			message,
-			SeverityError,
-			CategorySemantic,
+			errors.SeverityError,
+			errors.CategorySemantic,
 		).WithContext(ctx).WithCanContinue(true),
 	}
 
@@ -339,11 +312,16 @@ func (eh *ErrorHandler) Recovery(filename string, line int) {
 			Line:     line,
 		}
 
+		recoveredErr, ok := r.(error)
+		if !ok {
+			recoveredErr = fmt.Errorf("%v", r)
+		}
+
 		parseErr := &ParseError{
 			StructuredError: errors.NewCriticalError(
 				errors.ErrorCodeSyntaxError,
-				"Panic during parsing: "+string([]byte(r.(error).Error())),
-				CategorySyntax,
+				fmt.Sprintf("panic during parsing: %v", recoveredErr),
+				errors.CategorySyntax,
 			).WithContext(ctx),
 		}
 

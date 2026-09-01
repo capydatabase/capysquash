@@ -19,9 +19,9 @@ type Config struct {
 	ConflictResolution     ConflictResolutionConfig `json:"conflict_resolution"`
 	PostgreSQLFeatures     PostgreSQLFeaturesConfig `json:"postgresql_features"`
 	ThirdPartyIntegrations ThirdPartyConfig         `json:"third_party_integrations"`
-	Plugins                PluginSettings           `json:"plugins"`    // Plugin system configuration
-	Validation             ValidationConfig         `json:"validation"` // Docker validation configuration
-	AI                     AIConfig                 `json:"ai"`         // AI-powered analysis and validation
+	Plugins                PluginSettings           `json:"plugins"`           // Plugin system configuration
+	Validation             ValidationConfig         `json:"validation"`        // Docker validation configuration
+	StaticValidation       StaticValidatorConfig    `json:"static_validation"` // Static analysis rules configuration
 }
 
 type OutputConfig struct {
@@ -36,6 +36,13 @@ type RulesConfig struct {
 	TableOperations    TableRulesConfig    `json:"table_operations"`
 	IndexOperations    IndexRulesConfig    `json:"index_operations"`
 	FunctionOperations FunctionRulesConfig `json:"function_operations"`
+
+	// Overrides force-enables (true) or force-disables (false) specific named
+	// consolidation rules relative to the safety-level baseline. Keys are rule
+	// names as registered in the consolidation rule registry (e.g.
+	// "create_alter_consolidation"). Unknown rule names are rejected when the
+	// engine is constructed. A nil/empty map applies the baseline unchanged.
+	Overrides map[string]bool `json:"overrides,omitempty"`
 }
 
 type TableRulesConfig struct {
@@ -84,6 +91,7 @@ type PostgreSQLFeaturesConfig struct {
 	OptimizeForPerformance bool     `json:"optimize_for_performance"`
 	UseModernSyntax        bool     `json:"use_modern_syntax"`
 	ValidateCompatibility  bool     `json:"validate_compatibility"`
+	UseASTAnalyzer         bool     `json:"use_ast_analyzer"` // Use AST-based analyzer instead of regex (default: true)
 }
 
 type ThirdPartyConfig struct {
@@ -156,20 +164,6 @@ type ValidationConfig struct {
 	Verbose                  bool   `json:"verbose"`                    // Show detailed validation output (default: true)
 }
 
-// AIConfig configures AI-powered analysis and validation behavior
-type AIConfig struct {
-	Enabled                        bool    `json:"enabled"`                           // Enable AI features (default: false, requires API keys)
-	Provider                       string  `json:"provider"`                          // AI provider: "claude", "openai", "azure-openai", or "auto" (default: "auto")
-	MaxRetries                     int     `json:"max_retries"`                       // Max retry attempts for AI calls (default: 3)
-	TimeoutSeconds                 int     `json:"timeout_seconds"`                   // Timeout for AI operations in seconds (default: 60)
-	EnableSemanticAnalysis         bool    `json:"enable_semantic_analysis"`          // Use AI for semantic function comparison (default: false)
-	EnableDeadCodeDetection        bool    `json:"enable_dead_code_detection"`        // Use AI for dead code detection (default: false)
-	EnableAuthPatternDetection     bool    `json:"enable_auth_pattern_detection"`     // Use AI to detect auth patterns (default: true if enabled)
-	EnablePostProcessingValidation bool    `json:"enable_post_processing_validation"` // Use AI for post-processing validation (default: false)
-	EnableAutoRepair               bool    `json:"enable_auto_repair"`                // Allow AI to automatically fix issues (default: false, requires manual review)
-	ConfidenceThreshold            float64 `json:"confidence_threshold"`              // Minimum confidence for AI suggestions (0.0-1.0, default: 0.85)
-}
-
 func DefaultConfig() *Config {
 	return &Config{
 		SafetyLevel: "standard",
@@ -223,6 +217,7 @@ func DefaultConfig() *Config {
 			OptimizeForPerformance: true,
 			UseModernSyntax:        true,
 			ValidateCompatibility:  true,
+			UseASTAnalyzer:         true, // Default to AST-based analyzer (more robust than regex)
 		},
 		ThirdPartyIntegrations: ThirdPartyConfig{
 			Auth0Integration: Auth0Config{
@@ -277,18 +272,7 @@ func DefaultConfig() *Config {
 			EnablePreprocessing:      true,            // Preprocess SQL to fix common issues (e.g., deduplicate publications)
 			Verbose:                  true,            // Show detailed validation output
 		},
-		AI: AIConfig{
-			Enabled:                        false,  // Disabled by default, requires API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, or AZURE_OPENAI_ENDPOINT)
-			Provider:                       "auto", // Auto-detect best available provider (Claude > OpenAI > Azure)
-			MaxRetries:                     3,      // Retry AI calls up to 3 times with exponential backoff
-			TimeoutSeconds:                 60,     // 1 minute timeout for AI operations
-			EnableSemanticAnalysis:         false,  // Conservative default - AI semantic analysis is experimental
-			EnableDeadCodeDetection:        false,  // Conservative default - may have false positives
-			EnableAuthPatternDetection:     true,   // Safe to enable when AI is on - helps detect auth patterns
-			EnablePostProcessingValidation: false,  // Conservative default - post-processing AI validation is experimental
-			EnableAutoRepair:               false,  // Conservative default - requires manual review
-			ConfidenceThreshold:            0.85,   // Only use AI suggestions with 85%+ confidence
-		},
+		StaticValidation: *DefaultStaticValidatorConfig(),
 	}
 }
 
@@ -315,7 +299,7 @@ func mergeConfigs(loaded, defaults *Config) *Config {
 	result.ThirdPartyIntegrations = mergeThirdPartyConfig(loaded.ThirdPartyIntegrations, defaults.ThirdPartyIntegrations)
 	result.Plugins = mergePluginSettings(loaded.Plugins, defaults.Plugins)
 	result.Validation = mergeValidationConfig(loaded.Validation, defaults.Validation)
-	result.AI = mergeAIConfig(loaded.AI, defaults.AI)
+	result.StaticValidation = mergeStaticValidatorConfig(loaded.StaticValidation, defaults.StaticValidation)
 
 	// Merge slices if empty in loaded
 	if len(result.ExcludePatterns) == 0 {
@@ -456,22 +440,6 @@ func mergeValidationConfig(loaded, defaults ValidationConfig) ValidationConfig {
 	return loaded
 }
 
-func mergeAIConfig(loaded, defaults AIConfig) AIConfig {
-	if loaded.Provider == "" {
-		loaded.Provider = defaults.Provider
-	}
-	if loaded.MaxRetries == 0 {
-		loaded.MaxRetries = defaults.MaxRetries
-	}
-	if loaded.TimeoutSeconds == 0 {
-		loaded.TimeoutSeconds = defaults.TimeoutSeconds
-	}
-	if loaded.ConfidenceThreshold == 0 {
-		loaded.ConfidenceThreshold = defaults.ConfidenceThreshold
-	}
-	return loaded
-}
-
 func LoadConfig(configPath string) (*Config, error) {
 	defaults := DefaultConfig()
 
@@ -522,6 +490,13 @@ func LoadConfig(configPath string) (*Config, error) {
 
 		// Merge loaded config with defaults (loaded values take precedence)
 		cfg := mergeConfigs(loaded, defaults)
+
+		// Environment always overrides the config file for the production DSN:
+		// PROD_DB_DSN is the documented way to inject credentials without
+		// persisting them to disk.
+		if envDSN := os.Getenv("PROD_DB_DSN"); envDSN != "" {
+			cfg.ProdDBDSN = envDSN
+		}
 
 		// Validate config values
 		if err := cfg.Validate(); err != nil {
@@ -600,24 +575,6 @@ func (c *Config) Validate() error {
 			fmt.Sprintf("invalid validation.mode '%s' (must be one of: TWO_CONTAINERS, TWO_DATABASES, SCHEMA_DIFF)", c.Validation.Mode))
 	}
 
-	// Validate ai.provider
-	validAIProviders := map[string]bool{
-		"auto":         true,
-		"claude":       true,
-		"openai":       true,
-		"azure-openai": true,
-	}
-	if !validAIProviders[c.AI.Provider] {
-		errs.Errors = append(errs.Errors,
-			fmt.Sprintf("invalid ai.provider '%s' (must be one of: auto, claude, openai, azure-openai)", c.AI.Provider))
-	}
-
-	// Validate ai.confidence_threshold
-	if c.AI.ConfidenceThreshold < 0.0 || c.AI.ConfidenceThreshold > 1.0 {
-		errs.Errors = append(errs.Errors,
-			fmt.Sprintf("invalid ai.confidence_threshold %.2f (must be between 0.0 and 1.0)", c.AI.ConfidenceThreshold))
-	}
-
 	// Validate numeric ranges for performance settings
 	if c.Performance.StreamingThresholdMB < 0 {
 		errs.Errors = append(errs.Errors,
@@ -633,17 +590,6 @@ func (c *Config) Validate() error {
 	if c.Validation.ContainerReadyTimeout <= 0 {
 		errs.Errors = append(errs.Errors,
 			fmt.Sprintf("invalid validation.container_ready_timeout %d (must be positive)", c.Validation.ContainerReadyTimeout))
-	}
-
-	// Validate numeric ranges for AI settings
-	if c.AI.MaxRetries < 0 {
-		errs.Errors = append(errs.Errors,
-			fmt.Sprintf("invalid ai.max_retries %d (cannot be negative)", c.AI.MaxRetries))
-	}
-
-	if c.AI.TimeoutSeconds <= 0 {
-		errs.Errors = append(errs.Errors,
-			fmt.Sprintf("invalid ai.timeout_seconds %d (must be positive)", c.AI.TimeoutSeconds))
 	}
 
 	// Validate third_party_integrations.clerk_integration.jwt_version

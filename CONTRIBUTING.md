@@ -12,7 +12,7 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 
 ### Prerequisites
 
-- Go 1.21 or higher
+- go 1.26.5 or higher (see `go.mod`)
 - Docker Desktop (for validation features)
 - Git
 - Basic understanding of PostgreSQL and SQL migrations
@@ -50,10 +50,12 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 ### Reporting Bugs
 
 Before creating a bug report:
-- Check the [existing issues](https://github.com/CAPYSQUASH/pgsquash-engine/issues) to avoid duplicates
+
+- Check the [existing issues](https://github.com/capysquash/pgsquash-engine/issues) to avoid duplicates
 - Collect relevant information (Go version, OS, Docker version, error messages)
 
 When filing a bug report, include:
+
 - **Clear title** describing the issue
 - **Steps to reproduce** the problem
 - **Expected behavior** vs **actual behavior**
@@ -64,6 +66,7 @@ When filing a bug report, include:
 ### Suggesting Features
 
 Feature requests are welcome! When suggesting a feature:
+
 - **Check existing feature requests** to avoid duplicates
 - **Explain the use case** - why would this feature be valuable?
 - **Describe the expected behavior** in detail
@@ -82,9 +85,10 @@ Feature requests are welcome! When suggesting a feature:
 
 #### Development Workflow
 
-1. **Create an Issue** (if one doesn't exist)
-   - Discuss the change before starting work
-   - Get feedback from maintainers
+1. **Create an Issue** (if one doesn’t exist)
+
+- Discuss the change before starting work
+- Get feedback from maintainers
 
 2. **Create a Branch**
    ```bash
@@ -92,22 +96,27 @@ Feature requests are welcome! When suggesting a feature:
    ```
 
 3. **Make Your Changes**
-   - Follow the [coding conventions](#coding-conventions)
-   - Write or update tests
-   - Update documentation as needed
+
+- Follow the [coding conventions](#coding-conventions)
+- Write or update tests
+- Update documentation as needed
 
 4. **Test Your Changes**
    ```bash
    # Run all tests
+
    go test ./...
 
    # Run tests with race detector
+
    go test -race ./...
 
    # Test with coverage
+
    go test -cover ./...
 
    # Manual testing
+
    ./pgsquash squash examples/basic/*.sql --dry-run
    ```
 
@@ -123,10 +132,11 @@ Feature requests are welcome! When suggesting a feature:
    ```
 
 7. **Create a Pull Request**
-   - Use a clear, descriptive title
-   - Reference related issues (e.g., "Fixes #123")
-   - Describe what changed and why
-   - Include testing details
+
+- Use a clear, descriptive title
+- Reference related issues (e.g., "Fixes #123")
+- Describe what changed and why
+- Include testing details
 
 ### Commit Message Guidelines
 
@@ -141,6 +151,7 @@ Follow these conventions for commit messages:
 ```
 
 **Types:**
+
 - `feat` - New feature
 - `fix` - Bug fix
 - `docs` - Documentation changes
@@ -149,6 +160,7 @@ Follow these conventions for commit messages:
 - `chore` - Build process or auxiliary tool changes
 
 **Examples:**
+
 ```
 feat: Add support for PostgreSQL 17 syntax
 
@@ -193,6 +205,7 @@ test: Add integration tests for Supabase plugin
 - Use meaningful test names: `TestFunctionName_Scenario`
 
 **Example Test:**
+
 ```go
 func TestParser_ParseCreateTable(t *testing.T) {
     tests := []struct {
@@ -273,29 +286,32 @@ Understanding the architecture will help you contribute effectively:
 4. **Plugin Integration** - Framework-specific logic goes in plugins
 
 For detailed architecture documentation, see:
-- [docs/architecture.md](docs/architecture.md)
-- [docs/migration-consolidation-strategy.md](docs/migration-consolidation-strategy.md)
-- [.github/copilot-instructions.md](.github/copilot-instructions.md)
-- [AGENTS.md](AGENTS.md)
+
+- [Ecosystem architecture](https://capysquash.dev/docs/core-concepts/ecosystem-architecture)
+- [How it works](https://capysquash.dev/docs/core-concepts/how-it-works)
+- [`internal/plugins/README.md`](internal/plugins/README.md) — plugin system guide
 
 ## Areas Where We Need Help
 
 We especially welcome contributions in these areas:
 
 ### High Priority
+
 - **Test Coverage** - Currently below 60%, need comprehensive tests
 - **Documentation** - More examples and use case guides
-- **Bug Fixes** - Check [issues labeled "bug"](https://github.com/CAPYSQUASH/pgsquash-engine/labels/bug)
+- **Bug Fixes** - Check [issues labeled "bug"](https://github.com/capysquash/pgsquash-engine/labels/bug)
 - **Platform Support** - Testing on different operating systems
 
 ### Medium Priority
+
 - **Plugin Development** - New auth providers (Auth0, Firebase, NextAuth)
 - **Performance Optimization** - Profiling and optimization
 - **Error Messages** - More helpful error messages and debugging info
 - **CI/CD Improvements** - Enhanced testing and release automation
 
 ### Good First Issues
-- Issues labeled [`good first issue`](https://github.com/CAPYSQUASH/pgsquash-engine/labels/good%20first%20issue)
+
+- Issues labeled [`good first issue`](https://github.com/capysquash/pgsquash-engine/labels/good%20first%20issue)
 - Documentation improvements
 - Adding examples to `examples/` directory
 - Writing tests for existing functionality
@@ -335,13 +351,17 @@ Before submitting a PR, verify:
 ### Quick Development Cycle
 
 ```bash
+
 # Watch and rebuild on changes (using entr or similar)
+
 ls **/*.go | entr -r go build -o pgsquash cmd/pgsquash/main.go
 
 # Quick test with examples
+
 ./pgsquash squash examples/basic/*.sql --dry-run
 
 # Validate with Docker
+
 ./pgsquash validate migrations/ squashed/
 ```
 
@@ -362,11 +382,10 @@ The parser relies heavily on `pg_query_go`. Key resources:
 
 ## Resources
 
-- **Documentation**: [docs/](docs/)
-- **Architecture**: [docs/architecture.md](docs/architecture.md)
-- **CLI Reference**: [docs/cli-reference.md](docs/cli-reference.md)
-- **Configuration**: [docs/configuration.md](docs/configuration.md)
-- **Roadmap**: [docs/internal/roadmap/ROADMAP.md](docs/internal/roadmap/ROADMAP.md)
+- **Documentation**: [capysquash.dev/docs](https://capysquash.dev/docs)
+- **Architecture**: [core-concepts/ecosystem-architecture](https://capysquash.dev/docs/core-concepts/ecosystem-architecture)
+- **Library API**: [pgsquash-engine/library-api](https://capysquash.dev/docs/pgsquash-engine/library-api)
+- **Configuration**: [pgsquash-engine/configuration](https://capysquash.dev/docs/pgsquash-engine/configuration)
 
 ## Getting Help
 
@@ -376,13 +395,14 @@ The parser relies heavily on `pg_query_go`. Key resources:
 
 ## License
 
-By contributing to pgsquash, you agree that your contributions will be licensed under the project's [MIT License](LICENSE).
+By contributing to pgsquash, you agree that your contributions will be licensed under the project’s [MIT License](LICENSE).
 
 ## Recognition
 
 Contributors will be recognized in:
+
 - GitHub contributors list
 - Release notes (for significant contributions)
 - Project documentation (as appropriate)
 
-Thank you for contributing to pgsquash! 🎉
+Thank you for contributing to pgsquash! 🎉.

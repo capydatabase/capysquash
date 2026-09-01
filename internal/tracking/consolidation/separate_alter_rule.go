@@ -38,7 +38,7 @@ func (r *SeparateAlterRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool {
 // Apply separates ALTER statements that cannot be integrated into CREATE TABLE
 func (r *SeparateAlterRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "SeparateAlterRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "SeparateAlterRule"})
 	}
 
 	// Get the CREATE TABLE statement
@@ -51,7 +51,7 @@ func (r *SeparateAlterRule) Apply(lifecycle *tracking.ObjectLifecycle, engine Co
 	}
 
 	if createStmt == nil {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found", map[string]interface{}{"object": lifecycle.Name})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found", map[string]any{"object": lifecycle.Name})
 	}
 
 	// Identify all ALTER statements that must remain separate
@@ -228,6 +228,7 @@ func (r *SeparateAlterRule) categorizeAlters(alters []types.Statement) []string 
 
 	return types
 }
+
 // This is used by both SeparateAlterRule and ColumnEvolutionRule
 func trackColumnRenamesFromLifecycle(lifecycle *tracking.ObjectLifecycle) map[string]*tracking.ColumnEvolutionInfo {
 	evolutions := make(map[string]*tracking.ColumnEvolutionInfo)

@@ -18,6 +18,10 @@ func (r *RLSConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecycle) boo
 		return false
 	}
 
+	if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+		return false
+	}
+
 	// Check if there are RLS operations
 	hasRLS := false
 	for _, event := range lifecycle.History {
@@ -38,7 +42,7 @@ func (r *RLSConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecycle) boo
 // Apply applies the consolidation rule to the given lifecycle
 func (r *RLSConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "RLSConsolidationRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "RLSConsolidationRule"})
 	}
 
 	// When consolidating RLS operations, we must also handle other ALTER operations
@@ -86,9 +90,25 @@ func (r *RLSConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine
 	} else {
 		// Fallback: no CREATE found (shouldn't happen for tables, but be safe)
 		finalRLSState := r.determineFinalRLSState(lifecycle)
-		if finalRLSState != "" {
+		if finalRLSState != "" && finalRLSState != "DISABLE ROW LEVEL SECURITY" {
 			tableName := lifecycle.Name
 			consolidatedSQL = fmt.Sprintf("ALTER TABLE %s %s;", tableName, finalRLSState)
+		}
+	}
+
+	// Ensure RLS is enforced if we generated a CREATE statement
+	// integrateAlterIntoCreate intentionally skips RLS statements, so we must append the final state manually
+	if createStmt != nil {
+		finalRLSState := r.determineFinalRLSState(lifecycle)
+		if finalRLSState != "" && finalRLSState != "DISABLE ROW LEVEL SECURITY" {
+			tableName := lifecycle.Name
+			if consolidatedSQL != "" {
+				if !strings.HasSuffix(consolidatedSQL, ";") {
+					consolidatedSQL += ";"
+				}
+				consolidatedSQL += "\n"
+			}
+			consolidatedSQL += fmt.Sprintf("ALTER TABLE %s %s;", tableName, finalRLSState)
 		}
 	}
 

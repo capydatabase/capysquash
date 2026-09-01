@@ -41,13 +41,13 @@ func NewDDLGenerator() *DDLGenerator {
 func (g *DDLGenerator) GenerateRandomMigrations(count int) map[int]string {
 	migrations := make(map[int]string)
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		var statements []string
 
 		// Generate 1-5 statements per migration
 		statementCount := g.rand.Intn(5) + 1
 
-		for j := 0; j < statementCount; j++ {
+		for range statementCount {
 			stmt := g.generateRandomStatement()
 			if stmt != "" {
 				statements = append(statements, stmt)
@@ -91,7 +91,7 @@ func (g *DDLGenerator) generateCreateTable() string {
 
 	// Generate 1-10 columns
 	columnCount := g.rand.Intn(10) + 1
-	for i := 0; i < columnCount; i++ {
+	for range columnCount {
 		column := g.generateColumn()
 		columns = append(columns, column)
 	}
@@ -232,7 +232,7 @@ func (g *DDLGenerator) generateIdentifier(prefix string) string {
 	noun := nouns[g.rand.Intn(len(nouns))]
 	number := g.rand.Intn(1000)
 
-	return fmt.Sprintf("%s_%s_%d", prefix, adj, noun, number)
+	return fmt.Sprintf("%s_%s_%s_%d", prefix, adj, noun, number)
 }
 
 // generateConstraint generates a random constraint
@@ -399,21 +399,21 @@ func FuzzSquash(f *testing.F) {
 					return // This might be expected for some edge cases
 				}
 
-				if result.SQL == "" {
+				if result.BaselineSQL == "" {
 					t.Error("Squashing produced empty SQL")
 					return
 				}
 
 				// Validate SQL structure
-				validateSQLStructure(t, result.SQL)
+				validateSQLStructure(t, result.BaselineSQL)
 
 				// Validate that result contains CREATE statements
-				if !strings.Contains(strings.ToUpper(result.SQL), "CREATE") {
+				if !strings.Contains(strings.ToUpper(result.BaselineSQL), "CREATE") {
 					t.Error("Squashed SQL should contain CREATE statements")
 				}
 
 				t.Logf("✅ Successfully squashed %d migrations to %d bytes",
-					migrationCount, len(result.SQL))
+					migrationCount, len(result.BaselineSQL))
 			})
 		}
 	})
@@ -469,8 +469,8 @@ func TestFuzzingBasic(t *testing.T) {
 			}
 
 			// Basic validation
-			assert.NotEmpty(t, result.SQL, "Result should not be empty")
-			assert.Greater(t, len(result.SQL), 0, "SQL should have content")
+			assert.NotEmpty(t, result.BaselineSQL, "Result should not be empty")
+			assert.Greater(t, len(result.BaselineSQL), 0, "SQL should have content")
 
 			t.Logf("✅ Successfully generated and squashed %d migrations", count)
 		})
@@ -529,7 +529,7 @@ CREATE TABLE %s (
 				return // Some edge cases might fail
 			}
 
-			assert.NotEmpty(t, result.SQL, "Edge case should produce valid SQL")
+			assert.NotEmpty(t, result.BaselineSQL, "Edge case should produce valid SQL")
 			t.Logf("✅ Edge case %d processed successfully", i)
 		})
 	}
@@ -572,7 +572,7 @@ func TestFuzzingPerformance(t *testing.T) {
 
 			// Performance assertions
 			assert.Less(t, squashTime, 30*time.Second, "Should complete within 30 seconds")
-			assert.Greater(t, len(result.SQL), 0, "Should produce non-empty SQL")
+			assert.Greater(t, len(result.BaselineSQL), 0, "Should produce non-empty SQL")
 		})
 	}
 }

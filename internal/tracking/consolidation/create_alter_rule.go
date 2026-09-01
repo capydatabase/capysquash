@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/utils"
@@ -21,6 +22,10 @@ func (r *CreateAlterConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecy
 		return false
 	}
 
+	if lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+		return false
+	}
+
 	// First check: If there are multiple CREATE statements, let MultipleCreateConsolidationRule handle it
 	createCount := 0
 	for _, event := range lifecycle.History {
@@ -29,7 +34,7 @@ func (r *CreateAlterConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecy
 			if createCount > 1 {
 				// Debug logging for profiles
 				if strings.ToLower(lifecycle.Name) == "profiles" {
-					utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Info("DEBUG CreateAlterConsolidationRule.CanApply: profiles has %d CREATE operations, deferring to MultipleCreateConsolidationRule", createCount)
+					utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Debug("profiles has %d CREATE operations, deferring to MultipleCreateConsolidationRule", createCount)
 				}
 				return false // Let MultipleCreateConsolidationRule handle it
 			}
@@ -44,7 +49,7 @@ func (r *CreateAlterConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecy
 				if !lifecycle.History[i].HasDataOps {
 					// Debug logging for profiles
 					if strings.ToLower(lifecycle.Name) == "profiles" {
-						utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Info("DEBUG CreateAlterConsolidationRule.CanApply: profiles (type=%s) matches! Single CREATE with ALTER operations", lifecycle.Type)
+						utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Debug("profiles (type=%s) matches single CREATE with ALTER operations", lifecycle.Type)
 					}
 					return true
 				}
@@ -58,7 +63,7 @@ func (r *CreateAlterConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecy
 // Apply applies the consolidation rule to the given lifecycle
 func (r *CreateAlterConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "CreateAlterConsolidationRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "CreateAlterConsolidationRule"})
 	}
 
 	// Extract CREATE statement and all ALTER statements
@@ -123,7 +128,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 	// DEBUG: Log incoming SQL for analytics tables
 	objectName := createStmt.ObjectName
 	if strings.Contains(strings.ToLower(objectName), "analytics") {
-		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER-DEBUG").Info(
+		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Debug(
 			"BEFORE consolidation for %s: SQL length=%d, starts with: %s",
 			objectName, len(createSQL), createSQL[:min(100, len(createSQL))])
 	}
@@ -148,7 +153,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 
 		// DEBUG: Log all ALTER statements for profiles
 		if strings.Contains(strings.ToLower(objectName), "profiles") {
-			utils.GetDefaultLogger().WithPrefix("CREATE-ALTER-DEBUG").Info(
+			utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Debug(
 				"Processing ALTER for %s: %s",
 				objectName, alterSQL[:min(150, len(alterSQL))])
 		}
@@ -226,7 +231,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 
 	// DEBUG: Log columns being added for profiles
 	if strings.Contains(strings.ToLower(objectName), "profiles") {
-		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER-DEBUG").Info(
+		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Debug(
 			"Integrating %d columns for %s: %v",
 			len(addedColumns), objectName, columnOrder)
 	}
@@ -246,7 +251,7 @@ func integrateAlterIntoCreate(createStmt *types.Statement, alterStmts []types.St
 
 	// DEBUG: Log outgoing SQL for analytics tables
 	if strings.Contains(strings.ToLower(objectName), "analytics") {
-		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER-DEBUG").Info(
+		utils.GetDefaultLogger().WithPrefix("CREATE-ALTER").Debug(
 			"AFTER consolidation for %s: SQL length=%d, starts with: %s, ends with: %s",
 			objectName, len(createSQL), createSQL[:min(100, len(createSQL))], createSQL[max(0, len(createSQL)-50):])
 	}
@@ -397,7 +402,7 @@ func constraintExistsInline(createSQL string, constraintDef string) bool {
 	upperCreate := strings.ToUpper(createSQL)
 	if strings.Contains(upperCreate, "CHECK") {
 		// Extract all CHECK clauses from CREATE statement
-		for _, line := range strings.Split(createSQL, "\n") {
+		for line := range strings.SplitSeq(createSQL, "\n") {
 			upperLine := strings.ToUpper(line)
 			if strings.Contains(upperLine, "CHECK") {
 				checkIdx := strings.Index(upperLine, "CHECK")
@@ -555,8 +560,8 @@ func integrateAlterTypeIntoCreate(createSQL string, alterStmts []types.Statement
 func parseEnumValuesFromSQL(valuesStr string) []string {
 	var values []string
 	// Remove whitespace and split by comma
-	parts := strings.Split(valuesStr, ",")
-	for _, part := range parts {
+	parts := strings.SplitSeq(valuesStr, ",")
+	for part := range parts {
 		trimmed := strings.TrimSpace(part)
 		// Remove surrounding quotes
 		if len(trimmed) >= 2 && trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'' {
@@ -569,10 +574,5 @@ func parseEnumValuesFromSQL(valuesStr string) []string {
 
 // containsValue checks if a string slice contains a specific value
 func containsValue(slice []string, value string) bool {
-	for _, item := range slice {
-		if item == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, value)
 }

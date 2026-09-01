@@ -6,6 +6,7 @@ package tracking
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,15 +32,18 @@ type UnifiedTracker struct {
 	changeTracker   *ChangeTracker
 
 	// DDL cycle detection
-	cycleDetector *AdvancedDDLCycleDetector
+	cycleDetector  *AdvancedDDLCycleDetector
 	detectedCycles []DDLCycle
 
 	// Streaming processing support
 	streamingMode    bool
 	migrationCounter int64
 	processedCount   int64
-	statementCounter int64  // Track total statements even in streaming mode
-	dataOpCounter    int64  // Track data operations even in streaming mode
+	statementCounter int64 // Track total statements even in streaming mode
+	dataOpCounter    int64 // Track total data operations
+	insertOpCounter  int64 // Track INSERT operations
+	updateOpCounter  int64 // Track UPDATE operations
+	deleteOpCounter  int64 // Track DELETE operations
 
 	// Statement analysis
 	statementAnalyzer *parser.StatementAnalyzer
@@ -77,8 +81,6 @@ type ObjectLifecycle struct {
 	ResourceChanges []*ResourceChange
 
 	// Absorbed from ChangeTracker
-	changeCounter    int64          //nolint:unused // Reserved for future change tracking
-	operationContext *ChangeContext //nolint:unused // Reserved for future operation context
 }
 
 // LifecycleEvent represents an event in an object's lifecycle with enhanced context
@@ -116,8 +118,8 @@ type ObjectDependency struct {
 // ObjectID provides comprehensive object identification
 type ObjectID struct {
 	Type   types.ObjectType `json:"type"`
-	Schema string            `json:"schema"`
-	Name   string            `json:"name"`
+	Schema string           `json:"schema"`
+	Name   string           `json:"name"`
 }
 
 // DependencyType represents different types of dependencies
@@ -177,12 +179,12 @@ type ColumnTypeInfo struct {
 
 // ObjectInfo represents information about a database object
 type ObjectInfo struct {
-	Name       string                 `json:"name"`
-	Schema     string                 `json:"schema"`
-	Type       ResourceType           `json:"type"`
-	Parent     *ObjectInfo            `json:"parent,omitempty"`
-	Children   []*ObjectInfo          `json:"children,omitempty"`
-	Properties map[string]interface{} `json:"properties,omitempty"`
+	Name       string         `json:"name"`
+	Schema     string         `json:"schema"`
+	Type       ResourceType   `json:"type"`
+	Parent     *ObjectInfo    `json:"parent,omitempty"`
+	Children   []*ObjectInfo  `json:"children,omitempty"`
+	Properties map[string]any `json:"properties,omitempty"`
 }
 
 // String returns a string representation of the object
@@ -216,16 +218,16 @@ type ChangeContext struct {
 
 // ResourceChange represents a tracked change to a database resource
 type ResourceChange struct {
-	ID           string                 `json:"id"`
-	Type         ResourceChangeType     `json:"type"`
-	Object       *ObjectInfo            `json:"object"`
-	Range        *SourceRange           `json:"range"`
-	Context      *ChangeContext         `json:"context"`
-	Dependencies []string               `json:"dependencies,omitempty"`
-	Metadata     map[string]interface{} `json:"metadata,omitempty"`
-	Timestamp    time.Time              `json:"timestamp"`
-	Migration    string                 `json:"migration"`
-	Statement    *types.Statement      `json:"statement,omitempty"`
+	ID           string             `json:"id"`
+	Type         ResourceChangeType `json:"type"`
+	Object       *ObjectInfo        `json:"object"`
+	Range        *SourceRange       `json:"range"`
+	Context      *ChangeContext     `json:"context"`
+	Dependencies []string           `json:"dependencies,omitempty"`
+	Metadata     map[string]any     `json:"metadata,omitempty"`
+	Timestamp    time.Time          `json:"timestamp"`
+	Migration    string             `json:"migration"`
+	Statement    *types.Statement   `json:"statement,omitempty"`
 }
 
 // DatabaseMetadata contains metadata about the database structure
@@ -269,16 +271,16 @@ type TableInfo struct {
 
 // ColumnInfo contains information about a table column
 type ColumnInfo struct {
-	Name         string      `json:"name"`
-	DataType     string      `json:"data_type"`
-	IsNullable   bool        `json:"is_nullable"`
-	DefaultValue *string     `json:"default_value,omitempty"`
-	IsIdentity   bool        `json:"is_identity"`
-	IsGenerated  bool        `json:"is_generated"`
-	Comment      string      `json:"comment,omitempty"`
-	Ordinal      int         `json:"ordinal"`
-	Constraints  []string    `json:"constraints,omitempty"`
-	Properties   interface{} `json:"properties,omitempty"`
+	Name         string   `json:"name"`
+	DataType     string   `json:"data_type"`
+	IsNullable   bool     `json:"is_nullable"`
+	DefaultValue *string  `json:"default_value,omitempty"`
+	IsIdentity   bool     `json:"is_identity"`
+	IsGenerated  bool     `json:"is_generated"`
+	Comment      string   `json:"comment,omitempty"`
+	Ordinal      int      `json:"ordinal"`
+	Constraints  []string `json:"constraints,omitempty"`
+	Properties   any      `json:"properties,omitempty"`
 }
 
 // ViewInfo contains information about a database view
@@ -294,18 +296,18 @@ type ViewInfo struct {
 
 // FunctionInfo contains information about a database function
 type FunctionInfo struct {
-	Name         string                 `json:"name"`
-	Schema       string                 `json:"schema"`
-	Owner        string                 `json:"owner"`
-	Comment      string                 `json:"comment,omitempty"`
-	Language     string                 `json:"language"`
-	ReturnType   string                 `json:"return_type"`
-	Parameters   []ParameterInfo        `json:"parameters"`
-	Definition   string                 `json:"definition"`
-	Volatility   string                 `json:"volatility"`
-	IsStrict     bool                   `json:"is_strict"`
-	IsSecDefiner bool                   `json:"is_sec_definer"`
-	Properties   map[string]interface{} `json:"properties,omitempty"`
+	Name         string          `json:"name"`
+	Schema       string          `json:"schema"`
+	Owner        string          `json:"owner"`
+	Comment      string          `json:"comment,omitempty"`
+	Language     string          `json:"language"`
+	ReturnType   string          `json:"return_type"`
+	Parameters   []ParameterInfo `json:"parameters"`
+	Definition   string          `json:"definition"`
+	Volatility   string          `json:"volatility"`
+	IsStrict     bool            `json:"is_strict"`
+	IsSecDefiner bool            `json:"is_sec_definer"`
+	Properties   map[string]any  `json:"properties,omitempty"`
 }
 
 // ParameterInfo contains information about function parameters
@@ -362,13 +364,13 @@ type SequenceInfo struct {
 
 // TypeInfo contains information about a user-defined type
 type TypeInfo struct {
-	Name       string                 `json:"name"`
-	Schema     string                 `json:"schema"`
-	Owner      string                 `json:"owner"`
-	Comment    string                 `json:"comment,omitempty"`
-	Type       string                 `json:"type"` // enum, composite, domain, etc.
-	Definition string                 `json:"definition"`
-	Properties map[string]interface{} `json:"properties,omitempty"`
+	Name       string         `json:"name"`
+	Schema     string         `json:"schema"`
+	Owner      string         `json:"owner"`
+	Comment    string         `json:"comment,omitempty"`
+	Type       string         `json:"type"` // enum, composite, domain, etc.
+	Definition string         `json:"definition"`
+	Properties map[string]any `json:"properties,omitempty"`
 }
 
 // TriggerInfo contains information about a database trigger
@@ -406,7 +408,6 @@ type ChangeTracker struct {
 	changesByObject map[string][]*ResourceChange
 	context         *ChangeContext
 	sequenceCounter int64
-	metadata        *DatabaseMetadata //nolint:unused // Reserved for future metadata tracking
 }
 
 // NewChangeTracker creates a new change tracker
@@ -432,7 +433,7 @@ func (ct *ChangeTracker) TrackStatement(stmt *types.Statement, migrationFile str
 		Migration: migrationFile,
 		Statement: stmt,
 		Timestamp: time.Now(),
-		Metadata:  make(map[string]interface{}),
+		Metadata:  make(map[string]any),
 	}
 
 	ct.changes = append(ct.changes, change)
@@ -531,10 +532,10 @@ type OperationContext struct {
 
 // ObjectMetadata stores metadata about database objects
 type ObjectMetadata struct {
-	Source       string      `json:"source"` // Migration file source
-	Description  string      `json:"description"`
-	Tags         []string    `json:"tags"`
-	DatabaseMeta interface{} `json:"database_meta"` // From metadata manager
+	Source       string   `json:"source"` // Migration file source
+	Description  string   `json:"description"`
+	Tags         []string `json:"tags"`
+	DatabaseMeta any      `json:"database_meta"` // From metadata manager
 }
 
 // ColumnEvolutionInfo tracks how a column evolved through its lifecycle
@@ -548,11 +549,11 @@ type ColumnEvolutionInfo struct {
 // ConsolidationResult stores the result of object consolidation
 type ConsolidationResult struct {
 	OriginalStatements []types.Statement `json:"original_statements"`
-	ConsolidatedSQL    string             `json:"consolidated_sql"`
-	Optimizations      []string           `json:"optimizations"`
-	Warnings           []string           `json:"warnings"`
-	RiskLevel          RiskLevel          `json:"risk_level"`
-	EstimatedSavings   SquashSavings      `json:"estimated_savings"`
+	ConsolidatedSQL    string            `json:"consolidated_sql"`
+	Optimizations      []string          `json:"optimizations"`
+	Warnings           []string          `json:"warnings"`
+	RiskLevel          RiskLevel         `json:"risk_level"`
+	EstimatedSavings   SquashSavings     `json:"estimated_savings"`
 	// Column evolution tracking for data operation rewriting
 	ColumnEvolutions map[string]*ColumnEvolutionInfo `json:"column_evolutions,omitempty"`
 }
@@ -621,6 +622,9 @@ type TrackerStats struct {
 	TotalStatements   int
 	TotalDependencies int
 	DataOperations    int
+	Inserts           int
+	Updates           int
+	Deletes           int
 	ResourceChanges   int
 	ObjectsByType     map[types.ObjectType]int
 	ObjectsByCategory map[types.Category]int
@@ -634,8 +638,8 @@ func NewUnifiedTracker() *UnifiedTracker {
 		EnableDeepScan:         true,
 		EnableDependencyTrack:  true,
 		EnableVersionDetection: true,
-		MaxCycleDepth:         10,
-		MinCycleLength:        2,
+		MaxCycleDepth:          10,
+		MinCycleLength:         2,
 	}
 
 	return &UnifiedTracker{
@@ -756,7 +760,7 @@ func extractTypeName(typeName *pg_query.TypeName) string {
 	}
 
 	// Add array suffix if necessary
-	if typeName.ArrayBounds != nil && len(typeName.ArrayBounds) > 0 {
+	if len(typeName.ArrayBounds) > 0 {
 		typStr += "[]"
 	}
 
@@ -765,13 +769,13 @@ func extractTypeName(typeName *pg_query.TypeName) string {
 
 // ExtractColumnTypes extracts column type information from a CREATE TABLE statement
 func (ut *UnifiedTracker) ExtractColumnTypes(tableName string, stmt *types.Statement) {
-	// ParseTree is interface{} but should be *pg_query.ParseResult
+	// ParseTree is *pg_query.ParseResult (strongly typed)
 	if stmt.ParseTree == nil {
 		return
 	}
 
-	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
-	if !ok || parseResult == nil || parseResult.Stmts == nil || len(parseResult.Stmts) == 0 {
+	parseResult := stmt.ParseTree
+	if parseResult == nil || parseResult.Stmts == nil || len(parseResult.Stmts) == 0 {
 		return
 	}
 
@@ -810,7 +814,7 @@ func (ut *UnifiedTracker) ExtractColumnTypes(tableName string, stmt *types.State
 		}
 
 		typeName := extractTypeName(colDef.TypeName)
-		isArray := colDef.TypeName.ArrayBounds != nil && len(colDef.TypeName.ArrayBounds) > 0
+		isArray := len(colDef.TypeName.ArrayBounds) > 0
 
 		// Check if it's a spatial type (but not an array of spatial types)
 		baseTypeName := typeName
@@ -819,7 +823,22 @@ func (ut *UnifiedTracker) ExtractColumnTypes(tableName string, stmt *types.State
 		}
 		isSpatial := IsSpatialDataType(baseTypeName) && !isArray
 
-		// Store column type info
+		// Preserve the first-seen column type for a table+column pair.
+		// This avoids incorrect rewrites when later migrations include duplicate
+		// CREATE TABLE IF NOT EXISTS definitions with divergent schemas.
+		if existing, exists := ut.columnTypes[tableName][columnName]; exists {
+			if existing.DataType != typeName || existing.IsArray != isArray || existing.IsSpatial != isSpatial {
+				utils.GetDefaultLogger().WithPrefix("UNIFIED-TRACKER").Debug(
+					"Preserving initial column type for %s.%s (%s); ignoring conflicting duplicate definition (%s)",
+					tableName,
+					columnName,
+					existing.DataType,
+					typeName,
+				)
+			}
+			continue
+		}
+
 		ut.columnTypes[tableName][columnName] = &ColumnTypeInfo{
 			TableName:  tableName,
 			ColumnName: columnName,
@@ -871,14 +890,14 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 	}
 
 	for stmtIndex, stmt := range m.Statements {
-		// Data operations should NEVER be added to lifecycles, only to the DataOperationTracker
-		if stmt.IsDataOp {
+		// Skip statements without ObjectName (unless they handled elsewhere)
+		if stmt.ObjectName == "" && !stmt.IsDataOp {
 			continue
 		}
 
-		// Skip statements without ObjectName
-		if stmt.ObjectName == "" {
-			continue
+		// Ensure data ops have a name if missing (e.g. for tracking specific rows? No, parser sets table name)
+		if stmt.IsDataOp && stmt.ObjectName == "" {
+			stmt.ObjectName = "data_operation"
 		}
 
 		// Analyze pragmas (manual override comments) - CRITICAL for safety
@@ -896,11 +915,12 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 
 		// Handle statements with ObjectName (schema objects)
 		if stmt.ObjectName != "" {
-			key := makeKey(stmt.ObjectName, stmt.ObjectType)
+			normalizedObjectName := ut.normalizeObjectNameForTracking(stmt)
+			key := makeKey(normalizedObjectName, stmt.ObjectType)
 			objectID := ObjectID{
 				Type:   stmt.ObjectType,
 				Schema: stmt.Schema,
-				Name:   stmt.ObjectName,
+				Name:   normalizedObjectName,
 			}
 
 			lifecycle, exists := ut.objects[key]
@@ -963,7 +983,7 @@ func (ut *UnifiedTracker) createLifecycleEvent(stmt types.Statement, migrationFi
 	return &LifecycleEvent{
 		ID:           eventID,
 		Migration:    migrationFile,
-		Sequence:     sequence,
+		Sequence:     stmtIndex, // Use statement index for intra-migration sorting
 		Operation:    stmt.Operation,
 		Statement:    stmt,
 		Timestamp:    time.Now(),
@@ -986,11 +1006,11 @@ func (ut *UnifiedTracker) createLifecycleEvent(stmt types.Statement, migrationFi
 
 // createObjectLifecycle creates a new object lifecycle
 func (ut *UnifiedTracker) createObjectLifecycle(stmt types.Statement, objectID ObjectID) *ObjectLifecycle {
-	key := makeKey(stmt.ObjectName, stmt.ObjectType)
+	key := makeKey(objectID.Name, stmt.ObjectType)
 
 	lifecycle := &ObjectLifecycle{
 		Key:       key,
-		Name:      stmt.ObjectName,
+		Name:      objectID.Name,
 		Schema:    stmt.Schema,
 		Type:      stmt.ObjectType,
 		History:   []LifecycleEvent{},
@@ -1037,7 +1057,7 @@ func (ut *UnifiedTracker) createResourceChange(stmt types.Statement, migrationFi
 			Database:   "",
 			SearchPath: []string{"public"},
 		},
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"migration": migrationFile,
 			"sequence":  sequence,
 			"sql":       stmt.SQL,
@@ -1109,8 +1129,40 @@ func (ut *UnifiedTracker) processDependencies(stmt types.Statement, objectID Obj
 		ut.dependencyGraph.AddEdge(objectID, dep.DependsOn)
 	}
 
-	key := makeKey(stmt.ObjectName, stmt.ObjectType)
+	key := makeKey(objectID.Name, stmt.ObjectType)
 	ut.dependencies[key] = dependencies
+}
+
+func (ut *UnifiedTracker) normalizeObjectNameForTracking(stmt types.Statement) string {
+	name := stmt.ObjectName
+	if stmt.ObjectType != types.TypePolicy || name == "" {
+		return name
+	}
+
+	// Already schema-qualified as schema.table.policy
+	if strings.Count(name, ".") >= 2 {
+		return name
+	}
+
+	if len(stmt.Dependencies) == 0 || stmt.Dependencies[0] == "" {
+		return name
+	}
+
+	tableName := stmt.Dependencies[0]
+	if !strings.Contains(tableName, ".") {
+		schema := stmt.Schema
+		if schema == "" {
+			schema = "public"
+		}
+		tableName = schema + "." + tableName
+	}
+
+	if strings.Count(name, ".") == 1 {
+		parts := strings.SplitN(name, ".", 2)
+		return tableName + "." + parts[1]
+	}
+
+	return tableName + "." + name
 }
 
 // extractRequiredObjects extracts required objects from a statement
@@ -1145,27 +1197,27 @@ func (ut *UnifiedTracker) parseObjectID(identifier string) ObjectID {
 					return ObjectID{Name: tableParts[0], Type: types.TypeTable}
 				}
 				return ObjectID{Name: actualIdentifier, Type: types.TypeTable} // Assume table reference
-		// These come from extractCommentDependenciesWithNormalization in parser
-		case "TABLE":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeTable}
-		case "VIEW":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeView}
-		case "POLICY":
-			return ObjectID{Name: actualIdentifier, Type: types.TypePolicy}
-		case "FUNCTION":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeFunction}
-		case "INDEX":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeIndex}
-		case "TRIGGER":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeTrigger}
-		case "SEQUENCE":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeSequence}
-		case "SCHEMA":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeSchema}
-		case "EXTENSION":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeExtension}
-		case "TYPE":
-			return ObjectID{Name: actualIdentifier, Type: types.TypeType}
+			// These come from extractCommentDependenciesWithNormalization in parser
+			case "TABLE":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeTable}
+			case "VIEW":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeView}
+			case "POLICY":
+				return ObjectID{Name: actualIdentifier, Type: types.TypePolicy}
+			case "FUNCTION":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeFunction}
+			case "INDEX":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeIndex}
+			case "TRIGGER":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeTrigger}
+			case "SEQUENCE":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeSequence}
+			case "SCHEMA":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeSchema}
+			case "EXTENSION":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeExtension}
+			case "TYPE":
+				return ObjectID{Name: actualIdentifier, Type: types.TypeType}
 			default:
 				// Fallback to parsing the actual identifier without prefix
 				return ut.parseObjectID(actualIdentifier)
@@ -1184,8 +1236,8 @@ func (ut *UnifiedTracker) parseObjectID(identifier string) ObjectID {
 
 		identifier_lower := strings.ToLower(parts[0])
 		if strings.HasSuffix(identifier_lower, "_enum") ||
-		   strings.HasSuffix(identifier_lower, "_status") ||
-		   strings.HasSuffix(identifier_lower, "_type") {
+			strings.HasSuffix(identifier_lower, "_status") ||
+			strings.HasSuffix(identifier_lower, "_type") {
 			// Likely a custom enum type
 			objType = types.TypeEnum
 		} else {
@@ -1196,7 +1248,7 @@ func (ut *UnifiedTracker) parseObjectID(identifier string) ObjectID {
 			}
 		}
 
-		return ObjectID{Name: parts[0], Type: objType}
+		return ObjectID{Schema: "public", Name: parts[0], Type: objType}
 	case 2:
 		return ObjectID{Schema: parts[0], Name: parts[1], Type: types.TypeTable}
 	case 3:
@@ -1274,7 +1326,7 @@ func extractTags(stmt types.Statement) []string {
 }
 
 // extractDatabaseMetadata extracts relevant metadata based on object type
-func (ut *UnifiedTracker) extractDatabaseMetadata(dbMeta *metadata.DatabaseMetadata, objectID ObjectID) interface{} {
+func (ut *UnifiedTracker) extractDatabaseMetadata(dbMeta *metadata.DatabaseMetadata, objectID ObjectID) any {
 	switch objectID.Type {
 	case types.TypeTable:
 		if schema, exists := dbMeta.Schemas[objectID.Schema]; exists {
@@ -1297,22 +1349,10 @@ func (ut *UnifiedTracker) extractDatabaseMetadata(dbMeta *metadata.DatabaseMetad
 func makeKey(name string, objType types.ObjectType) string {
 	normalizedName := strings.ToLower(name)
 
-	// Strip schema qualifier for ALL object types (e.g., "public.blueprints" → "blueprints")
-	// This ensures consistent keying whether an object is created as "public.table" or "table"
-	// and whether dependencies reference it as "public.table" or "table"
-	//
-	// Why this matters:
-	// - CREATE TABLE public.blueprints (...) creates key "blueprints::TABLE"
-	// - INDEX on blueprints references it as "blueprints", looks for "blueprints::TABLE"
-	// - Without stripping, "public.blueprints::TABLE" != "blueprints::TABLE" → false warning
-	//
-	// Special case: For schema objects themselves (CREATE SCHEMA foo), preserve the name
-	if objType != types.TypeSchema {
-		if dotIndex := strings.LastIndex(normalizedName, "."); dotIndex > 0 {
-			// Extract just the object name after the last dot
-			normalizedName = normalizedName[dotIndex+1:]
-		}
-	}
+	// SCHEMA STRIPPING REMOVED:
+	// Previously, we stripped schema qualifiers (e.g. "public.users" -> "users").
+	// This caused collisions between "public.users" and "admin.users".
+	// We now preserve the full name to ensure uniqueness across schemas.
 
 	return fmt.Sprintf("%s::%s", normalizedName, objType)
 }
@@ -1373,6 +1413,23 @@ func (ut *UnifiedTracker) GetProcessingStats() (processed, total int64) {
 func (ut *UnifiedTracker) ClearProcessedMigrations() {
 	if ut.streamingMode {
 		ut.migrations = nil // Clear migration slice to free memory
+		ut.compactHistory() // Prune object history to save memory
+	}
+}
+
+// compactHistory prunes lifecycle event history for all objects to reduce memory usage
+// It keeps only the creation event and the most recent event
+func (ut *UnifiedTracker) compactHistory() {
+	for _, lifecycle := range ut.objects {
+		if len(lifecycle.History) > 2 {
+			// Keep first event (creation) and last event (latest state)
+			// This preserves origin and current state while freeing intermediate events
+			first := lifecycle.History[0]
+			last := lifecycle.History[len(lifecycle.History)-1]
+
+			// Re-allocate to release underlying array
+			lifecycle.History = []LifecycleEvent{first, last}
+		}
 	}
 }
 
@@ -1442,10 +1499,8 @@ func (ut *UnifiedTracker) GetCriticalCycles() []DDLCycle {
 // IsObjectInCycle checks if an object is part of any DDL cycle
 func (ut *UnifiedTracker) IsObjectInCycle(objectKey string) bool {
 	for _, cycle := range ut.detectedCycles {
-		for _, objectName := range cycle.Objects {
-			if objectName == objectKey {
-				return true
-			}
+		if slices.Contains(cycle.Objects, objectKey) {
+			return true
 		}
 	}
 	return false

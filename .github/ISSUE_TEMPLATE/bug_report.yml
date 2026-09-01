@@ -1,0 +1,90 @@
+name: Bug Report
+description: File a bug report to help us improve
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What version of pgsquash-engine are you using?
+      placeholder: "0.9.7"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug
+      placeholder: Tell us what you see!
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps To Reproduce
+      description: How can we reproduce this?
+      placeholder: |
+        1. Run command `pgsquash squash ...`
+        2. With these migration files (attach if possible)
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: Please copy and paste any relevant log output
+      render: shell
+
+  - type: dropdown
+    id: safety-level
+    attributes:
+      label: Safety Level
+      options:
+        - paranoid
+        - conservative
+        - standard
+        - aggressive
+        - not applicable
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Your environment details
+      value: |
+        - OS: [e.g., macOS 14.0, Ubuntu 22.04]
+        - Go Version: [e.g., 1.21.0]
+        - PostgreSQL Version: [e.g., 16.0]
+        - Docker Version (if using validation): [e.g., 24.0.0]
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues to ensure this is not a duplicate
+          required: true
+        - label: I have included the pgsquash-engine version
+          required: true
+        - label: I have provided steps to reproduce
+          required: true

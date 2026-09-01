@@ -2,7 +2,7 @@ package types
 
 import (
 	"fmt"
-	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -241,19 +241,10 @@ func (pts *PostgreSQLTypeSystem) IsBuiltinType(typeName string) bool {
 
 // ParseArrayType parses an array type specification
 func (pts *PostgreSQLTypeSystem) ParseArrayType(typeSpec string) (*ArrayType, error) {
-	// Handle array syntax: type[], type[size], type[][], etc.
-	arrayPattern := regexp.MustCompile(`^(.+?)(\[\d*\])+$`)
-	matches := arrayPattern.FindStringSubmatch(typeSpec)
-
-	if len(matches) < 3 {
+	elementType, dimensions, ok := parseArrayTypeSpec(typeSpec)
+	if !ok {
 		return nil, errors.NewTypeError(errors.ErrorCodeArraySpecError, "invalid array type specification", typeSpec)
 	}
-
-	elementType := strings.TrimSpace(matches[1])
-	dimensionSpec := matches[2]
-
-	// Count dimensions
-	dimensions := strings.Count(dimensionSpec, "[")
 
 	return &ArrayType{
 		Name:        typeSpec,
@@ -348,11 +339,8 @@ func (pts *PostgreSQLTypeSystem) normalizeTypeName(typeName string) string {
 	}
 
 	// Handle precision specifications (remove for compatibility checking)
-	precisionPattern := regexp.MustCompile(`^(varchar|character varying|char|character|numeric|decimal|time|timestamp|interval|bit)\s*\(\d+(?:,\d+)?\)$`)
-	if precisionPattern.MatchString(normalized) {
-		// Extract base type
-		parts := strings.Split(normalized, "(")
-		return strings.TrimSpace(parts[0])
+	if base, ok := extractPrecisionBaseType(normalized); ok {
+		return base
 	}
 
 	return normalized
@@ -377,13 +365,7 @@ func (pts *PostgreSQLTypeSystem) hasImplicitConversion(from, to string) bool {
 		return false
 	}
 
-	for _, target := range conversions {
-		if target == to {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(conversions, to)
 }
 
 // hasAssignmentConversion checks for assignment type conversions
@@ -404,13 +386,7 @@ func (pts *PostgreSQLTypeSystem) hasAssignmentConversion(from, to string) bool {
 		return false
 	}
 
-	for _, target := range conversions {
-		if target == to {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(conversions, to)
 }
 
 // hasExplicitConversion checks for explicit type conversions
@@ -496,12 +472,7 @@ func (pts *PostgreSQLTypeSystem) checkSpecialCases(from, to string, compatibilit
 
 // isInSlice checks if a string is in a slice
 func (pts *PostgreSQLTypeSystem) isInSlice(str string, slice []string) bool {
-	for _, item := range slice {
-		if item == str {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, str)
 }
 
 // GetTypeSize estimates the storage size of a type
@@ -559,15 +530,8 @@ func (pts *PostgreSQLTypeSystem) GetTypeSize(typeName string) (int, error) {
 
 // extractSizeFromSpec extracts size information from type specification
 func (pts *PostgreSQLTypeSystem) extractSizeFromSpec(typeSpec string) (int, error) {
-	// Extract size from varchar(n), char(n), numeric(p,s), etc.
-	pattern := regexp.MustCompile(`\((\d+)(?:,\d+)?\)`)
-	matches := pattern.FindStringSubmatch(typeSpec)
-
-	if len(matches) > 1 {
-		size, err := strconv.Atoi(matches[1])
-		if err != nil {
-			return -1, err
-		}
+	size, ok := extractFirstSizeFromTypeSpec(typeSpec)
+	if ok {
 		return size, nil
 	}
 
@@ -581,10 +545,8 @@ func (pts *PostgreSQLTypeSystem) ValidateEnumValue(enumTypeName, value string) e
 		return errors.NewTypeError(errors.ErrorCodeTypeNotFound, "enum type not found", enumTypeName)
 	}
 
-	for _, validValue := range enumType.Values {
-		if validValue == value {
-			return nil
-		}
+	if slices.Contains(enumType.Values, value) {
+		return nil
 	}
 
 	return errors.NewTypeError(errors.ErrorCodeEnumValidationError, "value is not valid for enum type", enumTypeName).WithAdditional("value", value).WithAdditional("valid_values", enumType.Values)
@@ -605,4 +567,148 @@ func (pts *PostgreSQLTypeSystem) IsCompatibleArrayDimensions(from, to *ArrayType
 	// PostgreSQL allows assignment between different array dimensions in some cases
 	// Generally, you can assign a lower-dimensional array to a higher-dimensional one
 	return from.Dimensions <= to.Dimensions
+}
+
+func parseArrayTypeSpec(typeSpec string) (string, int, bool) {
+	trimmed := strings.TrimSpace(typeSpec)
+	if trimmed == "" {
+		return "", 0, false
+	}
+
+	i := len(trimmed) - 1
+	dimensions := 0
+
+	for i >= 0 {
+		for i >= 0 && isWhitespace(trimmed[i]) {
+			i--
+		}
+		if i < 0 || trimmed[i] != ']' {
+			break
+		}
+
+		j := i - 1
+		for j >= 0 && trimmed[j] >= '0' && trimmed[j] <= '9' {
+			j--
+		}
+		if j < 0 || trimmed[j] != '[' {
+			return "", 0, false
+		}
+
+		dimensions++
+		i = j - 1
+	}
+
+	if dimensions == 0 {
+		return "", 0, false
+	}
+
+	elementType := strings.TrimSpace(trimmed[:i+1])
+	if elementType == "" {
+		return "", 0, false
+	}
+
+	return elementType, dimensions, true
+}
+
+func extractPrecisionBaseType(normalized string) (string, bool) {
+	open := strings.Index(normalized, "(")
+	close := strings.LastIndex(normalized, ")")
+	if open <= 0 || close != len(normalized)-1 || close <= open {
+		return "", false
+	}
+
+	base := strings.TrimSpace(normalized[:open])
+	if !isPrecisionCompatibleBaseType(base) {
+		return "", false
+	}
+
+	inner := strings.TrimSpace(normalized[open+1 : close])
+	if !isNumericPair(inner) {
+		return "", false
+	}
+
+	return base, true
+}
+
+func isPrecisionCompatibleBaseType(base string) bool {
+	switch base {
+	case "varchar", "character varying", "char", "character", "numeric", "decimal", "time", "timestamp", "interval", "bit":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNumericPair(value string) bool {
+	if value == "" {
+		return false
+	}
+
+	parts := strings.Split(value, ",")
+	if len(parts) > 2 {
+		return false
+	}
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return false
+		}
+		for i := 0; i < len(part); i++ {
+			if part[i] < '0' || part[i] > '9' {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func extractFirstSizeFromTypeSpec(typeSpec string) (int, bool) {
+	open := strings.Index(typeSpec, "(")
+	if open == -1 {
+		return 0, false
+	}
+
+	close := strings.Index(typeSpec[open+1:], ")")
+	if close == -1 {
+		return 0, false
+	}
+	close += open + 1
+
+	inner := strings.TrimSpace(typeSpec[open+1 : close])
+	if inner == "" {
+		return 0, false
+	}
+
+	first := inner
+	if before, _, ok := strings.Cut(inner, ","); ok {
+		first = strings.TrimSpace(before)
+	}
+
+	if first == "" {
+		return 0, false
+	}
+
+	for i := 0; i < len(first); i++ {
+		if first[i] < '0' || first[i] > '9' {
+			return 0, false
+		}
+	}
+
+	size, err := strconv.Atoi(first)
+	if err != nil {
+		return 0, false
+	}
+
+	return size, true
+}
+
+func isWhitespace(ch byte) bool {
+	switch ch {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	default:
+		return false
+	}
 }

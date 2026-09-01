@@ -322,11 +322,10 @@ func (cpr *ConsoleProgressReporter) printProgress(summary ProgressSummary) {
 
 // ProgressAggregator aggregates progress from multiple sources
 type ProgressAggregator struct {
-	sources       map[string]ProgressReporter
-	weights       map[string]float64
-	totalWeight   float64
-	aggregatedSum ProgressSummary //nolint:unused // Reserved for future progress aggregation
-	mu            sync.RWMutex
+	sources     map[string]ProgressReporter
+	weights     map[string]float64
+	totalWeight float64
+	mu          sync.RWMutex
 }
 
 // NewProgressAggregator creates a new progress aggregator

@@ -5,7 +5,7 @@ set -euo pipefail
 # Tests migrations against multiple PostgreSQL versions
 #
 # NOTE: For manual testing, you can also use docker-compose.testing.yml which includes
-# PostgreSQL 17, 15, and 13. This script provides automated testing across more versions
+# PostgreSQL 17, 16, and 15. This script provides automated testing across more versions
 # with isolated containers and detailed reporting.
 
 # Colors
@@ -24,7 +24,7 @@ log_step() { echo -e "${PURPLE}[STEP]${NC} $1"; }
 
 # Configuration
 MIGRATIONS_DIR="${1:-migrations}"
-POSTGRES_VERSIONS=("17" "16" "15" "14" "13")
+POSTGRES_VERSIONS=("17" "16" "15" "18")
 OUTPUT_DIR="multi-version-test-results-$(date +%Y%m%d-%H%M%S)"
 
 # Test results tracking
@@ -40,7 +40,7 @@ ARGUMENTS:
     MIGRATIONS_DIR      Directory containing migrations (default: migrations)
 
 OPTIONS:
-    --versions VERS     Comma-separated PostgreSQL versions (default: 17,16,15,14,13)
+    --versions VERS     Comma-separated PostgreSQL versions (default: 17,16,15,18)
     --quick             Test only latest and oldest versions
     -h, --help          Show this help message
 
@@ -52,7 +52,7 @@ EXAMPLES:
     $0 my-migrations/
 
     # Test specific versions
-    $0 --versions 17,15,13
+    $0 --versions 17,16,15
 
     # Quick test (latest and oldest only)
     $0 --quick

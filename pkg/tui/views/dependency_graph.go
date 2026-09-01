@@ -160,10 +160,7 @@ func (d *DependencyGraphView) renderObjectList() string {
 
 	maxVisible := 15
 	startIdx := d.scrollOffset
-	endIdx := d.scrollOffset + maxVisible
-	if endIdx > len(d.objects) {
-		endIdx = len(d.objects)
-	}
+	endIdx := min(d.scrollOffset+maxVisible, len(d.objects))
 
 	visibleObjects := d.objects[startIdx:endIdx]
 

@@ -5,12 +5,9 @@ import (
 
 	// Use public API packages
 	"github.com/capysquash/pgsquash-engine/pkg/cli"
+	"github.com/capysquash/pgsquash-engine/pkg/errors"
 	"github.com/capysquash/pgsquash-engine/pkg/plugins"
 	"github.com/capysquash/pgsquash-engine/pkg/utils"
-
-	// Still need internal/errors for structured error handling
-	// This could be exported in the future if needed externally
-	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // pgsquash: The PostgreSQL migration consolidation engine

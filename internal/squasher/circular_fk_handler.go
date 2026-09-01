@@ -95,8 +95,8 @@ func (h *CircularFKHandler) extractForeignKeys(stmt *types.Statement) []*Foreign
 		return constraints
 	}
 
-	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
-	if !ok {
+	parseResult := stmt.ParseTree
+	if parseResult == nil {
 		return constraints
 	}
 
@@ -412,8 +412,8 @@ func (h *CircularFKHandler) removeConstraintsFromCreateTable(
 		).WithObject(stmt.ObjectName, string(stmt.ObjectType))
 	}
 
-	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
-	if !ok {
+	parseResult := stmt.ParseTree
+	if parseResult == nil {
 		return nil, errors.NewError(
 			errors.ErrorCodeSyntaxError,
 			"invalid parse tree type",

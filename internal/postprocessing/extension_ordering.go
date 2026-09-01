@@ -1,6 +1,7 @@
 package postprocessing
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/utils"
@@ -24,7 +25,7 @@ func FixExtensionOrder(sql string) string {
 
 	// Find all CREATE EXTENSION statements and their positions
 	lines := strings.Split(sql, "\n")
-	extensionMap := make(map[string]string)  // extension name -> full line
+	extensionMap := make(map[string]string)  // extension name (lowercase) -> full line
 	extensionPositions := make(map[int]bool) // line numbers to remove
 
 	for i, line := range lines {
@@ -46,9 +47,11 @@ func FixExtensionOrder(sql string) string {
 			}
 
 			if extName != "" {
-				extensionMap[extName] = line
+				// Use lowercase for map key to ensure matching against correctOrder works
+				lowerExtName := strings.ToLower(extName)
+				extensionMap[lowerExtName] = line
 				extensionPositions[i] = true
-				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found extension: %s at line %d", extName, i+1)
+				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found extension: %s (key: %s) at line %d", extName, lowerExtName, i+1)
 			}
 		}
 	}
@@ -60,7 +63,7 @@ func FixExtensionOrder(sql string) string {
 		// Find the extension section header
 		extensionHeaderIdx := -1
 		for i, line := range lines {
-			if strings.Contains(line, "=== EXTENSIONS OBJECTS ===") {
+			if strings.Contains(line, "=== EXTENSIONS OBJECTS ===") || strings.Contains(line, "=== EXTENSIONS ===") {
 				extensionHeaderIdx = i
 				break
 			}
@@ -91,6 +94,8 @@ func FixExtensionOrder(sql string) string {
 				remainingExtNames = append(remainingExtNames, extName)
 			}
 			// Sort remaining extensions by name for stable output
+			sort.Strings(remainingExtNames)
+
 			for _, extName := range remainingExtNames {
 				if line, exists := extensionMap[extName]; exists {
 					result = append(result, line)
@@ -105,8 +110,12 @@ func FixExtensionOrder(sql string) string {
 				}
 			}
 
-			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Reordered %d extensions to ensure correct dependency order", len(extensionMap))
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Reordered %d extensions to ensure correct dependency order", len(extensionMap)+len(remainingExtNames)) // Note: remaining logic is a bit weird here since map is depleted, but log message is fine
 			return strings.Join(result, "\n")
+		} else {
+			// If header not found, we can't safely reorder without risking breaking other things or putting them at top.
+			// But usually pgsquash generates this header.
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Warn("Extension header not found, skipping reordering")
 		}
 	}
 
@@ -132,12 +141,23 @@ func SortExtensionsByDependency(extensionLines []string) []string {
 
 	// Map extension names to their lines
 	extLineMap := make(map[string]string)
+
 	for _, line := range extensionLines {
 		parts := strings.Fields(line)
-		if len(parts) >= 5 {
-			extName := parts[4]                   // Position after "CREATE EXTENSION IF NOT EXISTS"
-			extName = strings.Trim(extName, `";`) // Remove quotes and semicolon
-			extLineMap[extName] = line
+		// Parse from end slightly more robustly than fixed index
+		var extName string
+		for j := len(parts) - 1; j >= 0; j-- {
+			part := strings.Trim(parts[j], `";`)
+			upper := strings.ToUpper(part)
+			if part != "" && upper != "EXISTS" && upper != "NOT" &&
+				upper != "IF" && upper != "EXTENSION" && upper != "CREATE" {
+				extName = part
+				break
+			}
+		}
+
+		if extName != "" {
+			extLineMap[strings.ToLower(extName)] = line
 		}
 	}
 
@@ -151,8 +171,14 @@ func SortExtensionsByDependency(extensionLines []string) []string {
 	}
 
 	// Add any remaining extensions not in the predefined order
-	for _, line := range extLineMap {
-		result = append(result, line)
+	var remaining []string
+	for name := range extLineMap {
+		remaining = append(remaining, name)
+	}
+	sort.Strings(remaining)
+
+	for _, name := range remaining {
+		result = append(result, extLineMap[name])
 	}
 
 	utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Sorted %d extensions by dependency order", len(result))

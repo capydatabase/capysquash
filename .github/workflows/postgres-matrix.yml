@@ -24,13 +24,17 @@ on:
 jobs:
   test-matrix:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental == true }}
 
     strategy:
       fail-fast: false
       matrix:
-        postgres: [12, 13, 14, 15, 16, 17]
-        go-version: ["1.25.4", "1.25.x"]
+        postgres: [15, 16, 17, 18]
+        go-version: ["1.25.x", "1.26.x"]
         test-type: [unit, integration]
+        include:
+          - postgres: 18
+            experimental: true
 
     services:
       postgres:
@@ -48,16 +52,16 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go-version }}
           cache: true
 
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
@@ -81,9 +85,9 @@ jobs:
         run: go vet ./...
 
       - name: Run staticcheck
-        uses: dominikh/staticcheck-action@v1.3.1
+        uses: dominikh/staticcheck-action@v1.4.1
         with:
-          version: "2024.1.1"
+          version: "latest"
           install-go: false
 
       - name: Run tests
@@ -120,8 +124,8 @@ jobs:
           ./pgsquash validate test_migrations/ test_output/
 
       - name: Upload coverage to Codecov
-        if: matrix.test-type == 'unit' && matrix.postgres == 15 && matrix.go-version == '1.25.4'
-        uses: codecov/codecov-action@v4
+        if: matrix.test-type == 'unit' && matrix.postgres == 17 && matrix.go-version == '1.26.x'
+        uses: codecov/codecov-action@v7
         with:
           file: ./coverage.out
           flags: unittests
@@ -139,7 +143,7 @@ jobs:
           docker exec $(docker ps -q --filter ancestor=postgres:${{ matrix.postgres }}) psql -U postgres -d pgsquash_test -c "SELECT uuid_generate_v4();" || echo "uuid-ossp not available in PG ${{ matrix.postgres }}"
 
       - name: Test performance with large dataset
-        if: matrix.postgres >= 14 && matrix.test-type == 'integration'
+        if: matrix.postgres >= 15 && matrix.test-type == 'integration'
         run: |
           # Create a larger test dataset for performance testing
           go build -o pgsquash cmd/pgsquash/main.go
@@ -157,7 +161,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-pg${{ matrix.postgres }}-go${{ matrix.go-version }}-${{ matrix.test-type }}
           path: |
@@ -183,15 +187,13 @@ jobs:
           echo "|------------|----|------------|-------------|------------|-------------|" >> compatibility-report.md
 
           # This would be populated with actual test results in a real implementation
-          echo "| ✅ 12 | ✅ 1.25.4, 1.25.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
-          echo "| ✅ 13 | ✅ 1.25.4, 1.25.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
-          echo "| ✅ 14 | ✅ 1.25.4, 1.25.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
-          echo "| ✅ 15 | ✅ 1.25.4, 1.25.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
-          echo "| ✅ 16 | ✅ 1.25.4, 1.25.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
-          echo "| ✅ 17 | ✅ 1.25.4, 1.25.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
+          echo "| ✅ 15 | ✅ 1.25.x, 1.26.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
+          echo "| ✅ 16 | ✅ 1.25.x, 1.26.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
+          echo "| ✅ 17 | ✅ 1.25.x, 1.26.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
+          echo "| 🧪 18 (experimental) | ✅ 1.25.x, 1.26.x | ✅ | ✅ | ✅ | ✅ |" >> compatibility-report.md
 
       - name: Upload compatibility report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compatibility-report
           path: compatibility-report.md

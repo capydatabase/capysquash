@@ -15,6 +15,12 @@ type TransactionBoundaryRule struct{}
 
 // CanApply checks if the rule can be applied to the given lifecycle
 func (r *TransactionBoundaryRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool {
+	// If object is ultimately dropped, do not optimize transactions. Let it fall back to Drop.
+	if len(lifecycle.History) > 0 {
+		if lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+			return false
+		}
+	}
 	// Apply to lifecycles with multiple operations that can be grouped
 	return len(lifecycle.History) > 2
 }
@@ -23,7 +29,7 @@ func (r *TransactionBoundaryRule) CanApply(lifecycle *tracking.ObjectLifecycle) 
 // Delegates to squasher.TransactionPlanner for transaction grouping (single source of truth)
 func (r *TransactionBoundaryRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "TransactionRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "TransactionRule"})
 	}
 
 	// Collect all statements from lifecycle
@@ -33,7 +39,7 @@ func (r *TransactionBoundaryRule) Apply(lifecycle *tracking.ObjectLifecycle, eng
 	}
 
 	// Use TransactionPlanner for grouping (single source of truth)
-	planner := transaction.NewTransactionPlanner("14") // PostgreSQL 14+ default
+	planner := transaction.NewTransactionPlanner("17") // PostgreSQL 17 default baseline
 	plan := planner.PlanTransactions(statements)
 
 	// Generate optimized SQL from the plan

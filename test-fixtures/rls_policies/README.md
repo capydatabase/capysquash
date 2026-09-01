@@ -1,4 +1,5 @@
 # Test fixture: rls_policies
+
 # Tests Row Level Security policy consolidation
 
 This fixture tests how pgsquash handles RLS policies and role-based access:
@@ -9,10 +10,10 @@ This fixture tests how pgsquash handles RLS policies and role-based access:
 
 ## Original migrations:
 
-001_create_organizations.sql: Creates organizations table
-002_create_users.sql: Creates users table with org_id
-003_setup_rls.sql: Enables RLS and creates policies
-004_add_admin_role.sql: Creates admin role and policies
+001_create_organizations.sql: Creates organizations table.
+002_create_users.sql: Creates users table with org_id.
+003_setup_rls.sql: Enables RLS and creates policies.
+004_add_admin_role.sql: Creates admin role and policies.
 
 ## Expected behavior:
 

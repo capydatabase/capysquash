@@ -3,6 +3,7 @@ package transaction
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/parser"
@@ -11,30 +12,30 @@ import (
 
 // TransactionBatch represents a group of statements that can run in a single transaction
 type TransactionBatch struct {
-	Statements      []types.Statement
-	RequiresNoTxn   bool
-	MaxLockLevel    types.LockLevel
-	EstimatedTime   types.ExecutionTimeCategory
-	BatchNumber     int
+	Statements       []types.Statement
+	RequiresNoTxn    bool
+	MaxLockLevel     types.LockLevel
+	EstimatedTime    types.ExecutionTimeCategory
+	BatchNumber      int
 	CanRunInParallel bool
 }
 
 // TransactionPlan represents the complete execution plan for migrations
 type TransactionPlan struct {
-	Batches          []TransactionBatch
-	TotalStatements  int
-	TotalBatches     int
-	ConcurrentOps    int
-	LockConflicts    []LockConflict
-	Warnings         []string
+	Batches         []TransactionBatch
+	TotalStatements int
+	TotalBatches    int
+	ConcurrentOps   int
+	LockConflicts   []LockConflict
+	Warnings        []string
 }
 
 // LockConflict represents a potential lock conflict between statements
 type LockConflict struct {
-	Statement1    types.Statement
-	Statement2    types.Statement
-	ConflictType  string
-	Severity      string
+	Statement1     types.Statement
+	Statement2     types.Statement
+	ConflictType   string
+	Severity       string
 	Recommendation string
 }
 
@@ -211,6 +212,33 @@ func (tp *TransactionPlanner) generateWarnings(plan *TransactionPlan) {
 				fmt.Sprintf("Batch %d requires ACCESS EXCLUSIVE lock - will block all table access",
 					batch.BatchNumber))
 		}
+
+		// pgvet-inspired: multiple ALTER TABLE targets in one transaction can increase deadlock risk.
+		if !batch.RequiresNoTxn {
+			targets := uniqueAlterTableTargets(batch.Statements)
+			if len(targets) > 1 {
+				plan.Warnings = append(plan.Warnings,
+					fmt.Sprintf("Batch %d alters %d different tables in one transaction (%s) - consider splitting to reduce deadlock risk",
+						batch.BatchNumber,
+						len(targets),
+						strings.Join(targets, ", ")))
+			}
+		}
+
+		// pgvet-inspired: ADD CONSTRAINT without NOT VALID can hold heavier locks during validation.
+		for _, stmt := range batch.Statements {
+			if isAddConstraintWithoutNotValid(stmt) {
+				plan.Warnings = append(plan.Warnings,
+					fmt.Sprintf("Batch %d adds constraint on %s without NOT VALID - consider ADD CONSTRAINT ... NOT VALID then VALIDATE CONSTRAINT in a later transaction",
+						batch.BatchNumber, stmt.ObjectName))
+			}
+
+			if isNonConcurrentIndexOperation(stmt) {
+				plan.Warnings = append(plan.Warnings,
+					fmt.Sprintf("Batch %d performs %s on %s without CONCURRENTLY - this can block writes; consider CONCURRENTLY (outside a transaction)",
+						batch.BatchNumber, stmt.Operation, stmt.ObjectName))
+			}
+		}
 	}
 
 	// Warn about many concurrent operations
@@ -219,6 +247,70 @@ func (tp *TransactionPlanner) generateWarnings(plan *TransactionPlan) {
 			fmt.Sprintf("%d concurrent operations detected - ensure sufficient system resources",
 				plan.ConcurrentOps))
 	}
+}
+
+func uniqueAlterTableTargets(statements []types.Statement) []string {
+	seen := make(map[string]struct{})
+	for _, stmt := range statements {
+		if stmt.ObjectType != types.TypeTable || stmt.Operation != types.OpAlter {
+			continue
+		}
+		if stmt.ObjectName == "" {
+			continue
+		}
+		seen[stmt.ObjectName] = struct{}{}
+	}
+
+	targets := make([]string, 0, len(seen))
+	for t := range seen {
+		targets = append(targets, t)
+	}
+	sort.Strings(targets)
+
+	return targets
+}
+
+func isAddConstraintWithoutNotValid(stmt types.Statement) bool {
+	if stmt.ObjectType != types.TypeTable || stmt.Operation != types.OpAlter {
+		return false
+	}
+
+	sql := strings.ToUpper(stmt.SQL)
+	if !strings.Contains(sql, "ALTER TABLE") {
+		return false
+	}
+	if !strings.Contains(sql, "ADD CONSTRAINT") {
+		return false
+	}
+	if strings.Contains(sql, "NOT VALID") {
+		return false
+	}
+
+	return true
+}
+
+func isNonConcurrentIndexOperation(stmt types.Statement) bool {
+	if stmt.ObjectType != types.TypeIndex {
+		return false
+	}
+
+	if stmt.Operation != types.OpCreate && stmt.Operation != types.OpDrop {
+		return false
+	}
+
+	if stmt.Metadata.Concurrent {
+		return false
+	}
+
+	sql := strings.ToUpper(stmt.SQL)
+	if stmt.Operation == types.OpCreate && strings.Contains(sql, "CREATE INDEX") {
+		return true
+	}
+	if stmt.Operation == types.OpDrop && strings.Contains(sql, "DROP INDEX") {
+		return true
+	}
+
+	return false
 }
 
 // FormatPlan formats the transaction plan for display

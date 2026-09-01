@@ -15,7 +15,7 @@ type MemoryManager struct {
 	currentMemory  int64
 	statementPool  *sync.Pool
 	builderPool    *sync.Pool
-	parseCache     *LRUCache
+	parseCache     *LRUCache[string, *types.Statement]
 	mu             sync.RWMutex
 	gcThreshold    int64
 	lastGC         time.Time
@@ -29,19 +29,20 @@ func NewMemoryManager(maxMemoryMB int) *MemoryManager {
 		maxMemoryBytes: maxBytes,
 		gcThreshold:    maxBytes / 4, // Trigger GC at 25% memory usage
 		lastGC:         time.Now(),
-		parseCache:     NewLRUCache(1000), // Cache 1000 parsed statements
+		parseCache:     NewLRUCache[string, *types.Statement](1000), // Cache 1000 parsed statements
 	}
 
 	// Initialize object pools
 	mm.statementPool = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &types.Statement{}
 		},
 	}
 
 	mm.builderPool = &sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 0, 1024) // Pre-allocate 1KB buffers
+		New: func() any {
+			b := make([]byte, 0, 1024) // Pre-allocate 1KB buffers
+			return &b
 		},
 	}
 
@@ -65,14 +66,15 @@ func (mm *MemoryManager) PutStatement(stmt *types.Statement) {
 
 // GetBuffer retrieves a pooled byte buffer
 func (mm *MemoryManager) GetBuffer() []byte {
-	return mm.builderPool.Get().([]byte)[:0] // Reset length to 0
+	buf := mm.builderPool.Get().(*[]byte)
+	return (*buf)[:0] // Reset length to 0
 }
 
 // PutBuffer returns a buffer to the pool
 func (mm *MemoryManager) PutBuffer(buf []byte) {
 	if cap(buf) <= 64*1024 { // Only pool buffers <= 64KB
-		//nolint:staticcheck // SA6002: Slice allocation is intentional for pool usage
-		mm.builderPool.Put(buf)
+		buf = buf[:0]
+		mm.builderPool.Put(&buf)
 	}
 }
 
@@ -148,9 +150,9 @@ type MemoryStats struct {
 }
 
 // LRUCache provides memory-efficient caching with least-recently-used eviction
-type LRUCache struct {
+type LRUCache[K comparable, V any] struct {
 	capacity int
-	items    map[string]*list.Element
+	items    map[K]*list.Element
 	lru      *list.List
 	hits     int64
 	misses   int64
@@ -158,43 +160,44 @@ type LRUCache struct {
 }
 
 // CacheItem represents a cached item
-type CacheItem struct {
-	Key   string
-	Value interface{}
+type CacheItem[K comparable, V any] struct {
+	Key   K
+	Value V
 }
 
 // NewLRUCache creates a new LRU cache with the specified capacity
-func NewLRUCache(capacity int) *LRUCache {
-	return &LRUCache{
+func NewLRUCache[K comparable, V any](capacity int) *LRUCache[K, V] {
+	return &LRUCache[K, V]{
 		capacity: capacity,
-		items:    make(map[string]*list.Element),
+		items:    make(map[K]*list.Element),
 		lru:      list.New(),
 	}
 }
 
 // Get retrieves an item from the cache
-func (c *LRUCache) Get(key string) (interface{}, bool) {
+func (c *LRUCache[K, V]) Get(key K) (V, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if element, exists := c.items[key]; exists {
 		c.hits++
 		c.lru.MoveToFront(element)
-		return element.Value.(*CacheItem).Value, true
+		return element.Value.(*CacheItem[K, V]).Value, true
 	}
 
 	c.misses++
-	return nil, false
+	var zero V
+	return zero, false
 }
 
 // Put adds an item to the cache
-func (c *LRUCache) Put(key string, value interface{}) {
+func (c *LRUCache[K, V]) Put(key K, value V) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if element, exists := c.items[key]; exists {
 		c.lru.MoveToFront(element)
-		element.Value.(*CacheItem).Value = value
+		element.Value.(*CacheItem[K, V]).Value = value
 		return
 	}
 
@@ -203,24 +206,24 @@ func (c *LRUCache) Put(key string, value interface{}) {
 		oldest := c.lru.Back()
 		if oldest != nil {
 			c.lru.Remove(oldest)
-			delete(c.items, oldest.Value.(*CacheItem).Key)
+			delete(c.items, oldest.Value.(*CacheItem[K, V]).Key)
 		}
 	}
 
-	item := &CacheItem{Key: key, Value: value}
+	item := &CacheItem[K, V]{Key: key, Value: value}
 	element := c.lru.PushFront(item)
 	c.items[key] = element
 }
 
 // Size returns the current number of items in the cache
-func (c *LRUCache) Size() int {
+func (c *LRUCache[K, V]) Size() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.lru.Len()
 }
 
 // HitRate returns the cache hit rate
-func (c *LRUCache) HitRate() float64 {
+func (c *LRUCache[K, V]) HitRate() float64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -232,33 +235,33 @@ func (c *LRUCache) HitRate() float64 {
 }
 
 // Clear removes all items from the cache
-func (c *LRUCache) Clear() {
+func (c *LRUCache[K, V]) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.lru.Init()
-	c.items = make(map[string]*list.Element)
+	c.items = make(map[K]*list.Element)
 	c.hits = 0
 	c.misses = 0
 }
 
 // Deduplicator handles duplicate statement detection and removal
-type Deduplicator struct {
+type Deduplicator[T any] struct {
 	seen     map[string]bool
-	hashFunc func(interface{}) string
+	hashFunc func(T) string
 	mu       sync.RWMutex
 }
 
 // NewDeduplicator creates a new deduplicator with the specified hash function
-func NewDeduplicator(hashFunc func(interface{}) string) *Deduplicator {
-	return &Deduplicator{
+func NewDeduplicator[T any](hashFunc func(T) string) *Deduplicator[T] {
+	return &Deduplicator[T]{
 		seen:     make(map[string]bool),
 		hashFunc: hashFunc,
 	}
 }
 
 // IsDuplicate checks if an item has been seen before
-func (d *Deduplicator) IsDuplicate(item interface{}) bool {
+func (d *Deduplicator[T]) IsDuplicate(item T) bool {
 	hash := d.hashFunc(item)
 
 	d.mu.RLock()
@@ -277,14 +280,14 @@ func (d *Deduplicator) IsDuplicate(item interface{}) bool {
 }
 
 // Reset clears the deduplicator state
-func (d *Deduplicator) Reset() {
+func (d *Deduplicator[T]) Reset() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.seen = make(map[string]bool)
 }
 
 // GetStats returns deduplication statistics
-func (d *Deduplicator) GetStats() DeduplicationStats {
+func (d *Deduplicator[T]) GetStats() DeduplicationStats {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 

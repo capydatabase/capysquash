@@ -2,7 +2,6 @@ package builder
 
 import (
 	"bytes"
-	"regexp"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/types"
@@ -594,16 +593,16 @@ type ConstraintDefinition struct {
 }
 
 type IndexDefinition struct {
-	Schema                   string         `json:"schema"`
-	Table                    string         `json:"table"`
-	Name                     string         `json:"name,omitempty"`
-	IfNotExists              bool           `json:"if_not_exists"`
-	Unique                   bool           `json:"unique"`
-	Method                   string         `json:"method"` // BTREE, HASH, GIN, GIST, etc.
-	HadExplicitAccessMethod  bool           `json:"had_explicit_access_method"` // BUG-001: Track if USING was explicit
-	Columns                  []*IndexColumn `json:"columns"`
-	Where                    string         `json:"where,omitempty"`
-	Comment                  string         `json:"comment,omitempty"`
+	Schema                  string         `json:"schema"`
+	Table                   string         `json:"table"`
+	Name                    string         `json:"name,omitempty"`
+	IfNotExists             bool           `json:"if_not_exists"`
+	Unique                  bool           `json:"unique"`
+	Method                  string         `json:"method"`                     // BTREE, HASH, GIN, GIST, etc.
+	HadExplicitAccessMethod bool           `json:"had_explicit_access_method"` // BUG-001: Track if USING was explicit
+	Columns                 []*IndexColumn `json:"columns"`
+	Where                   string         `json:"where,omitempty"`
+	Comment                 string         `json:"comment,omitempty"`
 }
 
 type IndexColumn struct {
@@ -698,15 +697,13 @@ func (b *SQLBuilder) fromASTStatement(stmt types.Statement) *SQLBuilder {
 	// Only deparse if we don't have original SQL
 	if stmt.ParseTree != nil {
 		// The ParseTree is stored as interface{}, try to cast to *pg_query.ParseResult
-		switch parseTree := stmt.ParseTree.(type) {
-		case *pg_query.ParseResult:
+		// The ParseTree is stored as concrete type
+		if parseTree := stmt.ParseTree; parseTree != nil {
 			if deparsed, err := pg_query.Deparse(parseTree); err == nil {
 				// pg_query.Deparse() adds "USING btree" even when it wasn't in the original SQL.
 				// This causes errors for spatial types (point, geography, geometry) which need GIST/SP-GIST.
 				if stmt.ObjectType == types.TypeIndex && !stmt.IndexHadExplicitAccessMethod {
-					// Remove "USING btree" (case-insensitive, preserves spacing)
-					re := regexp.MustCompile(`(?i)\s+USING\s+btree\s*`)
-					deparsed = re.ReplaceAllString(deparsed, " ")
+					deparsed = stripImplicitUsingBtreeClause(deparsed)
 				}
 				b.Statement(deparsed)
 				return b
@@ -753,4 +750,84 @@ func (b *SQLBuilder) fromRevokeStatement(stmt types.Statement) *SQLBuilder {
 	b.S().P("ON").S().P(string(stmt.ObjectType)).S().Quote(stmt.ObjectName)
 	b.S().P("FROM").S().P(strings.Join(stmt.Grantees, ", "))
 	return b
+}
+
+func stripImplicitUsingBtreeClause(sql string) string {
+	if strings.TrimSpace(sql) == "" {
+		return sql
+	}
+
+	lower := strings.ToLower(sql)
+	for i := 0; i < len(lower); i++ {
+		if !hasBuilderKeywordAt(lower, i, "using") {
+			continue
+		}
+
+		j := skipBuilderWhitespace(lower, i+len("using"))
+		if !hasBuilderKeywordAt(lower, j, "btree") {
+			continue
+		}
+
+		start := i
+		for start > 0 && isBuilderWhitespaceByte(lower[start-1]) {
+			start--
+		}
+
+		end := j + len("btree")
+		for end < len(lower) && isBuilderWhitespaceByte(lower[end]) {
+			end++
+		}
+
+		prefix := sql[:start]
+		suffix := sql[end:]
+
+		if prefix != "" && suffix != "" && !isBuilderWhitespaceByte(prefix[len(prefix)-1]) && !isBuilderWhitespaceByte(suffix[0]) {
+			return prefix + " " + suffix
+		}
+
+		return prefix + suffix
+	}
+
+	return sql
+}
+
+func hasBuilderKeywordAt(value string, pos int, keyword string) bool {
+	if pos < 0 || pos+len(keyword) > len(value) {
+		return false
+	}
+
+	if value[pos:pos+len(keyword)] != keyword {
+		return false
+	}
+
+	if pos > 0 && isBuilderIdentifierByte(value[pos-1]) {
+		return false
+	}
+
+	end := pos + len(keyword)
+	if end < len(value) && isBuilderIdentifierByte(value[end]) {
+		return false
+	}
+
+	return true
+}
+
+func skipBuilderWhitespace(value string, pos int) int {
+	for pos < len(value) && isBuilderWhitespaceByte(value[pos]) {
+		pos++
+	}
+	return pos
+}
+
+func isBuilderIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
+}
+
+func isBuilderWhitespaceByte(ch byte) bool {
+	switch ch {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	default:
+		return false
+	}
 }

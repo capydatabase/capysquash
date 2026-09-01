@@ -6,6 +6,7 @@ import (
 
 	"github.com/capysquash/pgsquash-engine/internal/tracking"
 	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 
 	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
@@ -19,10 +20,14 @@ func (r *ColumnEvolutionRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool
 		return false
 	}
 
-	// DEBUG: Log lifecycle history
-	fmt.Printf("[COLUMN-EVO-DEBUG] CanApply called for table %s, history events: %d\n", lifecycle.Name, len(lifecycle.History))
+	debugColumnEvolution("CanApply table=%s history_events=%d", lifecycle.Name, len(lifecycle.History))
 	for i, event := range lifecycle.History {
-		fmt.Printf("[COLUMN-EVO-DEBUG]   Event %d: Op=%s, SQL preview: %s\n", i, event.Operation, strings.ReplaceAll(event.Statement.SQL[:min(80, len(event.Statement.SQL))], "\n", "\\n"))
+		debugColumnEvolution(
+			"  Event %d: Op=%s SQL=%s",
+			i,
+			event.Operation,
+			strings.ReplaceAll(event.Statement.SQL[:min(80, len(event.Statement.SQL))], "\n", "\\n"),
+		)
 	}
 
 	// Check if there are column-related ALTER operations
@@ -46,9 +51,9 @@ func (r *ColumnEvolutionRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool
 
 	// Log if we found RENAME COLUMN
 	if hasRenameColumn {
-		fmt.Printf("[COLUMN-EVO-DEBUG] Table %s has RENAME COLUMN operations, CanApply=true\n", lifecycle.Name)
+		debugColumnEvolution("Table %s has RENAME COLUMN operations, CanApply=true", lifecycle.Name)
 	} else {
-		fmt.Printf("[COLUMN-EVO-DEBUG] Table %s has NO RENAME COLUMN operations, CanApply=false\n", lifecycle.Name)
+		debugColumnEvolution("Table %s has NO RENAME COLUMN operations, CanApply=%v", lifecycle.Name, hasColumnOps)
 	}
 
 	return hasColumnOps
@@ -57,7 +62,7 @@ func (r *ColumnEvolutionRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool
 // Apply applies the consolidation rule to the given lifecycle
 func (r *ColumnEvolutionRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "ColumnEvolutionRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "ColumnEvolutionRule"})
 	}
 
 	// Track column evolution through lifecycle
@@ -150,8 +155,8 @@ func (r *ColumnEvolutionRule) extractColumnChange(alterSQL string, order int) *C
 
 func (r *ColumnEvolutionRule) parseAddColumn(alterSQL string, order int) *ColumnChange {
 	// Simple extraction for ADD COLUMN
-	lines := strings.Split(alterSQL, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(alterSQL, "\n")
+	for line := range lines {
 		upperLine := strings.ToUpper(strings.TrimSpace(line))
 		if strings.Contains(upperLine, "ADD COLUMN") {
 			// Extract column name and definition
@@ -170,8 +175,8 @@ func (r *ColumnEvolutionRule) parseAddColumn(alterSQL string, order int) *Column
 
 func (r *ColumnEvolutionRule) parseDropColumn(alterSQL string, order int) *ColumnChange {
 	// Simple extraction for DROP COLUMN
-	lines := strings.Split(alterSQL, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(alterSQL, "\n")
+	for line := range lines {
 		upperLine := strings.ToUpper(strings.TrimSpace(line))
 		if strings.Contains(upperLine, "DROP COLUMN") {
 			parts := strings.Fields(line)
@@ -189,8 +194,8 @@ func (r *ColumnEvolutionRule) parseDropColumn(alterSQL string, order int) *Colum
 
 func (r *ColumnEvolutionRule) parseAlterColumn(alterSQL string, order int) *ColumnChange {
 	// Simple extraction for ALTER COLUMN
-	lines := strings.Split(alterSQL, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(alterSQL, "\n")
+	for line := range lines {
 		upperLine := strings.ToUpper(strings.TrimSpace(line))
 		if strings.Contains(upperLine, "ALTER COLUMN") {
 			parts := strings.Fields(line)
@@ -254,7 +259,7 @@ func (r *ColumnEvolutionRule) isColumnOperation(sql string) bool {
 
 // trackColumnRenames extracts RENAME COLUMN operations and builds ColumnEvolutionInfo map
 func (r *ColumnEvolutionRule) trackColumnRenames(lifecycle *tracking.ObjectLifecycle) map[string]*tracking.ColumnEvolutionInfo {
-	fmt.Printf("[COLUMN-EVO-DEBUG] trackColumnRenames called for table %s\n", lifecycle.Name)
+	debugColumnEvolution("trackColumnRenames called for table %s", lifecycle.Name)
 	evolutions := make(map[string]*tracking.ColumnEvolutionInfo)
 
 	// Map to track current column names (oldName -> currentName)
@@ -265,7 +270,7 @@ func (r *ColumnEvolutionRule) trackColumnRenames(lifecycle *tracking.ObjectLifec
 	if parts := strings.Split(lifecycle.Name, "."); len(parts) > 1 {
 		tableName = parts[1] // Extract table name from schema.table
 	}
-	fmt.Printf("[COLUMN-EVO-DEBUG] Table name extracted: %s\n", tableName)
+	debugColumnEvolution("Table name extracted: %s", tableName)
 
 	// First pass: Extract initial column names from CREATE TABLE
 	for _, event := range lifecycle.History {
@@ -288,7 +293,7 @@ func (r *ColumnEvolutionRule) trackColumnRenames(lifecycle *tracking.ObjectLifec
 				// Extract RENAME COLUMN operation
 				// Format: ALTER TABLE table_name RENAME COLUMN old_name TO new_name
 				oldName, newName := r.extractRenameColumns(alterSQL)
-				fmt.Printf("[COLUMN-EVO-DEBUG] Found RENAME COLUMN: %s -> %s\n", oldName, newName)
+				debugColumnEvolution("Found RENAME COLUMN: %s -> %s", oldName, newName)
 				if oldName != "" && newName != "" {
 					// Find the original name (trace back through renames)
 					originalName := oldName
@@ -326,11 +331,19 @@ func (r *ColumnEvolutionRule) trackColumnRenames(lifecycle *tracking.ObjectLifec
 		}
 	}
 
-	fmt.Printf("[COLUMN-EVO-DEBUG] trackColumnRenames completed: found %d column evolutions\n", len(evolutions))
+	debugColumnEvolution("trackColumnRenames completed: found %d column evolutions", len(evolutions))
 	for key, evo := range evolutions {
-		fmt.Printf("[COLUMN-EVO-DEBUG]   %s: %s -> %s\n", key, evo.OriginalName, evo.FinalName)
+		debugColumnEvolution("  %s: %s -> %s", key, evo.OriginalName, evo.FinalName)
 	}
 	return evolutions
+}
+
+func debugColumnEvolution(format string, args ...any) {
+	logger := utils.GetDefaultLogger()
+	if logger == nil {
+		return
+	}
+	logger.WithPrefix("COLUMN-EVO").Debug(format, args...)
 }
 
 // extractColumnNamesFromCreate extracts column names from CREATE TABLE statement

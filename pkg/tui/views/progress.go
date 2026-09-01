@@ -238,10 +238,7 @@ func (p *ProgressView) renderComplete() string {
 // renderProgressBar renders a progress bar
 func (p *ProgressView) renderProgressBar() string {
 	width := 50
-	filled := int(p.progress * float64(width))
-	if filled > width {
-		filled = width
-	}
+	filled := min(int(p.progress*float64(width)), width)
 
 	percent := fmt.Sprintf("%.0f%%", p.progress*100)
 
@@ -301,7 +298,11 @@ func (p *ProgressView) runSquash() tea.Msg {
 	}
 
 	// Create engine
-	engine := squasher.NewEngine(engineCfg)
+	engine, err := squasher.NewEngine(engineCfg)
+	if err != nil {
+		return viewtypes.ErrorMsg{Err: fmt.Errorf("failed to initialize squasher engine: %w", err)}
+	}
+	defer engine.Close()
 
 	// Get migration files
 	files, err := filepath.Glob(filepath.Join(p.migrationDir, "*.sql"))
@@ -324,10 +325,12 @@ func (p *ProgressView) runSquash() tea.Msg {
 	}
 
 	// Run squashing
-	outputSQL, warnings, err := engine.Squash(migrationMap)
+	res, err := engine.Squash(migrationMap)
 	if err != nil {
 		return viewtypes.ErrorMsg{Err: fmt.Errorf("squashing failed: %w", err)}
 	}
+	outputSQL := res.BaselineSQL
+	warnings := res.Warnings
 
 	// Log warnings if any
 	if len(warnings) > 0 {

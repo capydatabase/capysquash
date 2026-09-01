@@ -31,6 +31,5 @@ type ConsolidationRule interface {
 // ConsolidationEngine interface for the engine that applies consolidation rules
 type ConsolidationEngine interface {
 	GetTracker() *Tracker
-	GetConfig() interface{}    // This would be the actual config type
-	GetAIAnalyzer() interface{} // Returns *ai.Analyzer if available, nil otherwise
+	GetConfig() any // This would be the actual config type
 }

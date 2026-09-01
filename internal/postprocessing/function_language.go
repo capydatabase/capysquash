@@ -1,7 +1,6 @@
 package postprocessing
 
 import (
-	"regexp"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/utils"
@@ -28,105 +27,42 @@ import (
 // 2. STABLE AS $$ ... $$ LANGUAGE plpgsql → LANGUAGE plpgsql STABLE AS $$ ... $$
 // 3. IMMUTABLE AS $$ ... $$ LANGUAGE plpgsql → LANGUAGE plpgsql IMMUTABLE AS $$ ... $$
 func FixFunctionLanguageConflicts(sql string) string {
-	// Regex Pattern:
-	// Group 1: CREATE [OR REPLACE] FUNCTION name(...) RETURNS type
-	// Group 2: Optional existing modifiers (SECURITY DEFINER, etc.)
-	// Group 3: Volatility marker (VOLATILE|STABLE|IMMUTABLE)
-	// Group 4: AS $$
-	// Group 5: Function body
-	// Group 6: $$ (closing delimiter)
-	// Group 7: LANGUAGE clause (this needs to be moved)
-	// Group 8: Optional SECURITY DEFINER after LANGUAGE
-	//
-	// We look for functions where volatility comes before AS but LANGUAGE comes after body
-	// we match specifically up to and including "$$ LANGUAGE" to ensure we only match ONE function
-	// Pattern: Match everything up to the FIRST occurrence of $$ followed immediately by LANGUAGE
-	// This prevents the regex from accidentally spanning multiple adjacent functions
-	pattern := regexp.MustCompile(
-		`(?ims)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[a-z_][a-z0-9_]*\.)?[a-z_][a-z0-9_]*\s*\([^)]*\)\s*RETURNS\s+(?:TABLE\s*\([^)]+\)|SETOF\s+[^\s]+|[^\s]+))((?:\s+(?:SECURITY\s+DEFINER|SET\s+[^\s]+\s*=\s*[^\s]+))*?)\s+(VOLATILE|STABLE|IMMUTABLE)(\s+AS\s+\$\$)([\s\S]*?)(\$\$\s+LANGUAGE\s+[a-z]+)((?:\s+SECURITY\s+DEFINER)?)`,
-	)
-
-	matches := pattern.FindAllStringSubmatchIndex(sql, -1)
-	if len(matches) == 0 {
-		return sql // No conflicting functions found
+	blocks := parseFunctionBlocks(sql)
+	if len(blocks) == 0 {
+		return sql
 	}
 
-	transformedSQL := sql
-	offset := 0
+	var out strings.Builder
+	out.Grow(len(sql) + 32)
+
+	cursor := 0
 	fixedCount := 0
 
-	for _, match := range matches {
-		if len(match) < 16 {
-			continue
-		}
+	for _, block := range blocks {
+		out.WriteString(sql[cursor:block.start])
 
-		// Extract parts (Groups changed because we now capture "$$ LANGUAGE" as combined Group 6)
-		signature := transformedSQL[match[0]+offset : match[1]+offset]           // Group 1: CREATE FUNCTION...RETURNS type
-		existingModifiers := transformedSQL[match[2]+offset : match[3]+offset]   // Group 2: Existing modifiers
-		volatility := transformedSQL[match[4]+offset : match[5]+offset]          // Group 3: VOLATILE/STABLE/IMMUTABLE
-		asKeyword := transformedSQL[match[6]+offset : match[7]+offset]           // Group 4: AS $$
-		body := transformedSQL[match[8]+offset : match[9]+offset]                // Group 5: function body
-		closingLangClause := transformedSQL[match[10]+offset : match[11]+offset] // Group 6: $$ LANGUAGE plpgsql (combined!)
-		securityAfterLang := ""
-		if match[12] >= 0 && match[13] >= 0 {
-			securityAfterLang = transformedSQL[match[12]+offset : match[13]+offset] // Group 7: SECURITY DEFINER
-		}
-
-		// Extract $$ and LANGUAGE separately from the combined group
-		// closingLangClause is like "$$ LANGUAGE plpgsql"
-		parts := strings.Fields(closingLangClause) // Split on whitespace
-		closingDelim := "$$"
-		languageClause := ""
-		if len(parts) >= 3 {
-			// parts[0] = "$$", parts[1] = "LANGUAGE", parts[2] = "plpgsql"
-			languageClause = strings.Join(parts[1:], " ") // "LANGUAGE plpgsql"
-		}
-
-		// Build corrected function:
-		// signature + existingModifiers + LANGUAGE + volatility + SECURITY + AS $$ + body + $$;
-		normalizedModifiers := strings.TrimSpace(existingModifiers)
-		normalizedLanguage := strings.TrimSpace(languageClause)
-		normalizedVolatility := strings.TrimSpace(volatility)
-		normalizedSecurity := strings.TrimSpace(securityAfterLang)
-
-		// Build modifier chain in correct order: LANGUAGE → VOLATILITY → SECURITY
-		var modifiers string
-		if normalizedModifiers != "" {
-			// Already have modifiers, add LANGUAGE and VOLATILITY
-			modifiers = normalizedModifiers + " " + normalizedLanguage + " " + normalizedVolatility
+		fixedStatement, changed, volatility := fixFunctionLanguageConflictBlock(sql, block)
+		if changed {
+			fixedCount++
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info(
+				"Fixed function with conflicting %s placement (moved LANGUAGE before AS)",
+				volatility,
+			)
+			out.WriteString(fixedStatement)
 		} else {
-			// No existing modifiers
-			modifiers = normalizedLanguage + " " + normalizedVolatility
+			out.WriteString(sql[block.start:block.end])
 		}
 
-		// Add SECURITY DEFINER at the end if it was after LANGUAGE
-		if normalizedSecurity != "" {
-			modifiers = modifiers + " " + normalizedSecurity
-		}
-
-		// Reconstruct: signature + " " + modifiers + AS $$ + body + $$;
-		fixedFunction := signature + " " + modifiers + asKeyword + body + closingDelim + ";"
-
-		// Calculate old function length (everything we're replacing)
-		oldFunctionEnd := match[11] + offset
-		if match[12] >= 0 { // Has SECURITY DEFINER after LANGUAGE
-			oldFunctionEnd = match[13] + offset
-		}
-		oldFunction := transformedSQL[match[0]+offset : oldFunctionEnd]
-
-		// Replace in SQL
-		transformedSQL = transformedSQL[:match[0]+offset] + fixedFunction + transformedSQL[oldFunctionEnd:]
-		offset += len(fixedFunction) - len(oldFunction)
-		fixedCount++
-
-		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Fixed function with conflicting %s placement (moved LANGUAGE before AS)", normalizedVolatility)
+		cursor = block.end
 	}
+
+	out.WriteString(sql[cursor:])
 
 	if fixedCount > 0 {
 		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Fixed %d functions with conflicting VOLATILE/STABLE/IMMUTABLE and LANGUAGE placement", fixedCount)
 	}
 
-	return transformedSQL
+	return out.String()
 }
 
 // FixRedundantTrailingLanguageClauses removes redundant LANGUAGE clauses that appear after
@@ -134,8 +70,8 @@ func FixFunctionLanguageConflicts(sql string) string {
 // "conflicting or redundant options" when LANGUAGE is also in the header.
 //
 // This function uses a line-by-line state machine to intelligently detect:
-//   1. Functions with LANGUAGE before AS $ (from AST normalization) → remove trailing LANGUAGE
-//   2. Functions without LANGUAGE before AS $ → keep trailing LANGUAGE (it's the only one)
+//  1. Functions with LANGUAGE before AS $ (from AST normalization) → remove trailing LANGUAGE
+//  2. Functions without LANGUAGE before AS $ → keep trailing LANGUAGE (it's the only one)
 //
 // This avoids regex complexity and only removes truly redundant clauses.
 //
@@ -155,7 +91,7 @@ func FixRedundantTrailingLanguageClauses(sql string) string {
 
 		// Detect function start
 		if strings.HasPrefix(upperLine, "CREATE FUNCTION") ||
-		   strings.HasPrefix(upperLine, "CREATE OR REPLACE FUNCTION") {
+			strings.HasPrefix(upperLine, "CREATE OR REPLACE FUNCTION") {
 			inFunction = true
 			hasLanguageInHeader = false
 			result = append(result, line)
@@ -171,7 +107,7 @@ func FixRedundantTrailingLanguageClauses(sql string) string {
 
 		// Check if this line contains LANGUAGE (before AS $)
 		if !hasLanguageInHeader && strings.Contains(upperLine, "LANGUAGE") &&
-		   !strings.Contains(upperLine, "AS $$") {
+			!strings.Contains(upperLine, "AS $$") {
 			hasLanguageInHeader = true
 		}
 
@@ -179,8 +115,8 @@ func FixRedundantTrailingLanguageClauses(sql string) string {
 		if strings.Contains(upperLine, "AS $$") || strings.Contains(upperLine, "AS $") {
 			// Check if LANGUAGE is on the same line as AS $
 			beforeAS := upperLine
-			if idx := strings.Index(upperLine, "AS $"); idx != -1 {
-				beforeAS = upperLine[:idx]
+			if before, _, ok := strings.Cut(upperLine, "AS $"); ok {
+				beforeAS = before
 			}
 			if strings.Contains(beforeAS, "LANGUAGE") {
 				hasLanguageInHeader = true
@@ -194,8 +130,8 @@ func FixRedundantTrailingLanguageClauses(sql string) string {
 			hasTrailingLanguage := false
 			afterDollar := ""
 
-			if idx := strings.Index(trimmed, "$$"); idx != -1 {
-				afterDollar = strings.TrimSpace(trimmed[idx+2:])
+			if _, after, ok := strings.Cut(trimmed, "$$"); ok {
+				afterDollar = strings.TrimSpace(after)
 				afterDollarUpper := strings.ToUpper(afterDollar)
 				hasTrailingLanguage = strings.HasPrefix(afterDollarUpper, "LANGUAGE")
 			}
@@ -256,110 +192,74 @@ func FixRedundantTrailingLanguageClauses(sql string) string {
 //   - Body has DECLARE + LANGUAGE SQL → should be LANGUAGE plpgsql
 //   - Body has PERFORM + LANGUAGE SQL → should be LANGUAGE plpgsql
 func FixIncorrectLanguageDeclarations(sql string) string {
-	fixedSQL := sql
+	blocks := parseFunctionBlocks(sql)
+	if len(blocks) == 0 {
+		return sql
+	}
+
+	var out strings.Builder
+	out.Grow(len(sql) + 32)
+
+	cursor := 0
 	fixedCount := 0
 
-	// FIX 1: LANGUAGE SQL → LANGUAGE plpgsql (when body needs plpgsql)
-	sqlPattern := regexp.MustCompile(
-		`(?si)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+[^\(]+\([^\)]*\)\s+RETURNS\s+.*?)\s+(LANGUAGE\s+SQL)(\s+.*?AS\s+\$\$)(.*?)(\$\$\s*;)`,
-	)
+	for _, block := range blocks {
+		out.WriteString(sql[cursor:block.start])
 
-	matches := sqlPattern.FindAllStringSubmatchIndex(fixedSQL, -1)
-	offset := 0
-
-	for _, match := range matches {
-		// Extract components
-		signature := fixedSQL[match[2]+offset : match[3]+offset]             // Group 1: function header
-		langClause := fixedSQL[match[4]+offset : match[5]+offset]            // Group 2: "LANGUAGE SQL"
-		body := strings.ToLower(fixedSQL[match[8]+offset : match[9]+offset]) // Group 4: body
-
-		// Check if body has plpgsql-specific constructs
-		hasPlpgsqlConstructs := strings.Contains(body, "begin") ||
-			strings.Contains(body, "declare") ||
-			strings.Contains(body, "perform ") ||
-			strings.Contains(body, "raise ") ||
-			strings.Contains(body, "return next") ||
-			strings.Contains(body, "return query")
-
-		// Check if function returns TRIGGER (triggers must be plpgsql)
-		isTrigger := strings.Contains(strings.ToLower(signature), "returns trigger")
-
-		// Determine if we need to change the language to plpgsql
-		if hasPlpgsqlConstructs || isTrigger {
-			// Replace LANGUAGE SQL with LANGUAGE plpgsql
-			oldFunction := fixedSQL[match[0]+offset : match[1]+offset]
-			newFunction := strings.Replace(oldFunction, langClause, "LANGUAGE plpgsql", 1)
-
-			fixedSQL = fixedSQL[:match[0]+offset] + newFunction + fixedSQL[match[1]+offset:]
-			offset += len(newFunction) - len(oldFunction)
-			fixedCount++
-
-			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info(
-				"Fixed incorrect language declaration: LANGUAGE SQL → LANGUAGE plpgsql (body contains plpgsql constructs or returns TRIGGER)",
-			)
+		header := sql[block.start:block.asStart]
+		language, hasLanguage := extractHeaderLanguage(header)
+		if !hasLanguage {
+			out.WriteString(sql[block.start:block.end])
+			cursor = block.end
+			continue
 		}
-	}
 
-	// FIX 2: LANGUAGE plpgsql → LANGUAGE sql (when body is simple SQL)
-	// declared as plpgsql need to either be changed to sql OR have proper BEGIN/END structure
-	plpgsqlPattern := regexp.MustCompile(
-		`(?si)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+[^\(]+\([^\)]*\)\s+RETURNS\s+.*?)\s+(LANGUAGE\s+plpgsql)(\s+.*?AS\s+\$\$)(.*?)(\$\$\s*;)`,
-	)
+		bodyLower := strings.ToLower(sql[block.bodyStart:block.closeStart])
+		signatureLower := strings.ToLower(header)
 
-	matches = plpgsqlPattern.FindAllStringSubmatchIndex(fixedSQL, -1)
-	offset = 0
+		hasCoreConstructs := functionBodyHasCorePlpgsqlConstructs(bodyLower)
+		hasExtendedConstructs := functionBodyHasExtendedPlpgsqlConstructs(bodyLower)
+		isTrigger := strings.Contains(signatureLower, "returns trigger")
+		bodyTrimmed := strings.TrimSpace(bodyLower)
 
-	utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found %d functions with LANGUAGE plpgsql to check for simple SQL bodies", len(matches))
+		desiredLanguage := strings.ToLower(language)
+		logMessage := ""
 
-	for _, match := range matches {
-		// Extract components
-		signature := fixedSQL[match[2]+offset : match[3]+offset]             // Group 1: function header
-		langClause := fixedSQL[match[4]+offset : match[5]+offset]            // Group 2: "LANGUAGE plpgsql"
-		body := strings.ToLower(fixedSQL[match[8]+offset : match[9]+offset]) // Group 4: body
-
-		// Trim whitespace and check if body is simple SQL
-		bodyTrimmed := strings.TrimSpace(body)
-
-		// Check if body has plpgsql-specific constructs
-		hasPlpgsqlConstructs := strings.Contains(body, "begin") ||
-			strings.Contains(body, "declare") ||
-			strings.Contains(body, "perform ") ||
-			strings.Contains(body, "raise ") ||
-			strings.Contains(body, "return next") ||
-			strings.Contains(body, "return query") ||
-			strings.Contains(body, "if ") ||
-			strings.Contains(body, "loop") ||
-			strings.Contains(body, "while ") ||
-			strings.Contains(body, "for ")
-
-		// Check if function returns TRIGGER (triggers must be plpgsql)
-		isTrigger := strings.Contains(strings.ToLower(signature), "returns trigger")
-
-		// If body is simple SQL (no plpgsql constructs) and not a trigger, change to LANGUAGE sql
-		if !hasPlpgsqlConstructs && !isTrigger {
-			// Verify it's a simple statement (SELECT, INSERT, UPDATE, DELETE, or RETURN)
-			// This ensures we don't accidentally convert complex functions
-			isSimpleSQL := strings.HasPrefix(bodyTrimmed, "select ") ||
-				strings.HasPrefix(bodyTrimmed, "insert ") ||
-				strings.HasPrefix(bodyTrimmed, "update ") ||
-				strings.HasPrefix(bodyTrimmed, "delete ") ||
-				strings.HasPrefix(bodyTrimmed, "return ")
-
-			if isSimpleSQL {
-				// Replace LANGUAGE plpgsql with LANGUAGE sql
-				oldFunction := fixedSQL[match[0]+offset : match[1]+offset]
-				newFunction := strings.Replace(oldFunction, langClause, "LANGUAGE sql", 1)
-
-				fixedSQL = fixedSQL[:match[0]+offset] + newFunction + fixedSQL[match[1]+offset:]
-				offset += len(newFunction) - len(oldFunction)
-				fixedCount++
-
-				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info(
-					"Fixed incorrect language declaration: LANGUAGE plpgsql → LANGUAGE sql (body is simple SQL without plpgsql constructs)",
-				)
+		switch strings.ToLower(language) {
+		case "sql":
+			if hasCoreConstructs || isTrigger {
+				desiredLanguage = "plpgsql"
+				logMessage = "Fixed incorrect language declaration: LANGUAGE SQL → LANGUAGE plpgsql (body contains plpgsql constructs or returns TRIGGER)"
+			}
+		case "plpgsql":
+			if !hasExtendedConstructs && !isTrigger && isSimpleSQLBody(bodyTrimmed) {
+				desiredLanguage = "sql"
+				logMessage = "Fixed incorrect language declaration: LANGUAGE plpgsql → LANGUAGE sql (body is simple SQL without plpgsql constructs)"
 			}
 		}
+
+		if logMessage == "" {
+			out.WriteString(sql[block.start:block.end])
+			cursor = block.end
+			continue
+		}
+
+		updatedHeader, ok := replaceHeaderLanguage(header, desiredLanguage)
+		if !ok {
+			out.WriteString(sql[block.start:block.end])
+			cursor = block.end
+			continue
+		}
+
+		tail, hasSemicolon := blockTail(sql, block)
+		out.WriteString(rebuildFunctionBlock(updatedHeader, sql[block.asStart:block.bodyStart], sql[block.bodyStart:block.closeStart], sql[block.closeStart:block.closeEnd], tail, hasSemicolon))
+		cursor = block.end
+		fixedCount++
+
+		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("%s", logMessage)
 	}
+
+	out.WriteString(sql[cursor:])
 
 	if fixedCount > 0 {
 		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info(
@@ -368,72 +268,55 @@ func FixIncorrectLanguageDeclarations(sql string) string {
 		)
 	}
 
-	return fixedSQL
+	return out.String()
 }
 
 // FixMissingLanguageDeclarations adds LANGUAGE declarations to functions that are missing them.
 // PostgreSQL requires all functions to have a LANGUAGE clause.
 func FixMissingLanguageDeclarations(sql string) string {
-	// Pattern to match functions without LANGUAGE
-	// Look for: CREATE FUNCTION ... RETURNS ... (optional modifiers) AS $$ ... $$;
-	// Where there's no LANGUAGE between RETURNS and AS
-	// Made modifiers optional (*) to handle functions with no modifiers yet
-	// FIXED: Changed [^\n]+? to .+? to match multi-line function signatures
-	pattern := regexp.MustCompile(
-		`(?si)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+[^\(]+\([^\)]*\)\s+RETURNS\s+.+?)(\s+(?:VOLATILE|STABLE|IMMUTABLE|STRICT|SECURITY\s+(?:DEFINER|INVOKER)|\s)*?)(AS\s+\$\$)(.*?)(\$\$\s*;)`,
-	)
+	blocks := parseFunctionBlocks(sql)
+	if len(blocks) == 0 {
+		return sql
+	}
 
-	fixedSQL := sql
+	var out strings.Builder
+	out.Grow(len(sql) + 32)
+
+	cursor := 0
 	fixedCount := 0
 
-	matches := pattern.FindAllStringSubmatchIndex(sql, -1)
-	offset := 0
+	for _, block := range blocks {
+		out.WriteString(sql[cursor:block.start])
 
-	for _, match := range matches {
-		// Extract components
-		signature := sql[match[2]+offset : match[3]+offset]                     // Group 1: function header
-		modifiers := sql[match[4]+offset : match[5]+offset]                     // Group 2: modifiers between RETURNS and AS
-		asClause := sql[match[6]+offset : match[7]+offset]                      // Group 3: "AS $$"
-		body := strings.ToLower(sql[match[8]+offset : match[9]+offset])        // Group 4: body
+		header := sql[block.start:block.asStart]
+		headerUpper := strings.ToUpper(header)
 
-		// The non-greedy RETURNS pattern can expand to include LANGUAGE, leaving only
-		// whitespace in the modifiers group, which would pass the check incorrectly.
-		fullSignature := sql[match[2]+offset : match[7]+offset] // Everything from CREATE to AS
-		if strings.Contains(strings.ToUpper(fullSignature), "LANGUAGE") {
-			continue // Skip, already has LANGUAGE
+		if !strings.Contains(headerUpper, "RETURNS") || containsLanguageClause(header) {
+			out.WriteString(sql[block.start:block.end])
+			cursor = block.end
+			continue
 		}
 
-		// Infer language from body or signature
-		language := "sql" // default
+		tail, hasSemicolon := blockTail(sql, block)
+		if tailHasLeadingLanguageClause(tail) {
+			// Preserve valid legacy form where LANGUAGE appears after the body.
+			out.WriteString(sql[block.start:block.end])
+			cursor = block.end
+			continue
+		}
 
-		// Check if body has plpgsql-specific constructs
-		hasPlpgsqlConstructs := strings.Contains(body, "begin") ||
-			strings.Contains(body, "declare") ||
-			strings.Contains(body, "perform ") ||
-			strings.Contains(body, "raise ") ||
-			strings.Contains(body, "return next") ||
-			strings.Contains(body, "return query")
+		bodyLower := strings.ToLower(sql[block.bodyStart:block.closeStart])
+		hasPlpgsqlConstructs := functionBodyHasCorePlpgsqlConstructs(bodyLower)
+		isTrigger := strings.Contains(strings.ToLower(header), "returns trigger")
 
-		// Check if function returns TRIGGER (triggers must be plpgsql)
-		isTrigger := strings.Contains(strings.ToLower(signature), "returns trigger")
-
+		language := "sql"
 		if hasPlpgsqlConstructs || isTrigger {
 			language = "plpgsql"
 		}
 
-		// Insert LANGUAGE before AS
-		// Handle spacing properly whether modifiers exist or not
-		languageClause := " LANGUAGE " + language
-		if strings.TrimSpace(modifiers) != "" {
-			// Has modifiers - add LANGUAGE after them
-			languageClause = modifiers + languageClause
-		}
-
-		oldFunction := sql[match[0]+offset : match[1]+offset]
-		newFunction := sql[match[2]+offset : match[3]+offset] + languageClause + " " + asClause + sql[match[8]+offset : match[9]+offset] + sql[match[10]+offset : match[11]+offset]
-
-		fixedSQL = fixedSQL[:match[0]+offset] + newFunction + fixedSQL[match[1]+offset:]
-		offset += len(newFunction) - len(oldFunction)
+		updatedHeader := strings.TrimRight(header, " \t\r\n") + " LANGUAGE " + language
+		out.WriteString(rebuildFunctionBlock(updatedHeader, sql[block.asStart:block.bodyStart], sql[block.bodyStart:block.closeStart], sql[block.closeStart:block.closeEnd], tail, hasSemicolon))
+		cursor = block.end
 		fixedCount++
 
 		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info(
@@ -443,6 +326,8 @@ func FixMissingLanguageDeclarations(sql string) string {
 		)
 	}
 
+	out.WriteString(sql[cursor:])
+
 	if fixedCount > 0 {
 		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info(
 			"Added %d missing LANGUAGE declarations",
@@ -450,7 +335,7 @@ func FixMissingLanguageDeclarations(sql string) string {
 		)
 	}
 
-	return fixedSQL
+	return out.String()
 }
 
 // RemoveDuplicateLanguageDeclarations removes duplicate LANGUAGE clauses from functions.
@@ -458,58 +343,33 @@ func FixMissingLanguageDeclarations(sql string) string {
 // NOTE: This function is currently disabled in the processing pipeline due to regex complexity.
 // It should be reimplemented using AST-based approach instead of regex.
 func RemoveDuplicateLanguageDeclarations(sql string) string {
-	// Find function signatures (from CREATE FUNCTION to AS $$) and check for duplicate LANGUAGE
-	// Pattern matches: CREATE [OR REPLACE] FUNCTION ... AS $$
-	funcPattern := regexp.MustCompile(`(?i)(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+[^;]+?)\s+AS\s+\$\$`)
-
 	fixedSQL := sql
 	fixedCount := 0
 
-	// Process each function signature
-	matches := funcPattern.FindAllStringSubmatchIndex(sql, -1)
-	offset := 0
-
-	for _, match := range matches {
-		signatureStart := match[2] + offset
-		signatureEnd := match[3] + offset
-		signature := fixedSQL[signatureStart:signatureEnd]
-
-		// Count LANGUAGE occurrences in signature
-		languagePattern := regexp.MustCompile(`(?i)\bLANGUAGE\s+(?:plpgsql|sql|c|internal)\b`)
-		languageMatches := languagePattern.FindAllStringIndex(strings.ToUpper(signature), -1)
-
-		if len(languageMatches) > 1 {
-			// Found duplicates - keep only the first LANGUAGE declaration
-			firstLangStart := languageMatches[0][0]
-			firstLangEnd := languageMatches[0][1]
-			firstLang := signature[firstLangStart:firstLangEnd]
-
-			// Remove all LANGUAGE declarations
-			cleanSignature := languagePattern.ReplaceAllString(signature, "")
-
-			// Re-insert the first LANGUAGE at its original position
-			// To maintain proper spacing, find where to insert it
-			// Insert after RETURNS clause if present
-			returnsPattern := regexp.MustCompile(`(?i)\bRETURNS\s+[^\s]+(?:\s*\([^)]*\))?`)
-			returnsMatch := returnsPattern.FindStringIndex(strings.ToUpper(cleanSignature))
-
-			var newSignature string
-			if returnsMatch != nil {
-				// Insert LANGUAGE after RETURNS clause
-				insertPos := returnsMatch[1]
-				newSignature = cleanSignature[:insertPos] + " " + firstLang + cleanSignature[insertPos:]
-			} else {
-				// Fallback: append LANGUAGE at end of signature
-				newSignature = cleanSignature + " " + firstLang
-			}
-
-			// Replace signature in SQL
-			fixedSQL = fixedSQL[:signatureStart] + newSignature + fixedSQL[signatureEnd:]
-			offset += len(newSignature) - len(signature)
-			fixedCount++
-
-			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Removed duplicate LANGUAGE declaration from function")
+	cursor := 0
+	for {
+		createIdx, ok := findCreateFunctionStart(fixedSQL, cursor)
+		if !ok {
+			break
 		}
+
+		asStart, _, ok := findFunctionAsDollar(fixedSQL, createIdx)
+		if !ok {
+			cursor = createIdx + len("CREATE")
+			continue
+		}
+
+		signature := fixedSQL[createIdx:asStart]
+		cleanSignature, changed := removeDuplicateLanguageClausesFromSignature(signature)
+		if changed {
+			fixedSQL = fixedSQL[:createIdx] + cleanSignature + fixedSQL[asStart:]
+			fixedCount++
+			cursor = createIdx + len(cleanSignature)
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Removed duplicate LANGUAGE declaration from function")
+			continue
+		}
+
+		cursor = asStart
 	}
 
 	if fixedCount > 0 {
@@ -517,4 +377,397 @@ func RemoveDuplicateLanguageDeclarations(sql string) string {
 	}
 
 	return fixedSQL
+}
+
+type languageClauseRange struct {
+	start int
+	end   int
+}
+
+func removeDuplicateLanguageClausesFromSignature(signature string) (string, bool) {
+	clauses := findLanguageClauseRanges(signature)
+	if len(clauses) <= 1 {
+		return signature, false
+	}
+
+	cleaned := signature
+	for i := len(clauses) - 1; i >= 1; i-- {
+		clause := clauses[i]
+		cleaned = cleaned[:clause.start] + cleaned[clause.end:]
+	}
+
+	return cleaned, true
+}
+
+func findLanguageClauseRanges(signature string) []languageClauseRange {
+	clauses := make([]languageClauseRange, 0)
+
+	for i := 0; i < len(signature); i++ {
+		if !hasSyntaxKeywordAt(signature, i, "LANGUAGE") {
+			continue
+		}
+
+		start := i
+		if start > 0 && isSyntaxWhitespace(signature[start-1]) {
+			start--
+		}
+
+		pos := skipSyntaxWhitespace(signature, i+len("LANGUAGE"))
+		lang, end, ok := readLanguageName(signature, pos)
+		if !ok {
+			continue
+		}
+
+		switch strings.ToLower(lang) {
+		case "plpgsql", "sql", "c", "internal":
+			for end < len(signature) && isSyntaxWhitespace(signature[end]) {
+				end++
+			}
+			clauses = append(clauses, languageClauseRange{start: start, end: end})
+			i = end - 1
+		}
+	}
+
+	return clauses
+}
+
+func readLanguageName(value string, pos int) (string, int, bool) {
+	if pos >= len(value) || !isSyntaxIdentifierByte(value[pos]) {
+		return "", 0, false
+	}
+
+	i := pos
+	for i < len(value) && isSyntaxIdentifierByte(value[i]) {
+		i++
+	}
+
+	return value[pos:i], i, true
+}
+
+type functionBlock struct {
+	start      int
+	asStart    int
+	bodyStart  int
+	bodyEnd    int
+	closeStart int
+	closeEnd   int
+	semicolon  int
+	end        int
+}
+
+func parseFunctionBlocks(sql string) []functionBlock {
+	blocks := make([]functionBlock, 0)
+	cursor := 0
+
+	for {
+		createIdx, ok := findCreateFunctionStart(sql, cursor)
+		if !ok {
+			break
+		}
+
+		asStart, bodyStart, delimiter, ok := findFunctionBodyDelimiter(sql, createIdx)
+		if !ok {
+			cursor = createIdx + len("CREATE")
+			continue
+		}
+
+		bodyEnd, closeEnd, ok := findFunctionBodyEnd(sql, bodyStart, delimiter)
+		if !ok {
+			cursor = bodyStart
+			continue
+		}
+
+		semicolon := findFunctionSemicolon(sql, closeEnd)
+		end := len(sql)
+		if semicolon >= 0 {
+			end = semicolon + 1
+		}
+
+		blocks = append(blocks, functionBlock{
+			start:      createIdx,
+			asStart:    asStart,
+			bodyStart:  bodyStart,
+			bodyEnd:    bodyEnd,
+			closeStart: bodyEnd,
+			closeEnd:   closeEnd,
+			semicolon:  semicolon,
+			end:        end,
+		})
+
+		cursor = end
+	}
+
+	return blocks
+}
+
+func findFunctionBodyDelimiter(sql string, start int) (int, int, string, bool) {
+	for i := start; i < len(sql); i++ {
+		if !hasSyntaxKeywordAt(sql, i, "AS") {
+			continue
+		}
+
+		pos := skipSyntaxWhitespace(sql, i+len("AS"))
+		if pos >= len(sql) {
+			continue
+		}
+
+		if sql[pos] == '$' {
+			end := pos + 1
+			for end < len(sql) && isFunctionDollarTagByte(sql[end]) {
+				end++
+			}
+			if end < len(sql) && sql[end] == '$' {
+				return i, end + 1, sql[pos : end+1], true
+			}
+		}
+
+		if sql[pos] == '\'' {
+			return i, pos + 1, "'", true
+		}
+	}
+
+	return 0, 0, "", false
+}
+
+func findFunctionBodyEnd(sql string, bodyStart int, delimiter string) (int, int, bool) {
+	if delimiter == "'" {
+		for i := bodyStart; i < len(sql); i++ {
+			if sql[i] != '\'' {
+				continue
+			}
+
+			if i+1 < len(sql) && sql[i+1] == '\'' {
+				i++
+				continue
+			}
+
+			return i, i + 1, true
+		}
+		return 0, 0, false
+	}
+
+	rel := strings.Index(sql[bodyStart:], delimiter)
+	if rel == -1 {
+		return 0, 0, false
+	}
+
+	bodyEnd := bodyStart + rel
+	return bodyEnd, bodyEnd + len(delimiter), true
+}
+
+func findFunctionSemicolon(sql string, start int) int {
+	if start < 0 || start >= len(sql) {
+		return -1
+	}
+
+	if rel := strings.IndexByte(sql[start:], ';'); rel != -1 {
+		return start + rel
+	}
+
+	return -1
+}
+
+func fixFunctionLanguageConflictBlock(sql string, block functionBlock) (string, bool, string) {
+	header := sql[block.start:block.asStart]
+	if !containsVolatilityClause(header) {
+		return "", false, ""
+	}
+
+	tail, hasSemicolon := blockTail(sql, block)
+	languageClause, tailRemainder, ok := parseTrailingLanguageClause(tail)
+	if !ok {
+		return "", false, ""
+	}
+
+	updatedHeader := header
+	if !containsLanguageClause(updatedHeader) {
+		updatedHeader = insertClauseBeforeVolatility(updatedHeader, languageClause)
+	}
+
+	volatility, _, _ := firstVolatilityClause(updatedHeader)
+	statement := rebuildFunctionBlock(
+		updatedHeader,
+		sql[block.asStart:block.bodyStart],
+		sql[block.bodyStart:block.closeStart],
+		sql[block.closeStart:block.closeEnd],
+		tailRemainder,
+		hasSemicolon,
+	)
+
+	return statement, true, strings.ToUpper(volatility)
+}
+
+func blockTail(sql string, block functionBlock) (string, bool) {
+	if block.semicolon >= 0 {
+		return sql[block.closeEnd:block.semicolon], true
+	}
+	return sql[block.closeEnd:block.end], false
+}
+
+func parseTrailingLanguageClause(tail string) (string, string, bool) {
+	trimmed := strings.TrimSpace(tail)
+	if trimmed == "" || !hasSyntaxKeywordAt(trimmed, 0, "LANGUAGE") {
+		return "", "", false
+	}
+
+	pos := skipSyntaxWhitespace(trimmed, len("LANGUAGE"))
+	language, next, ok := readLanguageName(trimmed, pos)
+	if !ok {
+		return "", "", false
+	}
+	pos = skipSyntaxWhitespace(trimmed, next)
+
+	clause := "LANGUAGE " + language
+
+	if hasSyntaxKeywordAt(trimmed, pos, "SECURITY") {
+		securityPos := skipSyntaxWhitespace(trimmed, pos+len("SECURITY"))
+		switch {
+		case hasSyntaxKeywordAt(trimmed, securityPos, "DEFINER"):
+			clause += " SECURITY DEFINER"
+			pos = skipSyntaxWhitespace(trimmed, securityPos+len("DEFINER"))
+		case hasSyntaxKeywordAt(trimmed, securityPos, "INVOKER"):
+			clause += " SECURITY INVOKER"
+			pos = skipSyntaxWhitespace(trimmed, securityPos+len("INVOKER"))
+		}
+	}
+
+	return clause, strings.TrimSpace(trimmed[pos:]), true
+}
+
+func extractHeaderLanguage(header string) (string, bool) {
+	for i := 0; i < len(header); i++ {
+		if !hasSyntaxKeywordAt(header, i, "LANGUAGE") {
+			continue
+		}
+
+		pos := skipSyntaxWhitespace(header, i+len("LANGUAGE"))
+		language, _, ok := readLanguageName(header, pos)
+		if !ok {
+			return "", false
+		}
+
+		return language, true
+	}
+
+	return "", false
+}
+
+func replaceHeaderLanguage(header string, language string) (string, bool) {
+	for i := 0; i < len(header); i++ {
+		if !hasSyntaxKeywordAt(header, i, "LANGUAGE") {
+			continue
+		}
+
+		pos := skipSyntaxWhitespace(header, i+len("LANGUAGE"))
+		_, end, ok := readLanguageName(header, pos)
+		if !ok {
+			return "", false
+		}
+
+		return header[:pos] + language + header[end:], true
+	}
+
+	return "", false
+}
+
+func containsLanguageClause(header string) bool {
+	_, ok := extractHeaderLanguage(header)
+	return ok
+}
+
+func containsVolatilityClause(header string) bool {
+	_, _, ok := firstVolatilityClause(header)
+	return ok
+}
+
+func firstVolatilityClause(header string) (string, int, bool) {
+	for i := 0; i < len(header); i++ {
+		if i > 0 && isSyntaxIdentifierByte(header[i-1]) {
+			continue
+		}
+
+		volatility, _, ok := readVolatilityKeyword(header, i)
+		if ok {
+			return volatility, i, true
+		}
+	}
+
+	return "", 0, false
+}
+
+func insertClauseBeforeVolatility(header string, clause string) string {
+	trimmedHeader := strings.TrimRight(header, " \t\r\n")
+	trimmedClause := strings.TrimSpace(clause)
+	if trimmedClause == "" {
+		return trimmedHeader
+	}
+
+	_, index, found := firstVolatilityClause(trimmedHeader)
+	if !found {
+		return trimmedHeader + " " + trimmedClause
+	}
+
+	prefix := strings.TrimRight(trimmedHeader[:index], " \t\r\n")
+	suffix := strings.TrimLeft(trimmedHeader[index:], " \t\r\n")
+	if prefix == "" {
+		return trimmedClause + " " + suffix
+	}
+
+	return prefix + " " + trimmedClause + " " + suffix
+}
+
+func tailHasLeadingLanguageClause(tail string) bool {
+	trimmed := strings.TrimSpace(tail)
+	return trimmed != "" && hasSyntaxKeywordAt(trimmed, 0, "LANGUAGE")
+}
+
+func functionBodyHasCorePlpgsqlConstructs(body string) bool {
+	return strings.Contains(body, "begin") ||
+		strings.Contains(body, "declare") ||
+		strings.Contains(body, "perform ") ||
+		strings.Contains(body, "raise ") ||
+		strings.Contains(body, "return next") ||
+		strings.Contains(body, "return query")
+}
+
+func functionBodyHasExtendedPlpgsqlConstructs(body string) bool {
+	return functionBodyHasCorePlpgsqlConstructs(body) ||
+		strings.Contains(body, "if ") ||
+		strings.Contains(body, "loop") ||
+		strings.Contains(body, "while ") ||
+		strings.Contains(body, "for ")
+}
+
+func isSimpleSQLBody(body string) bool {
+	return strings.HasPrefix(body, "select ") ||
+		strings.HasPrefix(body, "insert ") ||
+		strings.HasPrefix(body, "update ") ||
+		strings.HasPrefix(body, "delete ") ||
+		strings.HasPrefix(body, "return ")
+}
+
+func rebuildFunctionBlock(header, asClause, body, closingDelimiter, tail string, hasSemicolon bool) string {
+	var out strings.Builder
+	out.Grow(len(header) + len(asClause) + len(body) + len(closingDelimiter) + len(tail) + 4)
+
+	out.WriteString(strings.TrimRight(header, " \t\r\n"))
+	out.WriteString(" ")
+	out.WriteString(strings.TrimLeft(asClause, " \t\r\n"))
+	out.WriteString(body)
+	out.WriteString(closingDelimiter)
+
+	if strings.TrimSpace(tail) != "" {
+		out.WriteString(" ")
+		out.WriteString(strings.TrimSpace(tail))
+	}
+
+	if hasSemicolon {
+		out.WriteString(";")
+	}
+
+	return out.String()
+}
+
+func isFunctionDollarTagByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_'
 }

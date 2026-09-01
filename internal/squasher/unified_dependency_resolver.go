@@ -2,15 +2,16 @@ package squasher
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/capysquash/pgsquash-engine/internal/errors"
-	"github.com/capysquash/pgsquash-engine/internal/patterns"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
 	"github.com/capysquash/pgsquash-engine/internal/tracking"
 	"github.com/capysquash/pgsquash-engine/internal/types"
 	"github.com/capysquash/pgsquash-engine/internal/utils"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // UnifiedDependencyResolver provides comprehensive dependency resolution
@@ -39,14 +40,13 @@ func NewUnifiedDependencyResolver() *UnifiedDependencyResolver {
 	// Define strict category ordering for PostgreSQL DDL
 	resolver.categoryOrder = map[types.Category]int{
 		types.CategoryExtensions:  0, // Extensions first
-		types.CategoryFoundation:  1, // Schemas, types, domains, tables
+		types.CategoryFoundation:  1, // Schemas, types, domains, functions, tables
 		types.CategoryConstraints: 2, // Primary keys, unique constraints
 		types.CategoryIndexes:     3, // Indexes (after constraints)
-		types.CategoryFunctions:   4, // Functions and procedures
-		types.CategoryTriggers:    5, // Triggers (after functions)
-		types.CategoryComments:    6, // COMMENT ON statements (after objects exist)
-		types.CategorySecurity:    7, // RLS policies, grants
-		types.CategoryData:        8, // INSERT/UPDATE data operations
+		types.CategoryTriggers:    4, // Triggers (after functions and tables)
+		types.CategorySecurity:    5, // RLS policies, grants (Before comments)
+		types.CategoryComments:    6, // COMMENT ON statements (after objects exist, including policies)
+		types.CategoryData:        7, // INSERT/UPDATE data operations
 	}
 
 	// Define object type ordering within categories
@@ -60,17 +60,15 @@ func NewUnifiedDependencyResolver() *UnifiedDependencyResolver {
 		types.TypeComposite: 12, // Composite types before tables
 		types.TypeDomain:    13, // Domains before tables
 		types.TypeType:      14, // Generic types before tables
-		types.TypeSequence:  15,
-		types.TypeTable:     16,
+		types.TypeFunction:  15, // Functions before tables (for CHECK constraints)
+		types.TypeSequence:  16,
+		types.TypeTable:     17, // Tables after functions (may reference functions in CHECK constraints)
 
 		// Constraints
 		types.TypeConstraint: 20,
 
 		// Indexes
 		types.TypeIndex: 30,
-
-		// Functions and procedures
-		types.TypeFunction: 40,
 
 		// Triggers
 		types.TypeTrigger: 50,
@@ -107,7 +105,7 @@ func (udr *UnifiedDependencyResolver) ResolveLifecycleDependencies(
 
 	// Step 2: Resolve dependencies within each category
 	var orderedObjects []tracking.ObjectID
-	for categoryOrder := 0; categoryOrder < 8; categoryOrder++ {
+	for categoryOrder := range 8 {
 		category := udr.getCategoryByOrder(categoryOrder)
 		if objects, exists := categoryGroups[category]; exists {
 			utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Processing category %s with %d objects", category, len(objects))
@@ -142,10 +140,15 @@ func (udr *UnifiedDependencyResolver) SortConsolidationResults(
 ) []*tracking.ConsolidationResult {
 
 	if len(categoryObjects) <= 1 {
-		// Single object or empty - no sorting needed
+		// Single object or empty - keep deterministic key ordering
 		var results []*tracking.ConsolidationResult
-		for _, result := range categoryObjects {
-			results = append(results, result)
+		keys := make([]string, 0, len(categoryObjects))
+		for key := range categoryObjects {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			results = append(results, categoryObjects[key])
 		}
 		return results
 	}
@@ -176,12 +179,12 @@ func (udr *UnifiedDependencyResolver) SortConsolidationResults(
 
 // SQLDependencyInfo holds dependency information for an object (renamed to avoid conflict)
 type SQLDependencyInfo struct {
-	ObjectKey      string
-	Result         *tracking.ConsolidationResult
-	Dependencies   []string // Objects this depends on
-	Provides       []string // Objects this provides/creates
-	RequiredFirst  bool     // Must be first in category (extensions, schemas)
-	RequiredLast   bool     // Must be last in category (data operations)
+	ObjectKey     string
+	Result        *tracking.ConsolidationResult
+	Dependencies  []string // Objects this depends on
+	Provides      []string // Objects this provides/creates
+	RequiredFirst bool     // Must be first in category (extensions, schemas)
+	RequiredLast  bool     // Must be last in category (data operations)
 }
 
 // groupLifecyclesByCategory groups objects by their PostgreSQL category
@@ -209,17 +212,22 @@ func (udr *UnifiedDependencyResolver) determineLifecycleCategory(lifecycle *trac
 	}
 
 	// Fallback category determination based on object type from lifecycle
+	if lifecycle.Type == types.TypeData || lifecycle.Type == types.TypeDoBlock {
+		return types.CategoryData
+	}
+
 	objectType := strings.ToUpper(lifecycle.Name)
 	switch {
 	case strings.Contains(objectType, "EXTENSION"):
 		return types.CategoryExtensions
 	case strings.Contains(objectType, "SCHEMA") || strings.Contains(objectType, "TYPE") ||
-		strings.Contains(objectType, "TABLE") || strings.Contains(objectType, "SEQUENCE"):
+		strings.Contains(objectType, "TABLE") || strings.Contains(objectType, "SEQUENCE") ||
+		strings.Contains(objectType, "FUNCTION") || strings.Contains(objectType, "PROCEDURE"):
+		// Functions must be in Foundation category to be created before tables
+		// (tables may reference functions in CHECK constraints)
 		return types.CategoryFoundation
 	case strings.Contains(objectType, "INDEX"):
 		return types.CategoryIndexes
-	case strings.Contains(objectType, "FUNCTION") || strings.Contains(objectType, "PROCEDURE"):
-		return types.CategoryFunctions
 	case strings.Contains(objectType, "TRIGGER"):
 		return types.CategoryTriggers
 	case strings.Contains(objectType, "VIEW"):
@@ -336,7 +344,7 @@ func (udr *UnifiedDependencyResolver) findLeastImportantLifecycleEdge(cycle []tr
 	var leastImportant Edge
 	minWeight := 1000
 
-	for i := 0; i < len(cycle); i++ {
+	for i := range cycle {
 		from := cycle[i]
 		to := cycle[(i+1)%len(cycle)]
 
@@ -603,11 +611,26 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 		info.Dependencies = append(info.Dependencies, udr.extractTableDependencies(sql)...)
 		// This ensures views are created in correct order when views depend on other views
 		info.Dependencies = append(info.Dependencies, udr.extractViewDependencies(sql)...)
+		// CRITICAL: Extract table dependencies from function bodies (SELECT FROM queries)
+		// This ensures functions that query tables are created AFTER those tables
+		info.Dependencies = append(info.Dependencies, udr.extractFunctionTableDependencies(sql)...)
 		// This ensures functions used in CHECK constraints are created before the tables
-		info.Dependencies = append(info.Dependencies, udr.extractFunctionDependencies(sql)...)
+		functionDeps := udr.extractFunctionDependencies(sql)
+		info.Dependencies = append(info.Dependencies, functionDeps...)
+
+		// DEBUG: Log function dependencies for tables with CHECK constraints
+		if strings.Contains(strings.ToLower(objectKey), "profile") || len(functionDeps) > 0 {
+			utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("🔍 Object %s function dependencies: %v", objectKey, functionDeps)
+			if strings.Contains(strings.ToLower(sql), "check") {
+				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("  SQL contains CHECK constraint")
+			}
+		}
+
 		info.Provides = append(info.Provides, udr.extractTableProvisions(sql)...)
 		info.Provides = append(info.Provides, udr.extractSchemaProvisions(sql)...)
 		info.Provides = append(info.Provides, udr.extractTypeProvisions(sql)...)
+		// CRITICAL: Extract function provisions so functions can be matched as dependencies
+		info.Provides = append(info.Provides, udr.extractFunctionProvisions(sql)...)
 
 	case types.CategoryConstraints:
 		info.Dependencies = append(info.Dependencies, udr.extractTableDependencies(sql)...)
@@ -670,6 +693,8 @@ func (udr *UnifiedDependencyResolver) topologicalSortSQL(dependencies map[string
 			normalDeps[key] = info
 		}
 	}
+	sort.Strings(requiredFirst)
+	sort.Strings(requiredLast)
 
 	// Build a tracking.DependencyGraph for normal dependencies
 	depGraph := tracking.NewDependencyGraph()
@@ -736,6 +761,21 @@ func (udr *UnifiedDependencyResolver) topologicalSortSQL(dependencies map[string
 	result = append(result, normalResult...)
 	result = append(result, requiredLast...)
 
+	// DEBUG: Log topological sort results for CategoryFoundation
+	if category == types.CategoryFoundation && len(result) > 0 {
+		utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("📊 Topological sort order for %s (%d objects):", category, len(result))
+		for i, key := range result {
+			// Show object type if we can determine it
+			objType := "unknown"
+			if strings.Contains(strings.ToLower(key), "function") {
+				objType = "FUNCTION"
+			} else if strings.Contains(strings.ToLower(key), "table") || (!strings.Contains(key, ":") && len(key) < 50) {
+				objType = "TABLE"
+			}
+			utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("  %d. [%s] %s", i+1, objType, key)
+		}
+	}
+
 	return result
 }
 
@@ -745,84 +785,54 @@ func (udr *UnifiedDependencyResolver) topologicalSortSQL(dependencies map[string
 func (udr *UnifiedDependencyResolver) extractTableDependencies(sql string) []string {
 	var deps []string
 
-	// Priority 0: RETURNS SETOF table_name - Functions must be created after the table they return
-	// Match: RETURNS SETOF [schema.]table_name
-	returnsSetofPattern := regexp.MustCompile(`(?i)RETURNS\s+SETOF\s+(?:[\w]+\.)?(\w+)`)
-	returnsMatches := returnsSetofPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range returnsMatches {
-		if len(match) > 1 {
-			referencedTable := strings.TrimSpace(match[1])
-			if referencedTable != "" {
-				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found RETURNS SETOF dependency: function depends on table %s", referencedTable)
-				deps = append(deps, referencedTable)
-			}
+	// AST-first extraction using the same parser pipeline used elsewhere in engine.
+	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
+		for _, stmt := range stmts {
+			deps = append(deps, udr.extractTableDependenciesFromStatement(stmt)...)
+		}
+
+		deps = udr.removeDuplicates(deps)
+		if len(deps) > 0 {
+			return deps
 		}
 	}
 
-	// Priority 1: FOREIGN KEY REFERENCES - These are critical for table creation order
-	// Tables must be created before they can be referenced
-	fkMatches := patterns.ForeignKeyPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range fkMatches {
-		if len(match) > 1 {
-			referencedTable := strings.TrimSpace(match[1])
-			if referencedTable != "" {
-				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found foreign key dependency: table depends on %s", referencedTable)
-				deps = append(deps, referencedTable)
-			}
+	// Fallback for SQL fragments that are not parseable as full statements.
+	deps = append(deps, udr.extractReturnsSetofDependencies(sql)...)
+
+	tokens := tokenizeSQLIdentifiers(sql)
+
+	// Priority 1/2: REFERENCES targets from FK and shorthand REFERENCES clauses.
+	for _, referencedTable := range extractIdentifiersAfterKeyword(tokens, "REFERENCES") {
+		referencedTable = strings.TrimSpace(referencedTable)
+		if referencedTable == "" {
+			continue
+		}
+
+		utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found REFERENCES dependency: table depends on %s", referencedTable)
+		deps = append(deps, referencedTable)
+	}
+
+	// Priority 3: COMMENT ON TABLE/COLUMN target table dependency.
+	for _, tableName := range extractCommentOnTableTargets(tokens) {
+		if tableName == "" {
+			continue
+		}
+
+		utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found COMMENT ON dependency: comment depends on table %s", tableName)
+		deps = append(deps, tableName)
+	}
+
+	// Priority 4: DML table dependencies.
+	deps = append(deps, extractIdentifiersAfterKeywordSequence(tokens, "INSERT", "INTO")...)
+	for _, tableName := range extractIdentifiersAfterKeyword(tokens, "UPDATE") {
+		tableName = strings.ToLower(strings.TrimSpace(tableName))
+		if tableName != "" {
+			deps = append(deps, tableName)
 		}
 	}
 
-	// Priority 2: Direct REFERENCES clause (shorthand foreign key syntax)
-	refMatches := patterns.DirectRefPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range refMatches {
-		if len(match) > 1 {
-			referencedTable := strings.TrimSpace(match[1])
-			if referencedTable != "" {
-				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found direct reference dependency: table depends on %s", referencedTable)
-				deps = append(deps, referencedTable)
-			}
-		}
-	}
-
-	// Priority 3: COMMENT ON statements - tables must exist before comments
-	// COMMENT ON COLUMN table_name.column_name or COMMENT ON TABLE table_name
-	commentMatches := patterns.CommentOnPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range commentMatches {
-		if len(match) > 1 {
-			qualifiedName := strings.TrimSpace(match[1])
-			// Extract table name from qualified name (e.g., "buddy_connections.group_name" -> "buddy_connections")
-			parts := strings.Split(qualifiedName, ".")
-			tableName := parts[0]
-			if tableName != "" {
-				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found COMMENT ON dependency: comment depends on table %s", tableName)
-				deps = append(deps, tableName)
-			}
-		}
-	}
-
-	// Priority 4: Other table dependencies (for data operations)
-	// Using precompiled patterns for INSERT, UPDATE, and general table references
-	insertMatches := patterns.InsertIntoPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range insertMatches {
-		if len(match) > 1 {
-			tableName := strings.TrimSpace(match[1])
-			if tableName != "" && !strings.Contains(tableName, "(") {
-				deps = append(deps, tableName)
-			}
-		}
-	}
-
-	updateMatches := patterns.UpdateTablePattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range updateMatches {
-		if len(match) > 1 {
-			tableName := strings.TrimSpace(match[1])
-			if tableName != "" && !strings.Contains(tableName, "(") {
-				deps = append(deps, tableName)
-			}
-		}
-	}
-
-	return deps
+	return udr.removeDuplicates(deps)
 }
 
 // extractViewDependencies finds view references in FROM/JOIN clauses
@@ -830,49 +840,65 @@ func (udr *UnifiedDependencyResolver) extractTableDependencies(sql string) []str
 func (udr *UnifiedDependencyResolver) extractViewDependencies(sql string) []string {
 	var deps []string
 
-	// Only process if this is a CREATE VIEW statement
-	if !regexp.MustCompile(`(?i)CREATE\s+(?:OR\s+REPLACE\s+)?VIEW`).MatchString(sql) {
-		return deps
-	}
-
-	// Extract the view definition (everything after AS)
-	asPattern := regexp.MustCompile(`(?is)CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+[\w.]+.*?\s+AS\s+(.+)`)
-	asMatch := asPattern.FindStringSubmatch(sql)
-	if len(asMatch) < 2 {
-		return deps
-	}
-
-	viewDef := asMatch[1]
-
-	// Pattern 1: FROM clause - matches "FROM schema.object" or "FROM object"
-	// Captures both tables and views referenced in FROM
-	fromPattern := regexp.MustCompile(`(?i)\bFROM\s+(?:ONLY\s+)?(?:[\w]+\.)?(\w+)`)
-	fromMatches := fromPattern.FindAllStringSubmatch(viewDef, -1)
-	for _, match := range fromMatches {
-		if len(match) > 1 {
-			referencedObject := strings.TrimSpace(match[1])
-			if referencedObject != "" && !isCommonSQLKeyword(referencedObject) {
-				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found view FROM dependency: view depends on %s", referencedObject)
-				deps = append(deps, referencedObject)
+	// AST-first: rely on parser dependency extraction for CREATE VIEW / MATVIEW.
+	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
+		for _, stmt := range stmts {
+			if stmt.ObjectType != types.TypeView || stmt.Operation != types.OpCreate {
+				continue
 			}
+
+			for _, dep := range stmt.Dependencies {
+				normalized := normalizeDependencyIdentifier(dep)
+				if normalized != "" {
+					deps = append(deps, normalized)
+				}
+			}
+		}
+
+		deps = udr.removeDuplicates(deps)
+		if len(deps) > 0 {
+			return deps
 		}
 	}
 
-	// Pattern 2: JOIN clause - matches "JOIN schema.object" or "JOIN object"
-	// This captures INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL JOIN, CROSS JOIN
-	joinPattern := regexp.MustCompile(`(?i)\b(?:INNER\s+|LEFT\s+OUTER\s+|LEFT\s+|RIGHT\s+OUTER\s+|RIGHT\s+|FULL\s+OUTER\s+|FULL\s+|CROSS\s+)?JOIN\s+(?:[\w]+\.)?(\w+)`)
-	joinMatches := joinPattern.FindAllStringSubmatch(viewDef, -1)
-	for _, match := range joinMatches {
-		if len(match) > 1 {
-			referencedObject := strings.TrimSpace(match[1])
-			if referencedObject != "" && !isCommonSQLKeyword(referencedObject) {
-				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found view JOIN dependency: view depends on %s", referencedObject)
-				deps = append(deps, referencedObject)
-			}
-		}
+	// Fallback: token scanning for FROM/JOIN references in view definition.
+	upperSQL := strings.ToUpper(sql)
+	if !strings.Contains(upperSQL, "CREATE") || !strings.Contains(upperSQL, "VIEW") {
+		return deps
 	}
 
-	return deps
+	asIndex := strings.Index(upperSQL, " AS ")
+	if asIndex == -1 || asIndex+4 >= len(sql) {
+		return deps
+	}
+
+	viewDef := sql[asIndex+4:]
+	deps = append(deps, udr.extractTableRefsFromSQLFragment(viewDef)...)
+
+	return udr.removeDuplicates(deps)
+}
+
+// extractFunctionTableDependencies finds table references in function bodies (FROM/JOIN clauses)
+// This ensures SQL functions that query tables are created AFTER those tables exist
+func (udr *UnifiedDependencyResolver) extractFunctionTableDependencies(sql string) []string {
+	var deps []string
+
+	upperSQL := strings.ToUpper(sql)
+	if !strings.Contains(upperSQL, "CREATE") || !strings.Contains(upperSQL, "FUNCTION") {
+		return deps
+	}
+
+	functionBody := extractDelimitedSQLBody(sql)
+	if functionBody == "" {
+		return deps
+	}
+
+	deps = append(deps, udr.extractTableRefsFromSQLFragment(functionBody)...)
+	for _, dep := range deps {
+		utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found function body dependency: function depends on table %s", dep)
+	}
+
+	return udr.removeDuplicates(deps)
 }
 
 // isCommonSQLKeyword checks if a string is a common SQL keyword that shouldn't be treated as a table/view name
@@ -889,19 +915,25 @@ func isCommonSQLKeyword(word string) bool {
 // extractSchemaDependencies finds schema references
 func (udr *UnifiedDependencyResolver) extractSchemaDependencies(sql string) []string {
 	var deps []string
-
-	// Look for schema qualified references
-	matches := patterns.QualifiedNamePattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			schema := strings.TrimSpace(match[1])
-			if schema != "" && schema != "public" {
-				deps = append(deps, fmt.Sprintf("schema:%s", schema))
-			}
+	for _, token := range tokenizeSQLIdentifiers(sql) {
+		if !strings.Contains(token, ".") {
+			continue
 		}
+
+		parts := strings.Split(token, ".")
+		if len(parts) < 2 {
+			continue
+		}
+
+		schema := strings.TrimSpace(parts[0])
+		if schema == "" || strings.EqualFold(schema, "public") || !isIdentifierToken(schema) {
+			continue
+		}
+
+		deps = append(deps, fmt.Sprintf("schema:%s", strings.ToLower(schema)))
 	}
 
-	return deps
+	return udr.removeDuplicates(deps)
 }
 
 // extractExtensionDependencies finds extension requirements
@@ -941,72 +973,96 @@ func (udr *UnifiedDependencyResolver) extractExtensionToExtensionDependencies(sq
 	// Map of extension name -> required extensions
 	// These are hardcoded PostgreSQL extension dependencies
 	extensionRequirements := map[string][]string{
-		"earthdistance": {"cube"},           // earthdistance requires cube
+		"earthdistance":          {"cube"},    // earthdistance requires cube
 		"postgis_tiger_geocoder": {"postgis"}, // postgis_tiger_geocoder requires postgis
-		"postgis_topology": {"postgis"},     // postgis_topology requires postgis
-		"postgis_raster": {"postgis"},       // postgis_raster requires postgis
-		"address_standardizer": {"postgis"}, // address_standardizer requires postgis
+		"postgis_topology":       {"postgis"}, // postgis_topology requires postgis
+		"postgis_raster":         {"postgis"}, // postgis_raster requires postgis
+		"address_standardizer":   {"postgis"}, // address_standardizer requires postgis
 	}
 
-	// Extract which extension is being created
-	matches := patterns.CreateExtensionPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			extensionName := strings.ToLower(strings.TrimSpace(match[1]))
+	for _, extensionName := range udr.extractCreatedExtensionNames(sql) {
+		extensionName = strings.ToLower(strings.TrimSpace(extensionName))
+		if extensionName == "" {
+			continue
+		}
 
-			// Check if this extension has dependencies
-			if requiredExtensions, exists := extensionRequirements[extensionName]; exists {
-				for _, required := range requiredExtensions {
-					deps = append(deps, fmt.Sprintf("extension:%s", required))
-				}
+		// Check if this extension has dependencies
+		if requiredExtensions, exists := extensionRequirements[extensionName]; exists {
+			for _, required := range requiredExtensions {
+				deps = append(deps, fmt.Sprintf("extension:%s", required))
 			}
 		}
 	}
 
-	return deps
+	return udr.removeDuplicates(deps)
 }
 
 // extractColumnDependencies finds column references that require prior ALTER TABLE
 func (udr *UnifiedDependencyResolver) extractColumnDependencies(sql string) []string {
 	var deps []string
 
-	// Look for INSERT statements with specific columns
-	matches := patterns.InsertIntoPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 2 {
-			tableName := strings.TrimSpace(match[1])
-			columns := strings.Split(match[2], ",")
-			for _, col := range columns {
-				col = strings.TrimSpace(col)
-				if col != "" {
-					deps = append(deps, fmt.Sprintf("column:%s.%s", tableName, col))
+	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
+		for _, stmt := range stmts {
+			if stmt.ParseTree == nil || len(stmt.ParseTree.Stmts) == 0 {
+				continue
+			}
+
+			tableName := strings.TrimSpace(stmt.ObjectName)
+			if tableName == "" {
+				continue
+			}
+
+			for _, raw := range stmt.ParseTree.Stmts {
+				insert := raw.Stmt.GetInsertStmt()
+				if insert == nil {
+					continue
+				}
+
+				for _, col := range insert.Cols {
+					resTarget := col.GetResTarget()
+					if resTarget == nil {
+						continue
+					}
+
+					columnName := strings.TrimSpace(resTarget.Name)
+					if columnName == "" {
+						continue
+					}
+
+					deps = append(deps, fmt.Sprintf("column:%s.%s", tableName, columnName))
 				}
 			}
 		}
+
+		if len(deps) > 0 {
+			return udr.removeDuplicates(deps)
+		}
 	}
 
-	return deps
+	// Token fallback for partial SQL fragments.
+	tokens := tokenizeSQLIdentifiers(sql)
+	for _, tableName := range extractIdentifiersAfterKeywordSequence(tokens, "INSERT", "INTO") {
+		for _, column := range extractInsertColumns(sql) {
+			deps = append(deps, fmt.Sprintf("column:%s.%s", tableName, column))
+		}
+	}
+
+	return udr.removeDuplicates(deps)
 }
 
 // extractFunctionDependencies finds function references
 func (udr *UnifiedDependencyResolver) extractFunctionDependencies(sql string) []string {
 	var deps []string
 
-	// Look for function calls in trigger definitions (EXECUTE FUNCTION)
-	matches := patterns.ExecuteFunctionPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			funcName := strings.TrimSpace(match[1])
-			if funcName != "" {
-				deps = append(deps, fmt.Sprintf("function:%s", funcName))
-			}
+	tokens := tokenizeSQLIdentifiers(sql)
+	for _, fn := range extractIdentifiersAfterKeywordSequence(tokens, "EXECUTE", "FUNCTION") {
+		fn = strings.ToLower(strings.TrimSpace(fn))
+		if fn != "" {
+			deps = append(deps, fmt.Sprintf("function:%s", fn))
 		}
 	}
 
-	// Look for function calls within function bodies (function_name(...))
-	// This regex matches function calls: function_name() with optional schema qualifier
-	// Pattern: word characters followed by optional dot and word characters, then opening parenthesis
-	callMatches := patterns.FunctionCallPattern.FindAllStringSubmatch(sql, -1)
+	callMatches := scanFunctionCallNames(sql)
 
 	// Track seen functions to avoid duplicates and filter out common SQL keywords/functions
 	seen := make(map[string]bool)
@@ -1025,18 +1081,16 @@ func (udr *UnifiedDependencyResolver) extractFunctionDependencies(sql string) []
 		"gen_random_uuid": true, "uuid_generate_v4": true, "current_timestamp": true,
 	}
 
-	for _, match := range callMatches {
-		if len(match) > 1 {
-			funcName := strings.ToLower(strings.TrimSpace(match[1]))
-			// Skip if already seen, is a SQL keyword, or contains dots (likely schema.table)
-			if !seen[funcName] && !sqlKeywords[funcName] && funcName != "" {
-				seen[funcName] = true
-				deps = append(deps, fmt.Sprintf("function:%s", funcName))
-			}
+	for _, candidate := range callMatches {
+		funcName := strings.ToLower(strings.TrimSpace(candidate))
+		// Skip if already seen, is a SQL keyword, or empty
+		if !seen[funcName] && !sqlKeywords[funcName] && funcName != "" {
+			seen[funcName] = true
+			deps = append(deps, fmt.Sprintf("function:%s", funcName))
 		}
 	}
 
-	return deps
+	return udr.removeDuplicates(deps)
 }
 
 // extractInsertDependencies analyzes INSERT statements for dependencies
@@ -1057,124 +1111,760 @@ func (udr *UnifiedDependencyResolver) extractUpdateDependencies(sql string) []st
 	// UPDATE statements depend on tables and columns
 	deps = append(deps, udr.extractTableDependencies(sql)...)
 
-	// Look for column references in SET clause
-	matches := patterns.SetParameterPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			column := strings.TrimSpace(match[1])
-			if column != "" {
-				// Extract table name from UPDATE statement
-				updateMatches := patterns.UpdateTablePattern.FindStringSubmatch(sql)
-				if len(updateMatches) > 1 {
-					tableName := strings.TrimSpace(updateMatches[1])
-					deps = append(deps, fmt.Sprintf("column:%s.%s", tableName, column))
-				}
+	tableNames := extractIdentifiersAfterKeyword(tokenizeSQLIdentifiers(sql), "UPDATE")
+	if len(tableNames) == 0 {
+		return udr.removeDuplicates(deps)
+	}
+
+	columns := extractUpdateSetColumns(sql)
+	for _, tableName := range tableNames {
+		tableName = strings.TrimSpace(tableName)
+		if tableName == "" {
+			continue
+		}
+
+		for _, column := range columns {
+			if column == "" {
+				continue
 			}
+			deps = append(deps, fmt.Sprintf("column:%s.%s", tableName, column))
 		}
 	}
 
-	return deps
+	return udr.removeDuplicates(deps)
 }
 
 // extractTableProvisions finds what tables/objects this SQL creates
 func (udr *UnifiedDependencyResolver) extractTableProvisions(sql string) []string {
 	var provides []string
 
-	// Look for CREATE TABLE statements
-	matches := patterns.CreateTableDetailPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			tableName := strings.TrimSpace(match[1])
-			if tableName != "" {
-				provides = append(provides, tableName)
+	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
+		for _, stmt := range stmts {
+			if stmt.ObjectType == types.TypeTable && stmt.Operation == types.OpCreate {
+				tableName := strings.TrimSpace(stmt.ObjectName)
+				if tableName != "" {
+					provides = append(provides, tableName)
+				}
 			}
+		}
+
+		if len(provides) > 0 {
+			return udr.removeDuplicates(provides)
 		}
 	}
 
-	// Note: Additional object types (SEQUENCE, VIEW, etc.) could be extracted here
-	// if needed, but for now we focus on tables as the primary provision
+	for _, tableName := range extractIdentifiersAfterKeywordSequence(tokenizeSQLIdentifiers(sql), "CREATE", "TABLE") {
+		if tableName != "" {
+			provides = append(provides, tableName)
+		}
+	}
 
-	return provides
+	return udr.removeDuplicates(provides)
 }
 
 // extractFunctionProvisions finds what functions this SQL creates
 func (udr *UnifiedDependencyResolver) extractFunctionProvisions(sql string) []string {
 	var provides []string
 
-	// Look for CREATE [OR REPLACE] FUNCTION statements
-	matches := patterns.CreateFunctionDetailPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			funcName := strings.ToLower(strings.TrimSpace(match[1]))
+	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
+		for _, stmt := range stmts {
+			if stmt.ObjectType != types.TypeFunction || stmt.Operation != types.OpCreate {
+				continue
+			}
+
+			funcName := strings.ToLower(strings.TrimSpace(stmt.ObjectName))
 			if funcName != "" {
 				provides = append(provides, fmt.Sprintf("function:%s", funcName))
 			}
 		}
+
+		if len(provides) > 0 {
+			return udr.removeDuplicates(provides)
+		}
 	}
 
-	return provides
+	for _, fn := range extractIdentifiersAfterKeywordSequence(tokenizeSQLIdentifiers(sql), "CREATE", "FUNCTION") {
+		fn = strings.ToLower(strings.TrimSpace(fn))
+		if fn != "" {
+			provides = append(provides, fmt.Sprintf("function:%s", fn))
+		}
+	}
+
+	for _, fn := range extractIdentifiersAfterKeywordSequence(tokenizeSQLIdentifiers(sql), "CREATE", "OR", "REPLACE", "FUNCTION") {
+		fn = strings.ToLower(strings.TrimSpace(fn))
+		if fn != "" {
+			provides = append(provides, fmt.Sprintf("function:%s", fn))
+		}
+	}
+
+	return udr.removeDuplicates(provides)
 }
 
 // extractSchemaProvisions finds what schemas this SQL creates
 func (udr *UnifiedDependencyResolver) extractSchemaProvisions(sql string) []string {
 	var provides []string
 
-	matches := patterns.CreateSchemaDetailPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			schema := strings.TrimSpace(match[1])
-			if schema != "" {
-				provides = append(provides, fmt.Sprintf("schema:%s", schema))
-			}
+	for _, schema := range extractIdentifiersAfterKeywordSequence(tokenizeSQLIdentifiers(sql), "CREATE", "SCHEMA") {
+		schema = strings.TrimSpace(schema)
+		if schema == "" || strings.EqualFold(schema, "if") {
+			continue
+		}
+		provides = append(provides, fmt.Sprintf("schema:%s", schema))
+	}
+
+	for _, schema := range extractIdentifiersAfterKeywordSequence(tokenizeSQLIdentifiers(sql), "CREATE", "SCHEMA", "IF", "NOT", "EXISTS") {
+		schema = strings.TrimSpace(schema)
+		if schema != "" {
+			provides = append(provides, fmt.Sprintf("schema:%s", schema))
 		}
 	}
 
-	return provides
+	return udr.removeDuplicates(provides)
 }
 
 // extractExtensionProvisions finds what extensions this SQL creates
 func (udr *UnifiedDependencyResolver) extractExtensionProvisions(sql string) []string {
 	var provides []string
 
-	matches := patterns.CreateExtensionPattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			extension := strings.TrimSpace(match[1])
-			if extension != "" {
-				provides = append(provides, fmt.Sprintf("extension:%s", extension))
-			}
+	for _, extension := range udr.extractCreatedExtensionNames(sql) {
+		extension = strings.TrimSpace(extension)
+		if extension != "" {
+			provides = append(provides, fmt.Sprintf("extension:%s", extension))
 		}
 	}
 
-	return provides
+	return udr.removeDuplicates(provides)
 }
 
 // extractTypeDependencies finds type/enum references that need to be created first
 func (udr *UnifiedDependencyResolver) extractTypeDependencies(sql string) []string {
 	var deps []string
-	sqlUpper := strings.ToUpper(sql)
 
-	// Only scan CREATE TABLE statements for type dependencies
-	if !strings.Contains(sqlUpper, "CREATE TABLE") {
-		return deps
+	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
+		seenTypes := make(map[string]struct{})
+
+		for _, stmt := range stmts {
+			if stmt.ObjectType != types.TypeTable || stmt.Operation != types.OpCreate || stmt.ParseTree == nil {
+				continue
+			}
+
+			for _, raw := range stmt.ParseTree.Stmts {
+				createStmt := raw.Stmt.GetCreateStmt()
+				if createStmt == nil {
+					continue
+				}
+
+				for _, tableElt := range createStmt.TableElts {
+					colDef := tableElt.GetColumnDef()
+					if colDef == nil || colDef.TypeName == nil {
+						continue
+					}
+
+					typeName := strings.ToLower(strings.TrimSpace(typeNameFromAST(colDef.TypeName)))
+					if typeName == "" || isBuiltInOrKeywordType(typeName) {
+						continue
+					}
+
+					if _, exists := seenTypes[typeName]; exists {
+						continue
+					}
+
+					seenTypes[typeName] = struct{}{}
+					deps = append(deps, fmt.Sprintf("type:%s", typeName))
+					utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Table depends on custom type: %s", typeName)
+				}
+			}
+		}
+
+		deps = udr.removeDuplicates(deps)
+		if len(deps) > 0 {
+			return deps
+		}
 	}
 
-	// Extract just the column definitions from CREATE TABLE
-	// Match: CREATE TABLE ... ( ... column definitions ... )
-	tableDefMatch := regexp.MustCompile(`(?is)CREATE\s+TABLE[^(]*\((.*?)\);?`).FindStringSubmatch(sql)
-	if len(tableDefMatch) < 2 {
-		return deps
+	// Fallback for SQL fragments that cannot be parsed as full CREATE TABLE statements.
+	seenTypes := make(map[string]struct{})
+	for _, typeName := range scanPotentialCustomTypes(sql) {
+		typeName = strings.ToLower(strings.TrimSpace(typeName))
+		if typeName == "" || isBuiltInOrKeywordType(typeName) {
+			continue
+		}
+
+		if _, exists := seenTypes[typeName]; exists {
+			continue
+		}
+
+		seenTypes[typeName] = struct{}{}
+		deps = append(deps, fmt.Sprintf("type:%s", typeName))
 	}
 
-	columnDefs := tableDefMatch[1]
+	return udr.removeDuplicates(deps)
+}
 
-	// Now parse column definitions more carefully
-	// Split by comma, but be careful of commas inside CHECK constraints
-	// For simplicity, use a regex to find column definitions
-	// Pattern: column_name custom_type (avoiding SQL keywords and built-in types)
-	colMatches := patterns.ColumnTypePattern.FindAllStringSubmatch(columnDefs, -1)
+func (udr *UnifiedDependencyResolver) parseStatementsForDependencyExtraction(sql string) []types.Statement {
+	migration, err := parser.ParseMigration(sql, "__dependency_extraction__.sql")
+	if err != nil || migration == nil || len(migration.Statements) == 0 {
+		return nil
+	}
 
-	seenTypes := make(map[string]bool)
+	return migration.Statements
+}
+
+func (udr *UnifiedDependencyResolver) extractTableDependenciesFromStatement(stmt types.Statement) []string {
+	deps := make([]string, 0)
+
+	for _, dep := range stmt.Dependencies {
+		normalized := normalizeDependencyIdentifier(dep)
+		if normalized != "" {
+			deps = append(deps, normalized)
+		}
+	}
+
+	if stmt.IsDataOp {
+		normalized := normalizeDependencyIdentifier(stmt.ObjectName)
+		if normalized != "" {
+			deps = append(deps, normalized)
+		}
+	}
+
+	if stmt.ObjectType == types.TypeFunction {
+		deps = append(deps, udr.extractReturnsSetofDependencies(stmt.SQL)...)
+	}
+
+	return deps
+}
+
+func (udr *UnifiedDependencyResolver) extractReturnsSetofDependencies(sql string) []string {
+	deps := make([]string, 0)
+	tokens := tokenizeSQLIdentifiers(sql)
+
+	for i := 0; i+2 < len(tokens); i++ {
+		if !strings.EqualFold(tokens[i], "RETURNS") || !strings.EqualFold(tokens[i+1], "SETOF") {
+			continue
+		}
+
+		normalized := normalizeDependencyIdentifier(tokens[i+2])
+		if normalized == "" {
+			continue
+		}
+
+		utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Found RETURNS SETOF dependency: function depends on table %s", normalized)
+		deps = append(deps, normalized)
+	}
+
+	return udr.removeDuplicates(deps)
+}
+
+func (udr *UnifiedDependencyResolver) extractTableRefsFromSQLFragment(fragment string) []string {
+	tokens := tokenizeSQLIdentifiers(fragment)
+	deps := make([]string, 0)
+
+	for i := range tokens {
+		token := strings.ToUpper(tokens[i])
+		if token != "FROM" && token != "JOIN" {
+			continue
+		}
+
+		j := i + 1
+		for j < len(tokens) && isTableReferenceModifier(tokens[j]) {
+			j++
+		}
+		if j >= len(tokens) {
+			continue
+		}
+
+		referenced := normalizeDependencyIdentifier(tokens[j])
+		if referenced == "" || isCommonSQLKeyword(referenced) {
+			continue
+		}
+
+		deps = append(deps, referenced)
+	}
+
+	return udr.removeDuplicates(deps)
+}
+
+func extractDelimitedSQLBody(sql string) string {
+	upperSQL := strings.ToUpper(sql)
+	asIndex := strings.Index(upperSQL, "AS")
+	if asIndex == -1 {
+		return ""
+	}
+
+	tail := sql[asIndex+2:]
+	dollarStart := strings.Index(tail, "$")
+	if dollarStart == -1 {
+		return ""
+	}
+
+	tail = tail[dollarStart:]
+	dollarEnd := strings.Index(tail[1:], "$")
+	if dollarEnd == -1 {
+		return ""
+	}
+
+	tag := tail[:dollarEnd+2]
+	bodyStart := asIndex + 2 + dollarStart + len(tag)
+	if bodyStart >= len(sql) {
+		return ""
+	}
+
+	bodyEndRelative := strings.Index(sql[bodyStart:], tag)
+	if bodyEndRelative == -1 {
+		return ""
+	}
+
+	return sql[bodyStart : bodyStart+bodyEndRelative]
+}
+
+func tokenizeSQLIdentifiers(sql string) []string {
+	if strings.TrimSpace(sql) == "" {
+		return nil
+	}
+
+	raw := strings.FieldsFunc(sql, func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.')
+	})
+
+	tokens := make([]string, 0, len(raw))
+	for _, token := range raw {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		tokens = append(tokens, token)
+	}
+
+	return tokens
+}
+
+func isTableReferenceModifier(token string) bool {
+	switch strings.ToUpper(strings.TrimSpace(token)) {
+	case "ONLY", "LATERAL", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractIdentifiersAfterKeyword(tokens []string, keyword string) []string {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	results := make([]string, 0)
+	for i := 0; i+1 < len(tokens); i++ {
+		if !strings.EqualFold(tokens[i], keyword) {
+			continue
+		}
+
+		candidate := strings.TrimSpace(tokens[i+1])
+		if candidate == "" {
+			continue
+		}
+
+		results = append(results, candidate)
+	}
+
+	return removeDuplicateStrings(results)
+}
+
+func extractIdentifiersAfterKeywordSequence(tokens []string, keywords ...string) []string {
+	if len(tokens) == 0 || len(keywords) == 0 {
+		return nil
+	}
+
+	results := make([]string, 0)
+	for i := range tokens {
+		index := i
+		matched := true
+		for _, keyword := range keywords {
+			if index >= len(tokens) || !strings.EqualFold(tokens[index], keyword) {
+				matched = false
+				break
+			}
+			index++
+		}
+
+		if !matched || index >= len(tokens) {
+			continue
+		}
+
+		candidate := strings.TrimSpace(tokens[index])
+		if candidate == "" {
+			continue
+		}
+
+		results = append(results, candidate)
+	}
+
+	return removeDuplicateStrings(results)
+}
+
+func extractCommentOnTableTargets(tokens []string) []string {
+	results := make([]string, 0)
+	for i := 0; i+3 < len(tokens); i++ {
+		if !strings.EqualFold(tokens[i], "COMMENT") || !strings.EqualFold(tokens[i+1], "ON") {
+			continue
+		}
+
+		targetKind := strings.ToUpper(strings.TrimSpace(tokens[i+2]))
+		if targetKind != "TABLE" && targetKind != "COLUMN" {
+			continue
+		}
+
+		qualifiedName := strings.TrimSpace(tokens[i+3])
+		if qualifiedName == "" {
+			continue
+		}
+
+		parts := strings.Split(qualifiedName, ".")
+		tableName := strings.TrimSpace(parts[0])
+		if tableName != "" {
+			results = append(results, tableName)
+		}
+	}
+
+	return removeDuplicateStrings(results)
+}
+
+func extractInsertColumns(sql string) []string {
+	upper := strings.ToUpper(sql)
+	insertIntoIndex := strings.Index(upper, "INSERT")
+	if insertIntoIndex == -1 {
+		return nil
+	}
+
+	parenStart := strings.Index(sql[insertIntoIndex:], "(")
+	if parenStart == -1 {
+		return nil
+	}
+	parenStart += insertIntoIndex
+
+	parenEnd := findClosingParen(sql, parenStart)
+	if parenEnd == -1 || parenEnd <= parenStart+1 {
+		return nil
+	}
+
+	columnSlice := sql[parenStart+1 : parenEnd]
+	parts := strings.Split(columnSlice, ",")
+	columns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		candidate := strings.TrimSpace(strings.Trim(part, `"`))
+		if candidate != "" {
+			columns = append(columns, candidate)
+		}
+	}
+
+	return removeDuplicateStrings(columns)
+}
+
+func scanFunctionCallNames(sql string) []string {
+	if strings.TrimSpace(sql) == "" {
+		return nil
+	}
+
+	names := make([]string, 0)
+	for i := 0; i < len(sql); i++ {
+		if !isIdentifierTokenByte(sql[i]) {
+			continue
+		}
+		if i > 0 && isIdentifierTokenByte(sql[i-1]) {
+			continue
+		}
+
+		start := i
+		for i < len(sql) && (isIdentifierTokenByte(sql[i]) || sql[i] == '.') {
+			i++
+		}
+
+		name := strings.TrimSpace(sql[start:i])
+		if name == "" {
+			continue
+		}
+
+		j := i
+		for j < len(sql) && unicode.IsSpace(rune(sql[j])) {
+			j++
+		}
+		if j < len(sql) && sql[j] == '(' {
+			names = append(names, name)
+		}
+
+		i--
+	}
+
+	return removeDuplicateStrings(names)
+}
+
+func extractUpdateSetColumns(sql string) []string {
+	stmts := strings.Split(sql, ";")
+	columns := make([]string, 0)
+
+	for _, stmt := range stmts {
+		upper := strings.ToUpper(stmt)
+		setIndex := strings.Index(upper, " SET ")
+		if setIndex == -1 {
+			continue
+		}
+
+		setClauseStart := setIndex + len(" SET ")
+		whereIndex := strings.Index(upper[setClauseStart:], " WHERE ")
+		setClauseEnd := len(stmt)
+		if whereIndex >= 0 {
+			setClauseEnd = setClauseStart + whereIndex
+		}
+
+		setClause := stmt[setClauseStart:setClauseEnd]
+		assignments := strings.SplitSeq(setClause, ",")
+		for assignment := range assignments {
+			before, _, ok := strings.Cut(assignment, "=")
+			if !ok {
+				continue
+			}
+
+			left := strings.TrimSpace(before)
+			if left == "" {
+				continue
+			}
+
+			if strings.Contains(left, ".") {
+				parts := strings.Split(left, ".")
+				left = strings.TrimSpace(parts[len(parts)-1])
+			}
+
+			left = strings.Trim(left, `"`)
+			if left != "" {
+				columns = append(columns, left)
+			}
+		}
+	}
+
+	return removeDuplicateStrings(columns)
+}
+
+func isIdentifierToken(token string) bool {
+	if token == "" {
+		return false
+	}
+
+	for i := 0; i < len(token); i++ {
+		if !isIdentifierTokenByte(token[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func isIdentifierTokenByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_'
+}
+
+func findClosingParen(sql string, openIndex int) int {
+	if openIndex < 0 || openIndex >= len(sql) || sql[openIndex] != '(' {
+		return -1
+	}
+
+	depth := 0
+	inSingleQuote := false
+	for i := openIndex; i < len(sql); i++ {
+		ch := sql[i]
+
+		if inSingleQuote {
+			if ch == '\'' {
+				if i+1 < len(sql) && sql[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+func removeDuplicateStrings(items []string) []string {
+	if len(items) <= 1 {
+		return items
+	}
+
+	seen := make(map[string]struct{}, len(items))
+	unique := make([]string, 0, len(items))
+	for _, item := range items {
+		key := strings.TrimSpace(item)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, key)
+	}
+
+	return unique
+}
+
+func (udr *UnifiedDependencyResolver) extractCreatedExtensionNames(sql string) []string {
+	names := make([]string, 0)
+
+	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
+		for _, stmt := range stmts {
+			if stmt.ObjectType == types.TypeExtension && stmt.Operation == types.OpCreate {
+				extName := strings.TrimSpace(stmt.ObjectName)
+				if extName != "" {
+					names = append(names, extName)
+				}
+			}
+		}
+
+		if len(names) > 0 {
+			return udr.removeDuplicates(names)
+		}
+	}
+
+	tokens := tokenizeSQLIdentifiers(sql)
+	names = append(names, extractIdentifiersAfterKeywordSequence(tokens, "CREATE", "EXTENSION")...)
+	names = append(names, extractIdentifiersAfterKeywordSequence(tokens, "CREATE", "EXTENSION", "IF", "NOT", "EXISTS")...)
+
+	return udr.removeDuplicates(names)
+}
+
+func scanPotentialCustomTypes(sql string) []string {
+	tokens := tokenizeSQLIdentifiers(sql)
+	if len(tokens) < 2 {
+		return nil
+	}
+
+	blocked := map[string]bool{
+		"create": true, "table": true, "alter": true, "add": true, "column": true,
+		"constraint": true, "primary": true, "foreign": true, "references": true,
+		"check": true, "default": true, "not": true, "null": true, "unique": true,
+		"key": true, "as": true, "enum": true, "type": true, "on": true,
+		"delete": true, "update": true, "set": true, "if": true, "exists": true,
+		"returns": true, "function": true,
+	}
+
+	typesFound := make([]string, 0)
+	for i := 0; i+1 < len(tokens); i++ {
+		left := strings.ToLower(strings.TrimSpace(tokens[i]))
+		right := strings.ToLower(strings.TrimSpace(tokens[i+1]))
+
+		if left == "" || right == "" {
+			continue
+		}
+
+		if blocked[left] || blocked[right] {
+			continue
+		}
+
+		if !isIdentifierToken(left) || !isIdentifierToken(right) {
+			continue
+		}
+
+		typesFound = append(typesFound, right)
+	}
+
+	return removeDuplicateStrings(typesFound)
+}
+
+func enhanceExtensionStatementWithCascade(sql string, cascadeExtensions map[string]bool) string {
+	trimmed := strings.TrimSpace(sql)
+	if trimmed == "" {
+		return sql
+	}
+
+	if !strings.Contains(strings.ToUpper(trimmed), "CREATE") || !strings.Contains(strings.ToUpper(trimmed), "EXTENSION") {
+		return sql
+	}
+
+	if hasKeyword(tokenizeSQLIdentifiers(trimmed), "CASCADE") {
+		return sql
+	}
+
+	extensionNames := extractIdentifiersAfterKeywordSequence(tokenizeSQLIdentifiers(trimmed), "CREATE", "EXTENSION")
+	extensionNames = append(extensionNames, extractIdentifiersAfterKeywordSequence(tokenizeSQLIdentifiers(trimmed), "CREATE", "EXTENSION", "IF", "NOT", "EXISTS")...)
+
+	for _, extensionName := range extensionNames {
+		if !cascadeExtensions[strings.ToLower(strings.TrimSpace(extensionName))] {
+			continue
+		}
+
+		base := strings.TrimSuffix(trimmed, ";")
+		return base + " CASCADE;"
+	}
+
+	return sql
+}
+
+func hasKeyword(tokens []string, keyword string) bool {
+	for _, token := range tokens {
+		if strings.EqualFold(token, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeDependencyIdentifier(dep string) string {
+	trimmed := strings.TrimSpace(dep)
+	if trimmed == "" {
+		return ""
+	}
+
+	upper := strings.ToUpper(trimmed)
+	if strings.HasPrefix(upper, "REFERENCES:") || strings.HasPrefix(upper, "TABLE:") {
+		parts := strings.SplitN(trimmed, ":", 2)
+		if len(parts) == 2 {
+			trimmed = strings.TrimSpace(parts[1])
+		}
+	} else if strings.Contains(trimmed, ":") {
+		// Non-table dependency classes (schema:, function:, extension:, type:, column:, constraint:).
+		return ""
+	}
+
+	if trimmed == "" || strings.Contains(trimmed, "(") {
+		return ""
+	}
+
+	if strings.Contains(trimmed, ".") {
+		parts := strings.Split(trimmed, ".")
+		trimmed = parts[len(parts)-1]
+	}
+
+	return strings.ToLower(strings.TrimSpace(trimmed))
+}
+
+func typeNameFromAST(typeName *pg_query.TypeName) string {
+	if typeName == nil || len(typeName.Names) == 0 {
+		return ""
+	}
+
+	last := typeName.Names[len(typeName.Names)-1]
+	strNode := last.GetString_()
+	if strNode == nil {
+		return ""
+	}
+
+	return strNode.Sval
+}
+
+func isBuiltInOrKeywordType(typeName string) bool {
 	postgresBuiltinTypes := map[string]bool{
 		"text": true, "varchar": true, "char": true, "character": true,
 		"integer": true, "int": true, "int2": true, "int4": true, "int8": true,
@@ -1198,49 +1888,47 @@ func (udr *UnifiedDependencyResolver) extractTypeDependencies(sql string) []stri
 		"alter": true, "drop": true, "row": true, "level": true, "security": true,
 	}
 
-	for _, match := range colMatches {
-		if len(match) > 2 {
-			// match[1] is column name, match[2] is type name
-			typeName := strings.ToLower(strings.TrimSpace(match[2]))
-
-			// Skip PostgreSQL built-in types, SQL keywords, and empty strings
-			if typeName == "" || postgresBuiltinTypes[typeName] || sqlKeywords[typeName] {
-				continue
-			}
-
-			// Additional filtering: skip if it looks like a SQL keyword combination
-			// (e.g., if "not" appears, it's likely "NOT NULL")
-			if len(typeName) <= 3 {
-				// Very short type names are likely keywords
-				continue
-			}
-
-			// This is likely a custom type - add as dependency
-			if !seenTypes[typeName] {
-				seenTypes[typeName] = true
-				deps = append(deps, fmt.Sprintf("type:%s", typeName))
-				utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Table depends on custom type: %s", typeName)
-			}
-		}
+	normalized := strings.ToLower(strings.TrimSpace(typeName))
+	if normalized == "" || len(normalized) <= 3 {
+		return true
 	}
 
-	return deps
-}// extractTypeProvisions finds what types/enums this SQL creates
+	return postgresBuiltinTypes[normalized] || sqlKeywords[normalized]
+}
+
+// extractTypeProvisions finds what types/enums this SQL creates
 func (udr *UnifiedDependencyResolver) extractTypeProvisions(sql string) []string {
 	var provides []string
 
-	// Look for CREATE TYPE statements using EnumTypePattern
-	matches := patterns.EnumTypePattern.FindAllStringSubmatch(sql, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			typeName := strings.TrimSpace(match[1])
+	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
+		for _, stmt := range stmts {
+			if stmt.Operation != types.OpCreate {
+				continue
+			}
+
+			if stmt.ObjectType != types.TypeEnum && stmt.ObjectType != types.TypeType && stmt.ObjectType != types.TypeDomain && stmt.ObjectType != types.TypeComposite {
+				continue
+			}
+
+			typeName := strings.TrimSpace(stmt.ObjectName)
 			if typeName != "" {
 				provides = append(provides, fmt.Sprintf("type:%s", typeName))
 			}
 		}
+
+		if len(provides) > 0 {
+			return udr.removeDuplicates(provides)
+		}
 	}
 
-	return provides
+	for _, typeName := range extractIdentifiersAfterKeywordSequence(tokenizeSQLIdentifiers(sql), "CREATE", "TYPE") {
+		typeName = strings.TrimSpace(typeName)
+		if typeName != "" {
+			provides = append(provides, fmt.Sprintf("type:%s", typeName))
+		}
+	}
+
+	return udr.removeDuplicates(provides)
 }
 
 // dependencyMatches checks if a dependency requirement matches a provision
@@ -1261,8 +1949,8 @@ func (udr *UnifiedDependencyResolver) dependencyMatches(dependency, provision st
 
 	// Type dependencies from parser don't have "type:" prefix
 	// Match bare type names against "type:typename" provisions
-	if strings.HasPrefix(provision, "type:") {
-		provisionType := strings.TrimPrefix(provision, "type:")
+	if after, ok := strings.CutPrefix(provision, "type:"); ok {
+		provisionType := after
 		if dependency == provisionType {
 			utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Matched type dependency: %s requires type:%s", dependency, provisionType)
 			return true
@@ -1328,22 +2016,39 @@ func (udr *UnifiedDependencyResolver) EnhanceExtensionSQL(sql string) string {
 		"postgis":       true,
 	}
 
-	// Check if this is an extension creation
-	return patterns.CreateExtensionWithVersionPattern.ReplaceAllStringFunc(sql, func(match string) string {
-		parts := patterns.CreateExtensionWithVersionPattern.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
+	if strings.TrimSpace(sql) == "" {
+		return sql
+	}
+
+	statements, err := pg_query.SplitWithScanner(sql, true)
+	if err != nil || len(statements) == 0 {
+		return enhanceExtensionStatementWithCascade(sql, cascadeExtensions)
+	}
+
+	enhanced := make([]string, 0, len(statements))
+	changed := false
+
+	for _, stmt := range statements {
+		trimmed := strings.TrimSpace(stmt)
+		if trimmed == "" {
+			continue
 		}
 
-		prefix := parts[1]
-		extensionName := parts[2]
-		suffix := parts[3]
-
-		// Add CASCADE if needed and not already present
-		if cascadeExtensions[strings.ToLower(extensionName)] && !strings.Contains(strings.ToLower(match), "cascade") {
-			return prefix + extensionName + " CASCADE" + suffix
+		updated := enhanceExtensionStatementWithCascade(trimmed, cascadeExtensions)
+		if updated != trimmed {
+			changed = true
 		}
 
-		return match
-	})
+		enhanced = append(enhanced, strings.TrimSuffix(strings.TrimSpace(updated), ";"))
+	}
+
+	if !changed {
+		return sql
+	}
+
+	if len(enhanced) == 0 {
+		return sql
+	}
+
+	return strings.Join(enhanced, ";\n") + ";"
 }

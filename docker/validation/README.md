@@ -23,27 +23,35 @@ Spin up ephemeral PostgreSQL containers to validate migration squashing results 
 ### Simple Validation
 
 ```bash
+
 # Validate migrations in current directory
+
 ./docker/scripts/quick-validate.sh
 ```
 
 ### With Docker Compose
 
 ```bash
+
 # Full validation workflow
+
 docker compose -f docker/validation/with-validation.yml run --rm pgsquash validate /app/migrations/*.sql
 
 # Squash + validate
+
 docker compose -f docker/validation/with-validation.yml run --rm pgsquash workflow
 ```
 
 ### Multi-Version Testing
 
 ```bash
+
 # Test against PostgreSQL 17, 16, 15, 14, 13
+
 ./docker/scripts/multi-version-test.sh
 
 # Quick test (latest and oldest)
+
 ./docker/scripts/multi-version-test.sh --quick
 ```
 
@@ -60,20 +68,26 @@ Located in `docker/scripts/`:
 ### `validate.sh` - Comprehensive validation
 
 ```bash
+
 # Full validation with detailed reports
+
 ./docker/scripts/validate.sh
 
 # Keep containers for inspection
+
 ./docker/scripts/validate.sh --keep-container
 ```
 
 ### `setup-validation.sh` - Custom validation environment
 
 ```bash
+
 # Setup validation with auto-detected extensions
+
 ./docker/scripts/setup-validation.sh migrations/ /tmp/validation
 
 # Run the generated validation
+
 cd /tmp/validation
 ./run-validation.sh
 ```
@@ -81,20 +95,26 @@ cd /tmp/validation
 ### `multi-version-test.sh` - Test multiple PostgreSQL versions
 
 ```bash
+
 # All versions
+
 ./docker/scripts/multi-version-test.sh
 
 # Specific versions
+
 ./docker/scripts/multi-version-test.sh --versions 17,15,13
 ```
 
 ### `cleanup.sh` - Clean up validation containers
 
 ```bash
+
 # Clean validation containers only
+
 ./docker/scripts/cleanup.sh
 
 # Clean everything
+
 ./docker/scripts/cleanup.sh --all --volumes
 ```
 
@@ -121,6 +141,7 @@ cd /tmp/validation
 export PGSQUASH_DOCKER_ENABLED=true
 export PGSQUASH_AUTO_VALIDATE=true
 export POSTGRES_VERSION=17  # Default validation version
+
 ```
 
 ## Validation Approaches
@@ -174,19 +195,22 @@ Security considerations:
 1. **Creation**: Containers created with labels (`pgsquash.type=validation`)
 2. **Execution**: Migrations applied, schemas compared
 3. **Cleanup**: Automatic cleanup via labels (no AutoRemove)
-4. **Inspection**: Use `--keep-container` to inspect manually
+4. **Inspection**: Use ` - keep-container` to inspect manually
 
 ## Troubleshooting
 
 ### Port Conflicts
 
-If you see "port already in use":
+If you see “port already in use”:
 
 ```bash
+
 # Check running validation containers
+
 docker ps -a -f "label=pgsquash.type=validation"
 
 # Clean up
+
 ./docker/scripts/cleanup.sh
 ```
 
@@ -195,11 +219,15 @@ docker ps -a -f "label=pgsquash.type=validation"
 If extensions fail to install:
 
 ```bash
+
 # Check available extensions
+
 docker run --rm postgres:17 psql -U postgres -c "SELECT name FROM pg_available_extensions ORDER BY name;"
 
 # Create custom image with extensions
+
 # See validation/custom-postgres.dockerfile
+
 ```
 
 ### Container Not Ready
@@ -219,10 +247,13 @@ If timeout occurs:
 Check detailed logs:
 
 ```bash
+
 # Use comprehensive validation
+
 ./docker/scripts/validate.sh --keep-container
 
 # Inspect databases
+
 docker exec -it pgsquash-validation-postgres psql -U postgres -d original_migrations
 docker exec -it pgsquash-validation-postgres psql -U postgres -d squashed_migrations
 ```

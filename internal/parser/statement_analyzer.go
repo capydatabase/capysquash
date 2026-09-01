@@ -2,7 +2,6 @@
 package parser
 
 import (
-	"regexp"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/types"
@@ -323,24 +322,42 @@ func (sa *StatementAnalyzer) AnalyzePragmas(stmt *types.Statement) {
 	}
 
 	// Also check inline comments in SQL
-	pragmaRegex := regexp.MustCompile(`(?i)--\s*pgsquash:\s*(ignore|no-merge)`)
-	if pragmaRegex.MatchString(stmt.SQL) {
+	if containsPgsquashPragma(stmt.SQL) {
 		stmt.Metadata.PreserveVerbatim = true
 	}
+}
+
+func containsPgsquashPragma(sql string) bool {
+	for line := range strings.SplitSeq(sql, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+
+		body := strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(trimmed, "--")))
+		if strings.HasPrefix(body, "PGSQUASH:IGNORE") ||
+			strings.HasPrefix(body, "PGSQUASH: IGNORE") ||
+			strings.HasPrefix(body, "PGSQUASH:NO-MERGE") ||
+			strings.HasPrefix(body, "PGSQUASH: NO-MERGE") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // FormatLockLevel returns a human-readable description of a lock level
 func FormatLockLevel(level types.LockLevel) string {
 	descriptions := map[types.LockLevel]string{
-		types.LockNone:                  "No lock (safe)",
-		types.LockAccessShare:           "ACCESS SHARE (SELECT)",
-		types.LockRowShare:              "ROW SHARE (SELECT FOR UPDATE)",
-		types.LockRowExclusive:          "ROW EXCLUSIVE (DML)",
-		types.LockShareUpdateExclusive:  "SHARE UPDATE EXCLUSIVE (VACUUM, CREATE INDEX CONCURRENTLY)",
-		types.LockShare:                 "SHARE (CREATE INDEX)",
-		types.LockShareRowExclusive:     "SHARE ROW EXCLUSIVE (rare)",
-		types.LockExclusive:             "EXCLUSIVE (REFRESH MATERIALIZED VIEW CONCURRENTLY)",
-		types.LockAccessExclusive:       "ACCESS EXCLUSIVE (most DDL, blocks all access)",
+		types.LockNone:                 "No lock (safe)",
+		types.LockAccessShare:          "ACCESS SHARE (SELECT)",
+		types.LockRowShare:             "ROW SHARE (SELECT FOR UPDATE)",
+		types.LockRowExclusive:         "ROW EXCLUSIVE (DML)",
+		types.LockShareUpdateExclusive: "SHARE UPDATE EXCLUSIVE (VACUUM, CREATE INDEX CONCURRENTLY)",
+		types.LockShare:                "SHARE (CREATE INDEX)",
+		types.LockShareRowExclusive:    "SHARE ROW EXCLUSIVE (rare)",
+		types.LockExclusive:            "EXCLUSIVE (REFRESH MATERIALIZED VIEW CONCURRENTLY)",
+		types.LockAccessExclusive:      "ACCESS EXCLUSIVE (most DDL, blocks all access)",
 	}
 
 	if desc, ok := descriptions[level]; ok {

@@ -444,12 +444,13 @@ func (ta *TypeAnalyzer) extractTypeNameFromNode(typeNameNode *pg_query.TypeName)
 		}
 	}
 
-	typeName := strings.Join(parts, ".")
+	var typeName strings.Builder
+	typeName.WriteString(strings.Join(parts, "."))
 
 	// Handle array types
 	if len(typeNameNode.ArrayBounds) > 0 {
 		for range typeNameNode.ArrayBounds {
-			typeName += "[]"
+			typeName.WriteString("[]")
 		}
 	}
 
@@ -464,11 +465,11 @@ func (ta *TypeAnalyzer) extractTypeNameFromNode(typeNameNode *pg_query.TypeName)
 			}
 		}
 		if len(modParts) > 0 {
-			typeName += "(" + strings.Join(modParts, ",") + ")"
+			typeName.WriteString("(" + strings.Join(modParts, ",") + ")")
 		}
 	}
 
-	return typeName
+	return typeName.String()
 }
 
 // getOrCreateTypeInfo gets existing type info or creates new one
@@ -679,9 +680,9 @@ func (ta *TypeAnalyzer) detectTypeChanges(stmt Statement) []*TypeChange {
 		return changes
 	}
 
-	// Cast to ParseResult
-	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
-	if !ok || len(parseResult.Stmts) == 0 {
+	// Access ParseResult directly
+	parseResult := stmt.ParseTree
+	if parseResult == nil || len(parseResult.Stmts) == 0 {
 		return changes
 	}
 

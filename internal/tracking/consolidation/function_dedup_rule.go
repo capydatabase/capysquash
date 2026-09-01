@@ -34,7 +34,7 @@ func (r *FunctionDeduplicationRule) CanApply(lifecycle *tracking.ObjectLifecycle
 // Apply applies the consolidation rule to the given lifecycle
 func (r *FunctionDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "FunctionDedupRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "FunctionDedupRule"})
 	}
 
 	var latestCreate *types.Statement
@@ -51,7 +51,7 @@ func (r *FunctionDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, e
 	}
 
 	if latestCreate == nil {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found", map[string]interface{}{"object": lifecycle.Name})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found", map[string]any{"object": lifecycle.Name})
 	}
 
 	// Use original SQL directly from latest CREATE statement

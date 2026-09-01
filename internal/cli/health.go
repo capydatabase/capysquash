@@ -142,8 +142,57 @@ func SetVersionInfo(version, buildDate, gitCommit string) {
 	}
 }
 
+// brandName tracks the active CLI branding. It drives command help text and
+// the default config file name (pgsquash.config.json vs capysquash.config.json).
+var brandName = "pgsquash"
+
+// brandDefaultConfigName returns the config file name init-config writes for
+// the active brand.
+func brandDefaultConfigName() string {
+	if brandName == "capysquash" {
+		return "capysquash.config.json"
+	}
+	return "pgsquash.config.json"
+}
+
+// configFileCandidates returns config file names to auto-load, in priority
+// order. The branded binary prefers its own config name but still honors
+// pgsquash.config.json for compatibility.
+func configFileCandidates() []string {
+	if brandName == "capysquash" {
+		return []string{"capysquash.config.json", "pgsquash.config.json"}
+	}
+	return []string{"pgsquash.config.json"}
+}
+
+// resolveConfigPath resolves the config file to load: an explicit --config
+// path wins; otherwise the first existing brand candidate is used (with a
+// warning if multiple candidates exist). Returns "" when no config file is
+// present so config.LoadConfig falls back to defaults.
+func resolveConfigPath() string {
+	if configPath != "" {
+		return configPath
+	}
+
+	var existing []string
+	for _, candidate := range configFileCandidates() {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			existing = append(existing, candidate)
+		}
+	}
+
+	if len(existing) > 1 {
+		fmt.Fprintf(os.Stderr, "Warning: multiple config files found (%v); using %s\n", existing, existing[0])
+	}
+	if len(existing) > 0 {
+		return existing[0]
+	}
+	return ""
+}
+
 // SetBrandName updates the CLI branding (called from main package for different binaries)
-func SetBrandName(brandName string) {
+func SetBrandName(name string) {
+	brandName = name
 	if brandName == "capysquash" {
 		rootCmd.Use = "capysquash"
 		rootCmd.Short = "CAPYSQUASH - Intelligent PostgreSQL migration consolidation"
@@ -153,19 +202,6 @@ dependencies, and validating safety at every step.
 
 CAPYSQUASH is the leading platform for PostgreSQL migration optimization,
 powered by the pgsquash-engine with parser-grade accuracy.`
-
-		// Update command examples to use capysquash branding
-		if aiFixCmd != nil {
-			aiFixCmd.Long = `Use AI to automatically analyze and fix broken migrations.
-This command runs validation, analyzes errors, and uses AI to suggest and apply fixes
-in an interactive loop until migrations validate successfully.
-
-Requires: ANTHROPIC_API_KEY, OPENAI_API_KEY, or AZURE_OPENAI_ENDPOINT
-
-Example:
-  capysquash ai-fix migrations/
-  capysquash ai-fix migrations/ --max-attempts 10 --auto-apply`
-		}
 
 		// Update TUI command examples
 		if tuiCmd != nil {

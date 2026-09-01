@@ -2,7 +2,6 @@ package postprocessing
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/capysquash/pgsquash-engine/internal/utils"
@@ -28,115 +27,408 @@ type FixCallback func(description, before, after string)
 // The optional callback parameter allows tracking transformations for reporting.
 // Pass nil if tracking is not needed.
 func FixReturnNextWithOutParams(sql string, callback FixCallback) string {
-	// Find all functions with RETURNS TABLE
-	returnsTableRegex := regexp.MustCompile(`(?ims)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)\s*RETURNS\s+TABLE\s*\(\s*([^)]+)\)`)
-
-	matches := returnsTableRegex.FindAllStringSubmatchIndex(sql, -1)
-	if len(matches) == 0 {
-		return sql // No RETURNS TABLE functions found
-	}
-
-	utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found %d RETURNS TABLE functions", len(matches))
-
 	transformedSQL := sql
-	offset := 0
+	transformedAny := true
+	loggedFunctionCount := false
 
-	for _, match := range matches {
-		if len(match) < 6 {
-			continue
+	// Keep processing until no more transformations occur
+	// This handles the case where multiple RETURNS TABLE functions need fixing
+	// and ensures we always work with current indices (not stale offsets)
+	for transformedAny {
+		transformedAny = false
+
+		functions := findReturnsTableFunctions(transformedSQL)
+		if len(functions) == 0 {
+			break // No more RETURNS TABLE functions found
 		}
 
-		funcNameStart := match[2] + offset
-		funcNameEnd := match[3] + offset
-		columnsStart := match[4] + offset
-		columnsEnd := match[5] + offset
-
-		funcName := sql[funcNameStart:funcNameEnd]
-		columnsSpec := sql[columnsStart:columnsEnd]
-
-		// Parse column names from TABLE(...) definition
-		columnNames := parseTableColumns(columnsSpec)
-		if len(columnNames) == 0 {
-			continue
+		if !loggedFunctionCount {
+			// First iteration only
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found %d RETURNS TABLE functions", len(functions))
+			loggedFunctionCount = true
 		}
 
-		// Find the function body (between AS $$ and $$)
-		funcStart := match[0] + offset
-		bodyRegex := regexp.MustCompile(`(?s)AS\s+\$\$(.+?)\$\$`)
-		bodyMatch := bodyRegex.FindStringSubmatchIndex(transformedSQL[funcStart:])
+		for _, function := range functions {
+			funcName := function.Name
+			columnsSpec := function.ColumnsSpec
 
-		if len(bodyMatch) < 4 {
-			continue
-		}
+			// Parse column names from TABLE(...) definition
+			columnNames := parseTableColumns(columnsSpec)
 
-		bodyStart := funcStart + bodyMatch[2]
-		bodyEnd := funcStart + bodyMatch[3]
-		body := transformedSQL[bodyStart:bodyEnd]
+			// DEBUG: Log what we extracted
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("🔍 Function %s RETURNS TABLE columns spec: %q", funcName, columnsSpec)
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("🔍 Extracted column names: %v", columnNames)
 
-		// Find RETURN NEXT statements (with or without arguments)
-		returnNextRegex := regexp.MustCompile(`RETURN\s+NEXT(?:\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*))?(\s*);`)
-		returnMatches := returnNextRegex.FindAllStringSubmatchIndex(body, -1)
-
-		if len(returnMatches) == 0 {
-			continue
-		}
-
-		utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found %d RETURN NEXT statements in function %s", len(returnMatches), funcName)
-
-		fixedBody := body
-		bodyOffset := 0
-
-		for _, returnMatch := range returnMatches {
-			if len(returnMatch) < 2 {
+			if len(columnNames) == 0 {
 				continue
 			}
 
-			// Check if there's a variable name (Group 1)
-			var varName string
-			if returnMatch[2] >= 0 && returnMatch[3] >= 0 {
-				// Has variable: RETURN NEXT variable_name;
-				varName = fixedBody[returnMatch[2]+bodyOffset : returnMatch[3]+bodyOffset]
+			bodyStart := function.BodyStart
+			bodyEnd := function.BodyEnd
+			body := transformedSQL[bodyStart:bodyEnd]
+
+			returnMatches := findReturnNextStatements(body)
+
+			if len(returnMatches) == 0 {
+				continue
 			}
 
-			var selectStmt string
-			if varName != "" {
-				// Case 1: RETURN NEXT record_var; → RETURN QUERY SELECT record_var.field1, record_var.field2;
-				var selectColumns []string
-				for _, colName := range columnNames {
-					selectColumns = append(selectColumns, fmt.Sprintf("%s.%s", varName, colName))
+			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Found %d RETURN NEXT statements in function %s", len(returnMatches), funcName)
+
+			fixedBody := body
+			bodyOffset := 0
+
+			for _, returnMatch := range returnMatches {
+				varName := returnMatch.VarName
+
+				var selectStmt string
+				if varName != "" {
+					// Case 1: RETURN NEXT record_var; → RETURN QUERY SELECT record_var.field1, record_var.field2;
+					var selectColumns []string
+					for _, colName := range columnNames {
+						selectColumns = append(selectColumns, fmt.Sprintf("%s.%s", varName, colName))
+					}
+					selectStmt = fmt.Sprintf("RETURN QUERY SELECT %s;", strings.Join(selectColumns, ", "))
+				} else {
+					// Case 2: RETURN NEXT; (no argument)
+					// Build: RETURN QUERY SELECT col1, col2, col3;
+					selectStmt = fmt.Sprintf("RETURN QUERY SELECT %s;", strings.Join(columnNames, ", "))
 				}
-				selectStmt = fmt.Sprintf("RETURN QUERY SELECT %s;", strings.Join(selectColumns, ", "))
-			} else {
-				// Case 2: RETURN NEXT; (no argument)
-				// Build: RETURN QUERY SELECT col1, col2, col3;
-				selectStmt = fmt.Sprintf("RETURN QUERY SELECT %s;", strings.Join(columnNames, ", "))
+
+				// Replace RETURN NEXT with RETURN QUERY SELECT
+				oldStmt := fixedBody[returnMatch.Start+bodyOffset : returnMatch.End+bodyOffset]
+
+				// DEBUG: Log the transformation
+				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("🔍 Transforming RETURN NEXT:")
+				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("   varName: %q", varName)
+				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("   columnNames: %v", columnNames)
+				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("   selectStmt: %q", selectStmt)
+
+				fixedBody = fixedBody[:returnMatch.Start+bodyOffset] + selectStmt + fixedBody[returnMatch.End+bodyOffset:]
+
+				bodyOffset += len(selectStmt) - len(oldStmt)
+
+				// Log the fix
+				utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Fixed RETURN NEXT in function %s: %s → %s", funcName, strings.TrimSpace(oldStmt), strings.TrimSpace(selectStmt))
+
+				// Notify callback if provided
+				if callback != nil {
+					callback(
+						fmt.Sprintf("Fixed RETURN NEXT syntax in function %s (RETURNS TABLE should use RETURN QUERY SELECT)", funcName),
+						strings.TrimSpace(oldStmt),
+						strings.TrimSpace(selectStmt),
+					)
+				}
 			}
 
-			// Replace RETURN NEXT with RETURN QUERY SELECT
-			oldStmt := fixedBody[returnMatch[0]+bodyOffset : returnMatch[1]+bodyOffset]
-			fixedBody = fixedBody[:returnMatch[0]+bodyOffset] + selectStmt + fixedBody[returnMatch[1]+bodyOffset:]
+			// Replace the function body in the transformed SQL
+			transformedSQL = transformedSQL[:bodyStart] + fixedBody + transformedSQL[bodyEnd:]
 
-			bodyOffset += len(selectStmt) - len(oldStmt)
+			// Mark that we made a transformation, so we'll re-scan for more functions
+			transformedAny = true
 
-			// Log the fix
-			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Info("Fixed RETURN NEXT in function %s: %s → %s", funcName, strings.TrimSpace(oldStmt), strings.TrimSpace(selectStmt))
-
-			// Notify callback if provided
-			if callback != nil {
-				callback(
-					fmt.Sprintf("Fixed RETURN NEXT syntax in function %s (RETURNS TABLE should use RETURN QUERY SELECT)", funcName),
-					strings.TrimSpace(oldStmt),
-					strings.TrimSpace(selectStmt),
-				)
-			}
+			// Break out of the inner loop since we've modified transformedSQL
+			// and need to re-run the regex to get fresh indices
+			break
 		}
-
-		// Replace the function body in the transformed SQL
-		transformedSQL = transformedSQL[:bodyStart] + fixedBody + transformedSQL[bodyEnd:]
-		offset += len(fixedBody) - len(body)
 	}
 
 	return transformedSQL
+}
+
+type returnsTableFunction struct {
+	Name        string
+	ColumnsSpec string
+	BodyStart   int
+	BodyEnd     int
+}
+
+type returnNextStatement struct {
+	Start   int
+	End     int
+	VarName string
+}
+
+func findReturnsTableFunctions(sql string) []returnsTableFunction {
+	functions := make([]returnsTableFunction, 0)
+	cursor := 0
+
+	for cursor < len(sql) {
+		fn, next, ok := findNextReturnsTableFunction(sql, cursor)
+		if !ok {
+			break
+		}
+		functions = append(functions, fn)
+		cursor = next
+	}
+
+	return functions
+}
+
+func findNextReturnsTableFunction(sql string, start int) (returnsTableFunction, int, bool) {
+	for i := start; i < len(sql); i++ {
+		if !hasReturnFixKeywordAt(sql, i, "CREATE") {
+			continue
+		}
+
+		pos := skipReturnFixWhitespace(sql, i+len("CREATE"))
+		if hasReturnFixKeywordAt(sql, pos, "OR") {
+			pos = skipReturnFixWhitespace(sql, pos+len("OR"))
+			if !hasReturnFixKeywordAt(sql, pos, "REPLACE") {
+				continue
+			}
+			pos = skipReturnFixWhitespace(sql, pos+len("REPLACE"))
+		}
+
+		if !hasReturnFixKeywordAt(sql, pos, "FUNCTION") {
+			continue
+		}
+		pos = skipReturnFixWhitespace(sql, pos+len("FUNCTION"))
+
+		funcName, nextPos, ok := readReturnFixFunctionName(sql, pos)
+		if !ok {
+			continue
+		}
+		pos = skipReturnFixWhitespace(sql, nextPos)
+
+		if pos >= len(sql) || sql[pos] != '(' {
+			continue
+		}
+
+		paramsEnd, ok := findReturnFixMatchingParen(sql, pos)
+		if !ok {
+			continue
+		}
+		pos = skipReturnFixWhitespace(sql, paramsEnd+1)
+
+		if !hasReturnFixKeywordAt(sql, pos, "RETURNS") {
+			continue
+		}
+		pos = skipReturnFixWhitespace(sql, pos+len("RETURNS"))
+
+		if !hasReturnFixKeywordAt(sql, pos, "TABLE") {
+			continue
+		}
+		pos = skipReturnFixWhitespace(sql, pos+len("TABLE"))
+
+		if pos >= len(sql) || sql[pos] != '(' {
+			continue
+		}
+
+		colsEnd, ok := findReturnFixMatchingParen(sql, pos)
+		if !ok {
+			continue
+		}
+		columnsSpec := sql[pos+1 : colsEnd]
+
+		_, bodyStart, ok := findAsDollarDelimiter(sql, colsEnd+1)
+		if !ok {
+			continue
+		}
+
+		bodyEndRel := strings.Index(sql[bodyStart:], "$$")
+		if bodyEndRel == -1 {
+			continue
+		}
+		bodyEnd := bodyStart + bodyEndRel
+
+		return returnsTableFunction{
+			Name:        funcName,
+			ColumnsSpec: columnsSpec,
+			BodyStart:   bodyStart,
+			BodyEnd:     bodyEnd,
+		}, bodyEnd + 2, true
+	}
+
+	return returnsTableFunction{}, len(sql), false
+}
+
+func findReturnNextStatements(body string) []returnNextStatement {
+	statements := make([]returnNextStatement, 0)
+
+	for i := 0; i < len(body); i++ {
+		if !hasReturnFixKeywordAt(body, i, "RETURN") {
+			continue
+		}
+
+		pos := skipReturnFixWhitespace(body, i+len("RETURN"))
+		if !hasReturnFixKeywordAt(body, pos, "NEXT") {
+			continue
+		}
+		pos = skipReturnFixWhitespace(body, pos+len("NEXT"))
+
+		semiRel := strings.Index(body[pos:], ";")
+		if semiRel == -1 {
+			break
+		}
+
+		semi := pos + semiRel
+		arg := strings.TrimSpace(body[pos:semi])
+		if arg != "" && !isReturnNextVariable(arg) {
+			i = semi
+			continue
+		}
+
+		statements = append(statements, returnNextStatement{
+			Start:   i,
+			End:     semi + 1,
+			VarName: arg,
+		})
+		i = semi
+	}
+
+	return statements
+}
+
+func findAsDollarDelimiter(sql string, start int) (int, int, bool) {
+	for i := start; i < len(sql); i++ {
+		if !hasReturnFixKeywordAt(sql, i, "AS") {
+			continue
+		}
+
+		pos := skipReturnFixWhitespace(sql, i+len("AS"))
+		if pos+1 < len(sql) && sql[pos] == '$' && sql[pos+1] == '$' {
+			return i, pos + 2, true
+		}
+	}
+
+	return 0, 0, false
+}
+
+func findReturnFixMatchingParen(value string, open int) (int, bool) {
+	depth := 0
+	inSingleQuote := false
+	inDoubleQuote := false
+
+	for i := open; i < len(value); i++ {
+		ch := value[i]
+
+		if inSingleQuote {
+			if ch == '\'' {
+				if i+1 < len(value) && value[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		}
+
+		if inDoubleQuote {
+			if ch == '"' {
+				inDoubleQuote = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+		case '"':
+			inDoubleQuote = true
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+
+	return 0, false
+}
+
+func hasReturnFixKeywordAt(value string, pos int, keyword string) bool {
+	if pos < 0 || pos+len(keyword) > len(value) {
+		return false
+	}
+
+	if !strings.EqualFold(value[pos:pos+len(keyword)], keyword) {
+		return false
+	}
+
+	if pos > 0 && isReturnFixIdentifierByte(value[pos-1]) {
+		return false
+	}
+
+	end := pos + len(keyword)
+	if end < len(value) && isReturnFixIdentifierByte(value[end]) {
+		return false
+	}
+
+	return true
+}
+
+func skipReturnFixWhitespace(value string, pos int) int {
+	for pos < len(value) {
+		switch value[pos] {
+		case ' ', '\t', '\n', '\r', '\f', '\v':
+			pos++
+		default:
+			return pos
+		}
+	}
+	return pos
+}
+
+func readReturnFixFunctionName(value string, pos int) (string, int, bool) {
+	first, next, ok := readReturnFixIdentifier(value, pos)
+	if !ok {
+		return "", 0, false
+	}
+
+	if next < len(value) && value[next] == '.' {
+		next++
+		second, nextPos, ok := readReturnFixIdentifier(value, next)
+		if !ok {
+			return "", 0, false
+		}
+		return second, nextPos, true
+	}
+
+	return first, next, true
+}
+
+func readReturnFixIdentifier(value string, pos int) (string, int, bool) {
+	if pos >= len(value) || !isReturnFixIdentifierStart(value[pos]) {
+		return "", 0, false
+	}
+
+	i := pos + 1
+	for i < len(value) && isReturnFixIdentifierByte(value[i]) {
+		i++
+	}
+
+	return value[pos:i], i, true
+}
+
+func isReturnNextVariable(value string) bool {
+	parts := strings.Split(value, ".")
+	if len(parts) == 0 || len(parts) > 2 {
+		return false
+	}
+
+	for _, part := range parts {
+		if part == "" || !isReturnFixIdentifierStart(part[0]) {
+			return false
+		}
+		for i := 1; i < len(part); i++ {
+			if !isReturnFixIdentifierByte(part[i]) {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func isReturnFixIdentifierStart(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
+}
+
+func isReturnFixIdentifierByte(ch byte) bool {
+	return isReturnFixIdentifierStart(ch) || (ch >= '0' && ch <= '9')
 }
 
 // parseTableColumns extracts column names from RETURNS TABLE(...) specification

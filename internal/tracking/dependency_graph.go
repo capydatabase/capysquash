@@ -1,6 +1,9 @@
 package tracking
 
 import (
+	"slices"
+	"sort"
+
 	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
@@ -49,12 +52,14 @@ func (dg *DependencyGraph) TopologicalSort() ([]ObjectID, error) {
 	queue := make([]ObjectID, 0)
 
 	// Initialize in-degrees
-	for id := range dg.nodes {
+	nodeIDs := sortedObjectIDsFromMap(dg.nodes)
+	for _, id := range nodeIDs {
 		inDegree[id] = len(dg.nodes[id].Dependencies)
 		if inDegree[id] == 0 {
 			queue = append(queue, id)
 		}
 	}
+	sortObjectIDs(queue)
 
 	// Process queue
 	for len(queue) > 0 {
@@ -63,10 +68,13 @@ func (dg *DependencyGraph) TopologicalSort() ([]ObjectID, error) {
 		result = append(result, current)
 
 		// Update in-degrees of dependents
-		for _, dependent := range dg.nodes[current].Dependents {
+		dependents := append([]ObjectID(nil), dg.nodes[current].Dependents...)
+		sortObjectIDs(dependents)
+		for _, dependent := range dependents {
 			inDegree[dependent]--
 			if inDegree[dependent] == 0 {
 				queue = append(queue, dependent)
+				sortObjectIDs(queue)
 			}
 		}
 	}
@@ -75,9 +83,9 @@ func (dg *DependencyGraph) TopologicalSort() ([]ObjectID, error) {
 	if len(result) != len(dg.nodes) {
 		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation,
 			"circular dependencies detected",
-			map[string]interface{}{
+			map[string]any{
 				"expected_nodes": len(dg.nodes),
-				"sorted_nodes": len(result),
+				"sorted_nodes":   len(result),
 			})
 	}
 
@@ -91,7 +99,7 @@ func (dg *DependencyGraph) DetectCycles() [][]ObjectID {
 	recStack := make(map[ObjectID]bool)
 	path := make([]ObjectID, 0)
 
-	for id := range dg.nodes {
+	for _, id := range sortedObjectIDsFromMap(dg.nodes) {
 		if !visited[id] {
 			if cycle := dg.dfsDetectCycle(id, visited, recStack, path); cycle != nil {
 				cycles = append(cycles, cycle)
@@ -108,7 +116,9 @@ func (dg *DependencyGraph) dfsDetectCycle(id ObjectID, visited, recStack map[Obj
 	recStack[id] = true
 	path = append(path, id)
 
-	for _, dep := range dg.nodes[id].Dependencies {
+	dependencies := append([]ObjectID(nil), dg.nodes[id].Dependencies...)
+	sortObjectIDs(dependencies)
+	for _, dep := range dependencies {
 		if !visited[dep] {
 			if cycle := dg.dfsDetectCycle(dep, visited, recStack, path); cycle != nil {
 				return cycle
@@ -255,12 +265,7 @@ func (dg *DependencyGraph) HasCycles() bool {
 
 // containsObjectID checks if slice contains ObjectID
 func containsObjectID(slice []ObjectID, item ObjectID) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, item)
 }
 
 // removeObjectID removes ObjectID from slice
@@ -272,4 +277,25 @@ func removeObjectID(slice []ObjectID, item ObjectID) []ObjectID {
 		}
 	}
 	return result
+}
+
+func sortedObjectIDsFromMap(nodes map[ObjectID]*DependencyNode) []ObjectID {
+	ids := make([]ObjectID, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	sortObjectIDs(ids)
+	return ids
+}
+
+func sortObjectIDs(ids []ObjectID) {
+	sort.Slice(ids, func(i, j int) bool {
+		if ids[i].Type != ids[j].Type {
+			return ids[i].Type < ids[j].Type
+		}
+		if ids[i].Name != ids[j].Name {
+			return ids[i].Name < ids[j].Name
+		}
+		return ids[i].Schema < ids[j].Schema
+	})
 }

@@ -5,13 +5,13 @@
 # =============================================================================
 
 # Build arguments
-ARG GO_VERSION=1.25.3
+ARG GO_VERSION=1.26.5
 ARG BUILD_VERSION=dev
 ARG BUILD_DATE
 ARG GIT_COMMIT
 
 # Build stage - using Ubuntu 24.04 LTS
-FROM ubuntu:noble AS builder
+FROM ubuntu:resolute AS builder
 
 # Re-declare ARGs for this stage
 ARG GO_VERSION
@@ -66,7 +66,7 @@ RUN CGO_ENABLED=1 go build \
     -o api-server ./cmd/api-server
 
 # Production stage - Ubuntu for reliability
-FROM ubuntu:noble AS runtime
+FROM ubuntu:resolute AS runtime
 
 # Re-declare build metadata for labels
 ARG BUILD_VERSION
