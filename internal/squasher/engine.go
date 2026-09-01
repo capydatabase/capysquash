@@ -2138,6 +2138,82 @@ $$`)
 	// PostgreSQL requires the target table to be present even with IF EXISTS. Defer them into
 	// the security category to guarantee the underlying tables are created first.
 	deferredSecurity := make(map[string]*tracking.ConsolidationResult)
+	// Conditional ADD COLUMN/ADD CONSTRAINT statements extracted from DO blocks
+	// are schema operations, even though DO blocks are normally categorized as
+	// data. Attach them directly to the matching table result, immediately after
+	// CREATE TABLE. A table consolidation result can contain its own indexes, so
+	// merely moving these alterations to the constraints category is too late.
+	// Any alteration whose table is not created by this squash is emitted in the
+	// constraints category instead.
+	deferredTableAlters := make(map[string]*tracking.ConsolidationResult)
+	handledTableAlterKeys := make(map[string]struct{})
+	pendingTableAlters := make(map[*tracking.ConsolidationResult][]string)
+	tableAlterKeys := make([]string, 0, len(consolidatedObjects))
+	for key := range consolidatedObjects {
+		tableAlterKeys = append(tableAlterKeys, key)
+	}
+	sort.Slice(tableAlterKeys, func(i, j int) bool {
+		left := e.lifecycles[tableAlterKeys[i]]
+		right := e.lifecycles[tableAlterKeys[j]]
+		if left == nil || len(left.History) == 0 || right == nil || len(right.History) == 0 {
+			return tableAlterKeys[i] < tableAlterKeys[j]
+		}
+		if left.History[0].Migration != right.History[0].Migration {
+			return left.History[0].Migration < right.History[0].Migration
+		}
+		if left.History[0].Sequence != right.History[0].Sequence {
+			return left.History[0].Sequence < right.History[0].Sequence
+		}
+		return tableAlterKeys[i] < tableAlterKeys[j]
+	})
+
+	for _, key := range tableAlterKeys {
+		result := consolidatedObjects[key]
+		lifecycle, exists := e.lifecycles[key]
+		if !exists || lifecycle.Type != types.TypeDoBlock {
+			continue
+		}
+
+		alterStatements, ok := parseStaticTableAlterSQL(result.ConsolidatedSQL)
+		if !ok {
+			continue
+		}
+		handledTableAlterKeys[key] = struct{}{}
+
+		remaining := make([]string, 0, len(alterStatements))
+		for _, alterStatement := range alterStatements {
+			tableResult := findTableConsolidationResult(foundationObjects, e.lifecycles, alterStatement.ObjectName)
+			if tableResult == nil {
+				remaining = append(remaining, alterStatement.SQL)
+				continue
+			}
+			if _, canInsert := insertSQLAfterCreateTable(tableResult.ConsolidatedSQL, alterStatement.SQL); !canInsert {
+				remaining = append(remaining, alterStatement.SQL)
+				continue
+			}
+
+			prospectiveTableSQL := tableResult.ConsolidatedSQL
+			if pending := pendingTableAlters[tableResult]; len(pending) > 0 {
+				prospectiveTableSQL, _ = insertSQLAfterCreateTable(prospectiveTableSQL, strings.Join(pending, "\n"))
+			}
+			if tableAlterAlreadyApplied(prospectiveTableSQL, alterStatement) {
+				continue
+			}
+			pendingTableAlters[tableResult] = append(pendingTableAlters[tableResult], alterStatement.SQL)
+		}
+
+		if len(remaining) > 0 {
+			deferredResult := *result
+			deferredResult.ConsolidatedSQL = strings.Join(remaining, "\n")
+			deferredTableAlters[key] = &deferredResult
+		}
+	}
+	for tableResult, alterations := range pendingTableAlters {
+		updatedSQL, inserted := insertSQLAfterCreateTable(tableResult.ConsolidatedSQL, strings.Join(alterations, "\n"))
+		if inserted {
+			tableResult.ConsolidatedSQL = updatedSQL
+		}
+	}
 
 	for _, category := range categories {
 		categoryObjectsMap := e.getObjectsByCategoryAsMap(consolidatedObjects, category)
@@ -2156,6 +2232,9 @@ $$`)
 			maps.Copy(categoryObjectsMap, deferredSecurity)
 			// Clear after merging to avoid re-adding in future iterations
 			deferredSecurity = make(map[string]*tracking.ConsolidationResult)
+		}
+		if category == types.CategoryConstraints && len(deferredTableAlters) > 0 {
+			maps.Copy(categoryObjectsMap, deferredTableAlters)
 		}
 
 		// Sort objects by dependencies within category
@@ -2240,6 +2319,9 @@ $$`)
 				}
 			}
 		}
+	}
+	for key := range handledTableAlterKeys {
+		addedObjects[key] = true
 	}
 
 	// Add objects that weren't included in any category
@@ -2419,6 +2501,200 @@ $$`)
 	finalSQL = e.removeOrphanedFunctionStatements(finalSQL)
 
 	return finalSQL, nil
+}
+
+func parseStaticTableAlterSQL(sql string) ([]types.Statement, bool) {
+	migration, err := parser.ParseMigration(sql, "__generated_do_block_alters__.sql")
+	if err != nil || migration == nil || len(migration.Statements) == 0 {
+		return nil, false
+	}
+	for _, statement := range migration.Statements {
+		if statement.Operation != types.OpAlter || statement.ObjectType != types.TypeTable {
+			return nil, false
+		}
+	}
+	return migration.Statements, true
+}
+
+func findTableConsolidationResult(
+	foundationObjects map[string]*tracking.ConsolidationResult,
+	lifecycles map[string]*tracking.ObjectLifecycle,
+	tableName string,
+) *tracking.ConsolidationResult {
+	wanted := canonicalTableIdentifier(tableName)
+	for key, result := range foundationObjects {
+		lifecycle, exists := lifecycles[key]
+		if !exists || lifecycle.Type != types.TypeTable {
+			continue
+		}
+		if canonicalTableIdentifier(lifecycle.Name) == wanted {
+			return result
+		}
+	}
+	return nil
+}
+
+func canonicalTableIdentifier(name string) string {
+	identifier := strings.ToLower(strings.TrimSpace(name))
+	identifier = strings.ReplaceAll(identifier, `"`, "")
+	return strings.TrimPrefix(identifier, "public.")
+}
+
+func tableAlterAlreadyApplied(tableSQL string, alterStatement types.Statement) bool {
+	tableParseResult, err := pg_query.Parse(tableSQL)
+	if err != nil {
+		return false
+	}
+
+	existingColumns := make(map[string]struct{})
+	existingConstraints := make(map[string]struct{})
+	for _, rawStatement := range tableParseResult.Stmts {
+		if rawStatement == nil || rawStatement.Stmt == nil {
+			continue
+		}
+
+		if createStatement := rawStatement.Stmt.GetCreateStmt(); createStatement != nil {
+			for _, tableElement := range createStatement.TableElts {
+				if column := tableElement.GetColumnDef(); column != nil {
+					existingColumns[strings.ToLower(column.Colname)] = struct{}{}
+					for _, constraintNode := range column.Constraints {
+						if constraint := constraintNode.GetConstraint(); constraint != nil && constraint.Conname != "" {
+							existingConstraints[strings.ToLower(constraint.Conname)] = struct{}{}
+						}
+					}
+				}
+				if constraint := tableElement.GetConstraint(); constraint != nil && constraint.Conname != "" {
+					existingConstraints[strings.ToLower(constraint.Conname)] = struct{}{}
+				}
+			}
+		}
+
+		if existingAlter := rawStatement.Stmt.GetAlterTableStmt(); existingAlter != nil {
+			for _, commandNode := range existingAlter.Cmds {
+				command := commandNode.GetAlterTableCmd()
+				if command == nil {
+					continue
+				}
+				switch command.Subtype {
+				case pg_query.AlterTableType_AT_AddColumn:
+					if command.Def != nil {
+						if column := command.Def.GetColumnDef(); column != nil {
+							existingColumns[strings.ToLower(column.Colname)] = struct{}{}
+						}
+					}
+				case pg_query.AlterTableType_AT_DropColumn:
+					delete(existingColumns, strings.ToLower(command.Name))
+				case pg_query.AlterTableType_AT_AddConstraint:
+					if command.Def != nil {
+						if constraint := command.Def.GetConstraint(); constraint != nil && constraint.Conname != "" {
+							existingConstraints[strings.ToLower(constraint.Conname)] = struct{}{}
+						}
+					}
+				case pg_query.AlterTableType_AT_DropConstraint:
+					delete(existingConstraints, strings.ToLower(command.Name))
+				}
+			}
+		}
+	}
+
+	alterParseResult := alterStatement.ParseTree
+	if alterParseResult == nil {
+		alterParseResult, err = pg_query.Parse(alterStatement.SQL)
+		if err != nil {
+			return false
+		}
+	}
+
+	foundCommand := false
+	for _, rawStatement := range alterParseResult.Stmts {
+		if rawStatement == nil || rawStatement.Stmt == nil {
+			continue
+		}
+		alterTableStatement := rawStatement.Stmt.GetAlterTableStmt()
+		if alterTableStatement == nil {
+			return false
+		}
+		for _, commandNode := range alterTableStatement.Cmds {
+			command := commandNode.GetAlterTableCmd()
+			if command == nil {
+				return false
+			}
+			foundCommand = true
+			switch command.Subtype {
+			case pg_query.AlterTableType_AT_AddColumn:
+				if command.Def == nil {
+					return false
+				}
+				column := command.Def.GetColumnDef()
+				if column == nil {
+					return false
+				}
+				if _, exists := existingColumns[strings.ToLower(column.Colname)]; !exists {
+					return false
+				}
+			case pg_query.AlterTableType_AT_DropColumn:
+				if _, exists := existingColumns[strings.ToLower(command.Name)]; exists {
+					return false
+				}
+			case pg_query.AlterTableType_AT_AddConstraint:
+				if command.Def == nil {
+					return false
+				}
+				constraint := command.Def.GetConstraint()
+				if constraint == nil || constraint.Conname == "" {
+					return false
+				}
+				if _, exists := existingConstraints[strings.ToLower(constraint.Conname)]; !exists {
+					return false
+				}
+			case pg_query.AlterTableType_AT_DropConstraint:
+				if _, exists := existingConstraints[strings.ToLower(command.Name)]; exists {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+	}
+
+	return foundCommand
+}
+
+func insertSQLAfterCreateTable(tableSQL, alterSQL string) (string, bool) {
+	parseResult, err := pg_query.Parse(tableSQL)
+	if err != nil {
+		return tableSQL, false
+	}
+
+	for _, rawStatement := range parseResult.Stmts {
+		if rawStatement == nil || rawStatement.Stmt == nil || rawStatement.Stmt.GetCreateStmt() == nil {
+			continue
+		}
+
+		start := int(rawStatement.StmtLocation)
+		end := start + int(rawStatement.StmtLen)
+		if end <= start || end > len(tableSQL) {
+			end = len(tableSQL)
+		}
+		for end < len(tableSQL) && tableSQL[end] != ';' && tableSQL[end] != '\n' {
+			end++
+		}
+		if end < len(tableSQL) && tableSQL[end] == ';' {
+			end++
+		}
+
+		alterSQL = strings.TrimSpace(alterSQL)
+		if alterSQL == "" {
+			return tableSQL, false
+		}
+		if !strings.HasSuffix(alterSQL, ";") {
+			alterSQL += ";"
+		}
+
+		return strings.TrimRight(tableSQL[:end], " \t\r\n") + "\n\n" + alterSQL + "\n\n" + strings.TrimLeft(tableSQL[end:], " \t\r\n"), true
+	}
+
+	return tableSQL, false
 }
 
 // generateDataOperationsSQL generates SQL for data operations (INSERT/UPDATE/DELETE) as a separate file
