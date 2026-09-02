@@ -14,25 +14,25 @@ import (
 	"sync"
 	"time"
 
-	"github.com/capysquash/pgsquash-engine/internal/builder"
-	"github.com/capysquash/pgsquash-engine/internal/config"
-	"github.com/capysquash/pgsquash-engine/internal/errors"
-	"github.com/capysquash/pgsquash-engine/internal/metadata"
-	"github.com/capysquash/pgsquash-engine/internal/parser"
-	"github.com/capysquash/pgsquash-engine/internal/performance"
-	"github.com/capysquash/pgsquash-engine/internal/plugins"
-	"github.com/capysquash/pgsquash-engine/internal/plugins/auth"
-	"github.com/capysquash/pgsquash-engine/internal/postprocessing"
+	"github.com/capy-base/pgsquash-engine/internal/builder"
+	"github.com/capy-base/pgsquash-engine/internal/config"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
+	"github.com/capy-base/pgsquash-engine/internal/metadata"
+	"github.com/capy-base/pgsquash-engine/internal/parser"
+	"github.com/capy-base/pgsquash-engine/internal/performance"
+	"github.com/capy-base/pgsquash-engine/internal/plugins"
+	"github.com/capy-base/pgsquash-engine/internal/plugins/auth"
+	"github.com/capy-base/pgsquash-engine/internal/postprocessing"
 
 	// Enable for selected non-destructive fixes
-	"github.com/capysquash/pgsquash-engine/internal/tracking"
-	"github.com/capysquash/pgsquash-engine/internal/tracking/consolidation"
-	"github.com/capysquash/pgsquash-engine/internal/transformation"
-	"github.com/capysquash/pgsquash-engine/internal/types"
-	"github.com/capysquash/pgsquash-engine/internal/utils"
+	"github.com/capy-base/pgsquash-engine/internal/tracking"
+	"github.com/capy-base/pgsquash-engine/internal/tracking/consolidation"
+	"github.com/capy-base/pgsquash-engine/internal/transformation"
+	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capy-base/pgsquash-engine/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 
-	"github.com/capysquash/pgsquash-engine/pkg/validation"
+	"github.com/capy-base/pgsquash-engine/pkg/validation"
 )
 
 // SquashResult represents the result of a squash operation with multiple output files

@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/capysquash/pgsquash-engine/pkg/engine"
+	"github.com/capy-base/pgsquash-engine/pkg/engine"
 )
 
 func main() {

@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

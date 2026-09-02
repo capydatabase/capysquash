@@ -74,8 +74,8 @@ package rules
 //   - Various plugin-specific optimizations
 
 import (
-	"github.com/capysquash/pgsquash-engine/internal/tracking"
-	"github.com/capysquash/pgsquash-engine/internal/tracking/consolidation"
+	"github.com/capy-base/pgsquash-engine/internal/tracking"
+	"github.com/capy-base/pgsquash-engine/internal/tracking/consolidation"
 )
 
 // Re-export types from internal package

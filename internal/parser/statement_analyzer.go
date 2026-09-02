@@ -4,7 +4,7 @@ package parser
 import (
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capy-base/pgsquash-engine/internal/types"
 )
 
 // StatementAnalyzer analyzes SQL statements to determine metadata like lock levels,

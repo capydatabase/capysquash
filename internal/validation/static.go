@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/config"
+	"github.com/capy-base/pgsquash-engine/internal/config"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	internal_squasher "github.com/capysquash/pgsquash-engine/internal/squasher"
-	internal_transformation "github.com/capysquash/pgsquash-engine/internal/transformation"
-	internal_utils "github.com/capysquash/pgsquash-engine/internal/utils"
+	internal_squasher "github.com/capy-base/pgsquash-engine/internal/squasher"
+	internal_transformation "github.com/capy-base/pgsquash-engine/internal/transformation"
+	internal_utils "github.com/capy-base/pgsquash-engine/internal/utils"
 )
 
 // Engine wraps the internal squashing engine and provides access to

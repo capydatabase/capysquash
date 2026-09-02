@@ -70,7 +70,7 @@
 package errors
 
 import (
-	internal_errors "github.com/capysquash/pgsquash-engine/internal/errors"
+	internal_errors "github.com/capy-base/pgsquash-engine/internal/errors"
 )
 
 // Re-export types from internal package

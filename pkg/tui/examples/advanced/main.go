@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/capysquash/pgsquash-engine/pkg/tui"
+	"github.com/capy-base/pgsquash-engine/pkg/tui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )

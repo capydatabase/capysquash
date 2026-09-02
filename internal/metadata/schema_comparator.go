@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
-	"github.com/capysquash/pgsquash-engine/internal/parser"
-	schemamodel "github.com/capysquash/pgsquash-engine/internal/schema"
-	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
+	"github.com/capy-base/pgsquash-engine/internal/parser"
+	schemamodel "github.com/capy-base/pgsquash-engine/internal/schema"
+	"github.com/capy-base/pgsquash-engine/internal/types"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

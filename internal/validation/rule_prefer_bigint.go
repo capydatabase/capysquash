@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	parserutil "github.com/capysquash/pgsquash-engine/internal/parser"
+	parserutil "github.com/capy-base/pgsquash-engine/internal/parser"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

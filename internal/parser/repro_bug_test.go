@@ -3,7 +3,7 @@ package parser
 import (
 	"testing"
 
-	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capy-base/pgsquash-engine/internal/types"
 	"github.com/stretchr/testify/assert"
 )
 

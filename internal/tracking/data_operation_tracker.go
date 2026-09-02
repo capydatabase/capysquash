@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
-	"github.com/capysquash/pgsquash-engine/internal/types"
-	"github.com/capysquash/pgsquash-engine/internal/utils"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
+	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capy-base/pgsquash-engine/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

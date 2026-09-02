@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
-	"github.com/capysquash/pgsquash-engine/internal/performance"
-	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
+	"github.com/capy-base/pgsquash-engine/internal/performance"
+	"github.com/capy-base/pgsquash-engine/internal/types"
 )
 
 // StreamingTracker integrates UnifiedTracker with performance streaming capabilities

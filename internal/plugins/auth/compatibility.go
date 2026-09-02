@@ -4,9 +4,9 @@
 package auth
 
 import (
-	_ "github.com/capysquash/pgsquash-engine/internal/utils" // Preload for future use
+	_ "github.com/capy-base/pgsquash-engine/internal/utils" // Preload for future use
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
 )
 
 // ServiceType represents different authentication service providers

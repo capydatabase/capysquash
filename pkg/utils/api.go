@@ -7,7 +7,7 @@ package utils
 import (
 	"io"
 
-	internal_utils "github.com/capysquash/pgsquash-engine/internal/utils"
+	internal_utils "github.com/capy-base/pgsquash-engine/internal/utils"
 )
 
 // Logger provides structured logging functionality.

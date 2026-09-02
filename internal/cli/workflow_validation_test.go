@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capysquash/pgsquash-engine/internal/validation"
+	"github.com/capy-base/pgsquash-engine/internal/validation"
 )
 
 // TestEvaluateWorkflowValidation pins the exit-code/error semantics of the

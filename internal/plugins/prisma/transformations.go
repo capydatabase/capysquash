@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/utils"
+	"github.com/capy-base/pgsquash-engine/internal/utils"
 )
 
 // TransformSQL performs Prisma-specific SQL transformations
