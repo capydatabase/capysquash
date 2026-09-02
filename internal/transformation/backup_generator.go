@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capy-base/pgsquash-engine/internal/errors"
-	"github.com/capy-base/pgsquash-engine/internal/types"
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 )
 
 // BackupType defines the type of backup to generate

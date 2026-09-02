@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capy-base/pgsquash-engine/internal/tracking"
-	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/tracking"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
 
-	"github.com/capy-base/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
 )
 
 // ConditionalSchemaRule consolidates conditional schema operations (IF NOT EXISTS, CREATE OR REPLACE)

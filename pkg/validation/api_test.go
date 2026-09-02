@@ -3,7 +3,7 @@ package validation_test
 import (
 	"testing"
 
-	"github.com/capy-base/pgsquash-engine/pkg/validation"
+	"github.com/capydatabase/pgsquash-engine/pkg/validation"
 	"github.com/stretchr/testify/assert"
 )
 

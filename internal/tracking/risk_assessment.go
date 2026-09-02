@@ -5,9 +5,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 
-	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
 )
 
 // Risk assessment rule implementations and helper methods

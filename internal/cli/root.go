@@ -17,17 +17,17 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/pgsquash-engine/internal/config"
-	"github.com/capy-base/pgsquash-engine/internal/errors"
-	"github.com/capy-base/pgsquash-engine/internal/parser"
-	"github.com/capy-base/pgsquash-engine/internal/squasher"
-	"github.com/capy-base/pgsquash-engine/internal/tracking"
-	"github.com/capy-base/pgsquash-engine/internal/transformation"
-	"github.com/capy-base/pgsquash-engine/internal/types"
-	"github.com/capy-base/pgsquash-engine/internal/utils"
-	"github.com/capy-base/pgsquash-engine/internal/validation"
-	engineapi "github.com/capy-base/pgsquash-engine/pkg/engine"
-	harnesscontract "github.com/capy-base/pgsquash-engine/pkg/harness"
+	"github.com/capydatabase/pgsquash-engine/internal/config"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/parser"
+	"github.com/capydatabase/pgsquash-engine/internal/squasher"
+	"github.com/capydatabase/pgsquash-engine/internal/tracking"
+	"github.com/capydatabase/pgsquash-engine/internal/transformation"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/validation"
+	engineapi "github.com/capydatabase/pgsquash-engine/pkg/engine"
+	harnesscontract "github.com/capydatabase/pgsquash-engine/pkg/harness"
 )
 
 var (

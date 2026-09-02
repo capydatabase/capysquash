@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capy-base/pgsquash-engine/internal/errors"
-	"github.com/capy-base/pgsquash-engine/internal/plugins"
-	"github.com/capy-base/pgsquash-engine/internal/postprocessing"
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/plugins"
+	"github.com/capydatabase/pgsquash-engine/internal/postprocessing"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

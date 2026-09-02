@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/capy-base/pgsquash-engine/internal/config"
+	"github.com/capydatabase/pgsquash-engine/internal/config"
 	"github.com/stretchr/testify/assert"
 )
 

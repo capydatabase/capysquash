@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
 )
 
 // MemoryManager handles memory-efficient processing with deduplication and size limits

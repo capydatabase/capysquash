@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 
-	"github.com/capy-base/pgsquash-engine/internal/tracking"
-	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/tracking"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
 
-	"github.com/capy-base/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
 )
 
 // MultipleCreateConsolidationRule handles multiple CREATE statements for the same object

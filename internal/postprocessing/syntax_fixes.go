@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 )
 
 // FixMalformedDropTriggers fixes DROP TRIGGER statements with incorrect syntax.

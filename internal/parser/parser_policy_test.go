@@ -3,7 +3,7 @@ package parser
 import (
 	"testing"
 
-	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
 )
 
 func TestParseDropPolicyCategorization(t *testing.T) {

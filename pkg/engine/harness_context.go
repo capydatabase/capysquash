@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	internalparser "github.com/capy-base/pgsquash-engine/internal/parser"
-	harnesscontract "github.com/capy-base/pgsquash-engine/pkg/harness"
+	internalparser "github.com/capydatabase/pgsquash-engine/internal/parser"
+	harnesscontract "github.com/capydatabase/pgsquash-engine/pkg/harness"
 )
 
 type DeterministicHarnessMigration struct {

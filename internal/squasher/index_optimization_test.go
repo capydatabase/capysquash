@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capy-base/pgsquash-engine/internal/parser"
-	"github.com/capy-base/pgsquash-engine/internal/tracking"
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/parser"
+	"github.com/capydatabase/pgsquash-engine/internal/tracking"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 	"github.com/stretchr/testify/require"
 )
 

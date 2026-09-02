@@ -6,11 +6,11 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/capy-base/pgsquash-engine/internal/errors"
-	"github.com/capy-base/pgsquash-engine/internal/parser"
-	"github.com/capy-base/pgsquash-engine/internal/tracking"
-	"github.com/capy-base/pgsquash-engine/internal/types"
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/parser"
+	"github.com/capydatabase/pgsquash-engine/internal/tracking"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

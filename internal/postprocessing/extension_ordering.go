@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 )
 
 // FixExtensionOrder ensures extensions are in correct dependency order.

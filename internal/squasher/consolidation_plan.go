@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capy-base/pgsquash-engine/internal/errors"
-	"github.com/capy-base/pgsquash-engine/internal/parser"
-	"github.com/capy-base/pgsquash-engine/internal/tracking"
-	"github.com/capy-base/pgsquash-engine/internal/tracking/consolidation"
-	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/parser"
+	"github.com/capydatabase/pgsquash-engine/internal/tracking"
+	"github.com/capydatabase/pgsquash-engine/internal/tracking/consolidation"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
 )
 
 // ConsolidationPlan represents a detailed plan of consolidations to be applied

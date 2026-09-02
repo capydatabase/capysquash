@@ -4,7 +4,7 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/capy-base/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
 )
 
 // AddNode adds a node to the dependency graph

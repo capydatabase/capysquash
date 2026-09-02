@@ -5,9 +5,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capy-base/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/pgsquash-engine/internal/utils"
 
-	"github.com/capy-base/pgsquash-engine/internal/plugins/auth"
+	"github.com/capydatabase/pgsquash-engine/internal/plugins/auth"
 )
 
 // ExtensionDetector analyzes migrations to detect required PostgreSQL extensions

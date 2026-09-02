@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capy-base/pgsquash-engine/internal/errors"
-	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
 )
 
 // RollbackPlan represents a complete rollback strategy
