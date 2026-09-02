@@ -2182,13 +2182,14 @@ $$`)
 
 		remaining := make([]string, 0, len(alterStatements))
 		for _, alterStatement := range alterStatements {
+			alterSQL := terminateSQLStatement(alterStatement.SQL)
 			tableResult := findTableConsolidationResult(foundationObjects, e.lifecycles, alterStatement.ObjectName)
 			if tableResult == nil {
-				remaining = append(remaining, alterStatement.SQL)
+				remaining = append(remaining, alterSQL)
 				continue
 			}
-			if _, canInsert := insertSQLAfterCreateTable(tableResult.ConsolidatedSQL, alterStatement.SQL); !canInsert {
-				remaining = append(remaining, alterStatement.SQL)
+			if _, canInsert := insertSQLAfterCreateTable(tableResult.ConsolidatedSQL, alterSQL); !canInsert {
+				remaining = append(remaining, alterSQL)
 				continue
 			}
 
@@ -2199,7 +2200,7 @@ $$`)
 			if tableAlterAlreadyApplied(prospectiveTableSQL, alterStatement) {
 				continue
 			}
-			pendingTableAlters[tableResult] = append(pendingTableAlters[tableResult], alterStatement.SQL)
+			pendingTableAlters[tableResult] = append(pendingTableAlters[tableResult], alterSQL)
 		}
 
 		if len(remaining) > 0 {
@@ -2538,6 +2539,14 @@ func canonicalTableIdentifier(name string) string {
 	identifier := strings.ToLower(strings.TrimSpace(name))
 	identifier = strings.ReplaceAll(identifier, `"`, "")
 	return strings.TrimPrefix(identifier, "public.")
+}
+
+func terminateSQLStatement(sql string) string {
+	sql = strings.TrimSpace(sql)
+	if sql != "" && !strings.HasSuffix(sql, ";") {
+		sql += ";"
+	}
+	return sql
 }
 
 func tableAlterAlreadyApplied(tableSQL string, alterStatement types.Statement) bool {

@@ -4,16 +4,9 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to release'
-        required: false
-        type: string
 
 permissions:
   contents: write
-  packages: write
 
 env:
   GO_VERSION: "1.26.5"
@@ -45,13 +38,11 @@ jobs:
       - name: Run GoReleaser (goreleaser-cross)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE":/work \
             -w /work \
             -e GITHUB_TOKEN \
-            -e HOMEBREW_TAP_GITHUB_TOKEN \
             --entrypoint /bin/sh \
             ghcr.io/goreleaser/goreleaser-cross:v1.26.4 \
             -c 'git config --global --add safe.directory /work && goreleaser release --clean'
@@ -61,24 +52,3 @@ jobs:
         with:
           name: dist
           path: dist/*
-
-  trigger-docker-publish:
-    name: Trigger Docker Image Publishing
-    needs: goreleaser
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Trigger docker-publish workflow
-        uses: actions/github-script@v9
-        with:
-          script: |
-            github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'docker-publish.yml',
-              ref: context.ref,
-              inputs: {
-                push_to_registry: 'true',
-                Platforms: 'linux/amd64,linux/arm64'
-              }
-            })

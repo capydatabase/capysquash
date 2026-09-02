@@ -1,6 +1,6 @@
 // Package tui provides a public API for the Terminal User Interface (TUI).
 // This package exposes the interactive terminal interface for pgsquash-engine,
-// allowing external tools like capysquash-cli to integrate the TUI functionality.
+// allowing external CLI wrappers to integrate the TUI functionality.
 package tui
 
 import (

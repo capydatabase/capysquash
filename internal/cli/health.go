@@ -195,13 +195,10 @@ func SetBrandName(name string) {
 	brandName = name
 	if brandName == "capysquash" {
 		rootCmd.Use = "capysquash"
-		rootCmd.Short = "CAPYSQUASH - Intelligent PostgreSQL migration consolidation"
-		rootCmd.Long = `CAPYSQUASH intelligently consolidates PostgreSQL migration files into
+		rootCmd.Short = "PostgreSQL migration consolidation"
+		rootCmd.Long = `Consolidate PostgreSQL migration files into
 clean, production-ready SQL while preserving data integrity, respecting
-dependencies, and validating safety at every step.
-
-CAPYSQUASH is the leading platform for PostgreSQL migration optimization,
-powered by the pgsquash-engine with parser-grade accuracy.`
+dependencies, and validating safety through the pgsquash engine.`
 
 		// Update TUI command examples
 		if tuiCmd != nil {

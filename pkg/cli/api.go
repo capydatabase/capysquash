@@ -1,7 +1,7 @@
 // Package cli provides a public API for the pgsquash CLI functionality.
 //
 // This package exports the internal CLI implementation for use by external tools
-// like capysquash-cli while keeping the internal implementation details private.
+// while keeping the internal implementation details private.
 package cli
 
 import (

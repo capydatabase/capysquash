@@ -1,6 +1,6 @@
 # pgsquash-engine
 
-> The open-source Go engine that powers CAPYSQUASH
+> A standalone open-source PostgreSQL migration consolidation engine
 
 **Catalog-proven equivalence** via double-build validation. Intelligently reorganizes your migration history into clean, production-ready SQL-without breaking anything.
 
@@ -31,13 +31,10 @@ Pgsquash-engine is currently in **beta** (v0.9.7) with active development toward
 - Test coverage expansion in progress
 - Large migrations (500+ files) should use `--streaming` mode
 - Some complex DDL edge cases may require manual review
-- **Schema comparator blind spots**: Docker validation compares catalog
-  signatures for extensions, tables/columns, constraints, indexes, views,
-  functions, triggers, and RLS policies. It does **not** currently compare
-  sequences, enum/custom type definitions, domains, grants/privileges, or
-  comments. Differences in those object classes will not be detected by
-  `validate` or post-squash validation - review them manually if they matter
-  to your deployment.
+- Catalog validation compares extensions, tables and columns, constraints,
+  indexes, views, functions, triggers, RLS policies and roles, sequences,
+  enum/composite/domain/range types, ownership, grants, and comments. PostgreSQL
+  object classes outside this list still require manual review.
 - **Streaming mode** does not run backup generation, rollback plan generation,
   SQL transformation, or paranoid database validation. Requesting
   `--backup`/`--rollback` or `--safety paranoid` together with streaming is
@@ -55,15 +52,11 @@ We’re committed to a stable v1.0 release. **Questions?** [Open an issue](https
 
 ## What is this?
 
-Pgsquash-engine is the core library behind [CAPYSQUASH](https://capysquash.dev), the automatic migration cleanup tool for Supabase, Neon, and modern Postgres.
-
-**For most users:** Use [CAPYSQUASH](https://capysquash.dev) for one-click cleanup or [capysquash-cli](https://github.com/CAPYSQUASH/capysquash-cli) for terminal workflows.
-
-**For developers:** Use pgsquash-engine to build custom migration tools. This library provides the core PostgreSQL migration consolidation functionality with comprehensive validation, safety modes, and proven equivalence guarantees.
+Pgsquash-engine is both a CLI and a Go library for consolidating PostgreSQL
+migration histories. CapyDB uses the binary as its schema-cleanup engine while
+keeping database provisioning and managed validation in the CapyDB CLI.
 
 ## About pgsquash-engine
-
-**The technology behind CAPYSQUASH.** This is the open-source Go library that powers both CAPYSQUASH and capysquash-cli.
 
 Intelligently consolidates and optimizes your migration history while preserving dependencies, respecting safety constraints, and validating every change. Works with your existing setup-Supabase projects, Prisma schemas, Clerk auth. No migration rewrites, no new syntax to learn. Just cleaner, safer SQL.
 
@@ -113,9 +106,7 @@ The TUI gives you a dashboard with stats, live analysis, a config wizard, depend
 
 ## Installation
 
-**For most users:** Try [CAPYSQUASH](https://capysquash.dev) for one-click cleanup or install [capysquash-cli](https://github.com/CAPYSQUASH/capysquash-cli) for terminal workflows.
-
-**For developers building custom tools:**
+Download a native archive from [GitHub Releases](https://github.com/capysquash/pgsquash-engine/releases), or build the CLI/library from source:
 
 ```bash
 
@@ -132,23 +123,7 @@ go build -o pgsquash cmd/pgsquash/main.go
 
 ## Quick Start
 
-### For Most Users
-
-**Try CAPYSQUASH** (fastest - 30 seconds):
-
-- Visit <https://capysquash.dev>
-- Upload migrations or connect GitHub
-- Get one-click cleanup with visual dashboard
-
-**Or use capysquash-cli** (for terminal workflows):
-
-```bash
-brew install capysquash-cli
-capysquash analyze migrations/
-capysquash squash migrations/ --output clean/
-```
-
-### For Developers Using pgsquash-engine
+### Using pgsquash directly
 
 **Building with Supabase or Clerk?**
 
@@ -167,6 +142,20 @@ pgsquash squash migrations/*.sql --dry-run
 pgsquash squash migrations/*.sql --output clean/
 ```
 
+### Using CapyDB-managed validation
+
+CapyDB can validate with one isolated preview cell, so local Docker is not
+required. The cell is reset between the original and candidate builds and is
+deleted after the comparison.
+
+```bash
+capydb migrate squash migrations/ \
+  --workflow safe \
+  --validation capydb \
+  --project my-project \
+  --output clean/
+```
+
 > **Works with Supabase:** Auto-detects `auth.users`, `storage.buckets`, and RLS policies
 > **Clerk-ready:** Preserves JWT v2 organization claims and user metadata
 
@@ -181,10 +170,6 @@ pgsquash safe migrations/*.sql --output production/
 # Validate before merging PRs
 
 pgsquash validate migrations/ clean/
-
-# Set up GitHub webhooks for automatic PR analysis
-
-# See https://capysquash.dev/docs/pgsquash-engine/api-server
 
 ```
 
@@ -300,27 +285,10 @@ See [scripts/README.md](scripts/README.md) for detailed usage and setup instruct
 
 ## Documentation
 
-**📖 Full documentation lives at [capysquash.dev/docs](https://capysquash.dev/docs).**
-
-### Quick Links
-
-**User Guides:**
-
-- [Getting Started](https://capysquash.dev/docs/getting-started) - Get started in 5 minutes
-- [Configuration](https://capysquash.dev/docs/pgsquash-engine/configuration) - Config file options
-- [Safety Levels](https://capysquash.dev/docs/core-concepts/safety-levels) - Choosing the right mode
-- [Troubleshooting](https://capysquash.dev/docs/troubleshooting) - Common issues
-
-**Developer Docs:**
-
-- [Library API](https://capysquash.dev/docs/pgsquash-engine/library-api) - The public Go API (`pkg/engine`)
-- [Architecture](https://capysquash.dev/docs/core-concepts/ecosystem-architecture) - System design
-- [Plugin Development](internal/plugins/README.md) - Build custom plugins
-- [AI Features](https://capysquash.dev/docs/pgsquash-engine/ai-features) - Harness / AI integration
-
-**Deployment:**
-
-- [API Server](https://capysquash.dev/docs/pgsquash-engine/api-server) - Run the hosted API
+- [Public Go API](pkg/engine/README.md)
+- [Plugin development](internal/plugins/README.md)
+- [Integration scripts](scripts/README.md)
+- `pgsquash --help` for the current CLI contract
 
 ## Configuration
 
@@ -352,35 +320,7 @@ Example `pgsquash.config.json`:
 }
 ```
 
-See the [configuration reference](https://capysquash.dev/docs/pgsquash-engine/configuration) for all available options.
-
-## API Server (capysquash-api)
-
-The HTTP API server is now maintained as a separate module for better modularity and independent versioning:
-
-**[capysquash-api](https://github.com/CAPYSQUASH/capysquash-api)** - Production-ready REST API server
-
-```bash
-
-# Clone and build the API server (separate repository)
-
-git clone https://github.com/CAPYSQUASH/capysquash-api
-cd capysquash-api
-go build -o api-server ./cmd/api-server
-./api-server
-```
-
-**Features:**
-
-- REST endpoints for analyze and squash operations
-- JWT authentication with database persistence
-- GitHub webhook integration for PR automation
-- Managed AI harness endpoints (served by `capysquash-api`, not OSS engine runtime)
-- Rules and plugins management
-- Operations tracking and monitoring
-- CORS support for web platforms
-
-See the [capysquash-api repository](https://github.com/CAPYSQUASH/capysquash-api) for complete API documentation and deployment guides.
+The generated file documents every supported option and its default.
 
 ## Building from source
 
@@ -410,17 +350,10 @@ cmd/
 
 internal/
 ├── parser/             # SQL parsing via pg_query_go
-
 ├── tracking/           # Object lifecycle tracking
-
 ├── squasher/           # Consolidation logic
-
-├── validation/         # Docker validation
-
-├── github/             # GitHub integration
-
+├── validation/         # Catalog and Docker validation
 ├── plugins/            # Plugin system
-
 └── transformation/     # SQL transformations
 
 pkg/
@@ -428,73 +361,11 @@ pkg/
 
 ```
 
-**Note:** The HTTP API server (`cmd/api-server`) has been moved to [capysquash-api](https://github.com/CAPYSQUASH/capysquash-api) as a separate module.
-
-## What's next
-
-We’re working toward 1.0 with:
-
-- Better test coverage
-- Performance benchmarks
-- More auth plugins (Auth0, NextAuth)
-- Platform-specific plugins (Neon, Railway)
-- PostgreSQL 18 support
-
-See the [documentation](https://capysquash.dev/docs) for details.
-
 ## License
 
 MIT License - see LICENSE file.
 
-## The CAPYSQUASH Ecosystem
-
-Pgsquash-engine is the core Go library that powers the CAPYSQUASH ecosystem:
-
-```
-┌─────────────────────────────────────────┐
-│     CAPYSQUASH Platform (capysquash.dev)│  ← Web app with UI, automation
-│  - Next.js frontend                     │
-│  - Team features & dashboards           │
-└──────────┬──────────────────────────────┘
-           │
-           ├─── HTTP API ───┐
-           │                │
-┌──────────▼────────────┐   │
-│   capysquash-api      │   │  ← REST API server
-│  - JWT auth           │   │
-│  - GitHub webhooks    │   │
-│  - Operations tracker │   │
-└──────────┬────────────┘   │
-           │                │
-┌──────────▼────────────┐   │
-│   capysquash-cli      │   │  ← CLI tool
-│  - Terminal UI        │   │
-│  - CI/CD friendly     │   │
-└──────────┬────────────┘   │
-           │                │
-           └────────────────┘
-                   │
-           ┌───────▼──────────┐
-           │ pgsquash-engine  │  ← Core library (this repo)
-           │ - SQL parser     │
-           │ - Consolidation  │
-           │ - Validation     │
-           └──────────────────┘
-```
-
-**For most users:** Start with [CAPYSQUASH](https://capysquash.dev) for the easiest experience or [capysquash-cli](https://github.com/CAPYSQUASH/capysquash-cli) for terminal workflows.
-
-**For developers:** Use pgsquash-engine to build custom migration tools and integrations.
-
----
-
 ## Links
 
-- **CAPYSQUASH**: <https://capysquash.dev>
 - **GitHub**: <https://github.com/capysquash/pgsquash-engine>
-- **Documentation**: [capysquash.dev/docs](https://capysquash.dev/docs)
 - **Issues**: <https://github.com/capysquash/pgsquash-engine/issues>
-
----
-
-<Sub>Powered by pgsquash-engine • Part of the CAPYSQUASH ecosystem</sub>.

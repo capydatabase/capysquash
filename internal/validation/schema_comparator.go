@@ -97,6 +97,27 @@ func collectSchemaSignature(ctx context.Context, db *sql.DB) ([]string, error) {
 	if err := collectPolicies(ctx, queries, &lines); err != nil {
 		return nil, err
 	}
+	if err := collectCatalogDefinitions(ctx, db, "sequence", signatureSequencesQuery, &lines); err != nil {
+		return nil, err
+	}
+	if err := collectCatalogDefinitions(ctx, db, "type", signatureTypesQuery, &lines); err != nil {
+		return nil, err
+	}
+	if err := collectCatalogDefinitions(ctx, db, "relation", signatureRelationsQuery, &lines); err != nil {
+		return nil, err
+	}
+	if err := collectCatalogDefinitions(ctx, db, "ownership", signatureOwnershipQuery, &lines); err != nil {
+		return nil, err
+	}
+	if err := collectCatalogDefinitions(ctx, db, "policy_roles", signaturePolicyRolesQuery, &lines); err != nil {
+		return nil, err
+	}
+	if err := collectCatalogDefinitions(ctx, db, "grant", signatureGrantsQuery, &lines); err != nil {
+		return nil, err
+	}
+	if err := collectCatalogDefinitions(ctx, db, "comment", signatureCommentsQuery, &lines); err != nil {
+		return nil, err
+	}
 
 	sort.Strings(lines)
 	return lines, nil
@@ -233,6 +254,219 @@ func collectPolicies(ctx context.Context, queries *catalogsqlc.Queries, lines *[
 
 	return nil
 }
+
+func collectCatalogDefinitions(ctx context.Context, db *sql.DB, kind, query string, lines *[]string) error {
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("list %s signatures: %w", kind, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var identifier, definition string
+		if err := rows.Scan(&identifier, &definition); err != nil {
+			return fmt.Errorf("scan %s signature: %w", kind, err)
+		}
+		*lines = append(*lines, hashedSignature(kind, identifier, definition))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate %s signatures: %w", kind, err)
+	}
+	return nil
+}
+
+const signatureSequencesQuery = `
+SELECT
+  n.nspname || '.' || c.relname AS identifier,
+  concat_ws('|',
+    pg_catalog.format_type(s.seqtypid, NULL),
+    s.seqstart::text,
+    s.seqincrement::text,
+    s.seqmin::text,
+    s.seqmax::text,
+    s.seqcache::text,
+    s.seqcycle::text,
+    COALESCE(dep_ns.nspname || '.' || dep_class.relname || '.' || dep_attr.attname, '')
+  ) AS definition
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_catalog.pg_sequence s ON s.seqrelid = c.oid
+LEFT JOIN pg_catalog.pg_depend d ON d.objid = c.oid AND d.deptype IN ('a', 'i')
+LEFT JOIN pg_catalog.pg_class dep_class ON dep_class.oid = d.refobjid
+LEFT JOIN pg_catalog.pg_namespace dep_ns ON dep_ns.oid = dep_class.relnamespace
+LEFT JOIN pg_catalog.pg_attribute dep_attr ON dep_attr.attrelid = d.refobjid AND dep_attr.attnum = d.refobjsubid
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp_%'
+ORDER BY identifier`
+
+const signatureTypesQuery = `
+SELECT
+  n.nspname || '.' || t.typname AS identifier,
+  concat_ws('|',
+    t.typtype::text,
+    pg_catalog.pg_get_userbyid(t.typowner),
+    pg_catalog.format_type(t.typbasetype, t.typtypmod),
+    t.typnotnull::text,
+    COALESCE(pg_catalog.pg_get_expr(t.typdefaultbin, 0), t.typdefault, ''),
+    COALESCE((
+      SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
+      FROM pg_catalog.pg_enum e
+      WHERE e.enumtypid = t.oid
+    ), ''),
+    COALESCE((
+      SELECT string_agg(a.attname || ':' || pg_catalog.format_type(a.atttypid, a.atttypmod), ',' ORDER BY a.attnum)
+      FROM pg_catalog.pg_attribute a
+      WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped
+    ), ''),
+    COALESCE(pg_catalog.format_type(r.rngsubtype, NULL), ''),
+    COALESCE(r.rngcanonical::regproc::text, ''),
+    COALESCE((
+      SELECT string_agg(pg_catalog.pg_get_constraintdef(con.oid, true), ',' ORDER BY con.conname)
+      FROM pg_catalog.pg_constraint con
+      WHERE con.contypid = t.oid
+    ), '')
+  ) AS definition
+FROM pg_catalog.pg_type t
+JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+LEFT JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
+WHERE t.typtype IN ('e', 'c', 'd', 'r')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp_%'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_depend d
+    WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e'
+  )
+ORDER BY identifier`
+
+const signatureRelationsQuery = `
+SELECT
+  n.nspname || '.' || c.relname AS identifier,
+  concat_ws('|',
+    c.relkind::text,
+    pg_catalog.pg_get_userbyid(c.relowner),
+    c.relpersistence::text,
+    c.relrowsecurity::text,
+    c.relforcerowsecurity::text,
+    c.relreplident::text,
+    COALESCE(pg_catalog.pg_get_expr(c.relpartbound, c.oid, true), '')
+  ) AS definition
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp_%'
+ORDER BY identifier`
+
+const signatureOwnershipQuery = `
+SELECT identifier, definition
+FROM (
+  SELECT
+    'schema|' || n.nspname AS identifier,
+    pg_catalog.pg_get_userbyid(n.nspowner) AS definition
+  FROM pg_catalog.pg_namespace n
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+  UNION ALL
+  SELECT
+    'function|' || n.nspname || '.' || p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',
+    pg_catalog.pg_get_userbyid(p.proowner)
+  FROM pg_catalog.pg_proc p
+  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+) ownership
+ORDER BY identifier`
+
+const signaturePolicyRolesQuery = `
+SELECT
+  n.nspname || '.' || c.relname || ':' || p.polname AS identifier,
+  COALESCE(string_agg(r.rolname, ',' ORDER BY r.rolname), 'PUBLIC') AS definition
+FROM pg_catalog.pg_policy p
+JOIN pg_catalog.pg_class c ON c.oid = p.polrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_roles r ON r.oid = ANY(p.polroles)
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp_%'
+GROUP BY n.nspname, c.relname, p.polname
+ORDER BY identifier`
+
+const signatureGrantsQuery = `
+SELECT identifier, definition
+FROM (
+  SELECT
+    'table|' || table_schema || '.' || table_name || '|' || grantee || '|' || privilege_type AS identifier,
+    is_grantable AS definition
+  FROM information_schema.table_privileges
+  WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT
+    'column|' || table_schema || '.' || table_name || '.' || column_name || '|' || grantee || '|' || privilege_type,
+    is_grantable
+  FROM information_schema.column_privileges
+  WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT
+    'routine|' || routine_schema || '.' || routine_name || '|' || grantee || '|' || privilege_type,
+    is_grantable
+  FROM information_schema.routine_privileges
+  WHERE routine_schema NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT
+    'usage|' || object_type || '|' || object_schema || '.' || object_name || '|' || grantee || '|' || privilege_type,
+    is_grantable
+  FROM information_schema.usage_privileges
+  WHERE object_schema NOT IN ('pg_catalog', 'information_schema')
+) grants
+ORDER BY identifier`
+
+const signatureCommentsQuery = `
+SELECT identifier, definition
+FROM (
+  SELECT
+    'relation|' || n.nspname || '.' || c.relname AS identifier,
+    d.description AS definition
+  FROM pg_catalog.pg_description d
+  JOIN pg_catalog.pg_class c ON c.oid = d.objoid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE d.objsubid = 0
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT
+    'column|' || n.nspname || '.' || c.relname || '.' || a.attname,
+    d.description
+  FROM pg_catalog.pg_description d
+  JOIN pg_catalog.pg_class c ON c.oid = d.objoid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid
+  WHERE d.objsubid > 0
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT
+    'function|' || n.nspname || '.' || p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',
+    d.description
+  FROM pg_catalog.pg_description d
+  JOIN pg_catalog.pg_proc p ON p.oid = d.objoid
+  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+  WHERE d.objsubid = 0
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  UNION ALL
+  SELECT
+    'type|' || n.nspname || '.' || t.typname,
+    d.description
+  FROM pg_catalog.pg_description d
+  JOIN pg_catalog.pg_type t ON t.oid = d.objoid
+  JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+  WHERE d.objsubid = 0
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+) comments
+WHERE definition IS NOT NULL
+ORDER BY identifier`
 
 func hashedSignature(kind, identifier, definition string) string {
 	normalized := normalizeSQLWhitespace(definition)

@@ -107,79 +107,8 @@ matrix, err := plugins.CheckCompatibility([]string{"supabase", "clerk"})
 **Use Cases:**
 
 - CLI initialization
-- API-driven plugin detection endpoints
-- Platform-specific features
-
----
-
-### 🐙 `pkg/github` - GitHub Integration API
-
-GitHub App client library for webhook handling and repository operations.
-
-```go
-import "github.com/capysquash/pgsquash-engine/pkg/github"
-
-// Create GitHub App client
-appClient, err := github.NewAppClientFromEnv()
-if err != nil {
-    log.Fatal(err)
-}
-
-// Get installation client for a repository
-installClient, err := appClient.GetInstallationClientForRepo(ctx, owner, repo)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Create check run on PR
-checkRun := &github.CheckRun{
-    Name:       "capysquash/analysis",
-    HeadSHA:    pr.HeadSHA,
-    Status:     "completed",
-    Conclusion: "success",
-}
-_, err = installClient.CreateCheckRun(ctx, owner, repo, checkRun)
-```
-
-**Types:**
-
-- `AppClient` - GitHub App authentication client
-- `InstallationClient` - Per-installation API client
-- `WebhookHandler` - Webhook signature verification (HMAC-SHA256)
-- `CheckRun`, `CheckRunOutput`, `CheckRunAnnotation` - Check run definitions
-- `PullRequest`, `PRFile`, `Branch` - PR metadata
-
-**Functions:**
-
-- `NewAppClientFromEnv()` - Create client from environment variables
-- `NewAppClient(config)` - Create client from explicit configuration
-- `NewWebhookHandler(secret)` - Create webhook signature verifier
-- `appClient.GetInstallationClient(ctx, installationID)` - Get installation client by ID
-- `appClient.GetInstallationClientForRepo(ctx, owner, repo)` - Get installation client for a repo
-- `appClient.ListInstallations(ctx)` - List App installations
-- `installClient.GetPRFiles(ctx, owner, repo, prNumber)` - List PR files
-- `installClient.GetPullRequest(ctx, owner, repo, prNumber)` - Get PR details
-- `installClient.GetFileContent(ctx, owner, repo, path, ref)` - Read repository files
-- `installClient.CreateCheckRun(ctx, owner, repo, checkRun)` - Create check run
-- `installClient.UpdateCheckRun(ctx, owner, repo, checkRunID, checkRun)` - Update check run
-- `installClient.PostPRComment(ctx, owner, repo, prNumber, body)` - Post PR comment
-
-**Environment Variables:**
-
-- `GITHUB_APP_ID` - GitHub App ID
-- `GITHUB_APP_PRIVATE_KEY` - Private key (PEM format)
-- `GITHUB_APP_PRIVATE_KEY_BASE64` - Base64-encoded private key
-- `GITHUB_APP_PRIVATE_KEY_PATH` - Path to private key file
-
-**Use Cases:**
-
-- GitHub App integration
-- Webhook signature verification
-- PR automation
-- Check run management
-- Repository operations
-
-**Note:** HTTP endpoints and webhook event processing are hosted in [capysquash-api](https://github.com/CAPYSQUASH/capysquash-api). This package provides the client library.
+- Programmatic plugin detection
+- Custom migration-tool wrappers
 
 ---
 
@@ -231,8 +160,7 @@ logger.Info("Application started")
 | **cli**        | Run CLI programmatically            | Custom CLI wrappers, branded binaries          |
 | **engine**     | Library API for squashing           | Custom tools, automation, batch processing     |
 | **plugins**    | Plugin registration & detection     | Platform integrations, detection endpoints     |
-| **github**     | GitHub App client library           | PR automation, check runs, webhook signatures  |
-| **validation** | Schema & static SQL validation      | Docker-based equivalence checks, lint rules    |
+| **validation** | Schema & static SQL validation      | Local or caller-owned equivalence checks       |
 | **errors**     | Structured error handling           | Severity/category-aware error reporting        |
 | **tui**        | Terminal UI                         | Interactive squash/analyze/validate views      |
 | **harness**    | AI harness context                  | Machine-readable engine context for AI tools   |
@@ -376,9 +304,7 @@ pkg/                      # Public API
 
 ├── plugins/              # Plugin registration, detection, compatibility
 
-├── github/               # GitHub App / installation clients, webhook signature verification
-
-├── validation/           # Docker-based schema validation + static SQL rules
+├── validation/           # Local/external schema validation + static SQL rules
 
 ├── errors/               # Structured error types, severities, categories
 
@@ -437,10 +363,8 @@ The public API follows semantic versioning:
 
 ## Support
 
-- 📖 [Documentation](https://capysquash.dev/docs)
 - 🐛 [Report Issues](https://github.com/capysquash/pgsquash-engine/issues)
 - 💬 [Discussions](https://github.com/capysquash/pgsquash-engine/discussions)
-- 📧 [Email Support](mailto:support@capysquash.dev)
 
 ## License
 

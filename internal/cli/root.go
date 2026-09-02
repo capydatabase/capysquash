@@ -56,15 +56,21 @@ var (
 	showCycleDetails     bool
 
 	// Validation options
-	validationMode    string
-	workflowOutputDir string
-	noValidate        bool
-	failOnDiff        bool
-	strictParse       bool
-	openReport        bool
-	customDockerImage string
-	emitHarnessReport bool
-	harnessReportPath string
+	validationMode         string
+	workflowOutputDir      string
+	noValidate             bool
+	failOnDiff             bool
+	strictParse            bool
+	openReport             bool
+	customDockerImage      string
+	emitHarnessReport      bool
+	harnessReportPath      string
+	externalDSN            string
+	externalDSNEnv         string
+	snapshotOutput         string
+	againstSnapshot        string
+	externalJSON           bool
+	externalAllowedSchemas []string
 
 	// Branch safety options
 	branchCheck      bool
@@ -80,9 +86,6 @@ var (
 
 	// TUI mode
 	tuiMode bool
-
-	// Features command output
-	featuresJSON bool
 )
 
 var rootCmd = &cobra.Command{
@@ -93,8 +96,7 @@ var rootCmd = &cobra.Command{
 clean, production-ready SQL while preserving data integrity, respecting
 dependencies, and validating safety at every step.
 
-The pgsquash-engine is the core consolidation engine that powers
-CAPYSQUASH and provides parser-grade accuracy for migration optimization.`,
+The pgsquash-engine can be used directly or embedded through its public Go API.`,
 	// UX FIX: Silence duplicate error messages - errors are already logged in main()
 	SilenceErrors: true,
 	// UX FIX: Don't show usage on every error - only when explicitly requested with --help
@@ -127,6 +129,18 @@ var validateCmd = &cobra.Command{
 migrations to ensure they produce identical results.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runValidate,
+}
+
+var validateExternalCmd = &cobra.Command{
+	Use:   "validate-external [migrations path]",
+	Short: "Apply migrations to an empty external database and capture or compare its catalog",
+	Long: `Apply migrations only after confirming that the caller-owned database is empty.
+
+Use --snapshot-output to capture the original catalog, then reset or replace the
+database and use --against-snapshot to validate a generated baseline. Connection
+details are never included in the snapshot or JSON result.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runValidateExternal,
 }
 
 var lintCmd = &cobra.Command{
@@ -208,17 +222,6 @@ Features enabled:
 This workflow provides maximum insight without any data modifications.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runAnalyzeWorkflow,
-}
-
-var featuresCmd = &cobra.Command{
-	Use:   "features",
-	Short: "List managed feature availability",
-	Long: `Display managed feature availability and entitlement requirements.
-
-This command reports feature metadata for the current binary surface.
-Managed AI harness execution is available through CAPYSQUASH managed APIs
-and requires authentication and paid entitlement.`,
-	RunE: runFeatures,
 }
 
 func init() {
@@ -317,6 +320,18 @@ func init() {
 	// Validate command flags
 	validateCmd.Flags().StringVar(&validationMode, "validation-mode", "",
 		"Validation approach: TWO_CONTAINERS, TWO_DATABASES, or SCHEMA_DIFF (default: from config or TWO_DATABASES)")
+	validateExternalCmd.Flags().StringVar(&externalDSN, "dsn", "",
+		"Connection URL for a caller-owned empty validation database")
+	validateExternalCmd.Flags().StringVar(&externalDSNEnv, "dsn-env", "",
+		"Read the validation database connection URL from this environment variable")
+	validateExternalCmd.Flags().StringVar(&snapshotOutput, "snapshot-output", "",
+		"Write the captured catalog snapshot to this file")
+	validateExternalCmd.Flags().StringVar(&againstSnapshot, "against-snapshot", "",
+		"Compare the captured catalog against this snapshot file")
+	validateExternalCmd.Flags().BoolVar(&externalJSON, "json", false,
+		"Emit the stable external-validation result as JSON")
+	validateExternalCmd.Flags().StringSliceVar(&externalAllowedSchemas, "allow-existing-schema", nil,
+		"Platform-owned schema allowed in the otherwise empty validation database (repeatable)")
 	squashCmd.Flags().StringVar(&validationMode, "validation-mode", "",
 		"Validation approach for post-squash validation: TWO_CONTAINERS, TWO_DATABASES, or SCHEMA_DIFF (default: from config)")
 
@@ -342,17 +357,14 @@ func init() {
 	lintCmd.Flags().Bool("fix", false, "Apply available autofixes in memory")
 	lintCmd.Flags().Bool("write", false, "Write autofix output back to files (requires --fix)")
 	lintCmd.Flags().Bool("json", false, "Emit lint output as JSON")
-	featuresCmd.Flags().BoolVar(&featuresJSON, "json", false, "Output feature availability in JSON")
-
-	// Add commands to root. AI automation commands remain managed-service only.
-	rootCmd.AddCommand(analyzeCmd, squashCmd, validateCmd, lintCmd, initConfigCmd, safeCmd, fastCmd, analyzeDeepCmd, featuresCmd)
+	rootCmd.AddCommand(analyzeCmd, squashCmd, validateCmd, validateExternalCmd, lintCmd, initConfigCmd, safeCmd, fastCmd, analyzeDeepCmd)
 }
 
 func Execute() error {
 	// Configure global logging based on verbose flag
 	// This is called before any command runs via PersistentPreRun
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
-		if quietMode || squashJSON {
+		if quietMode || squashJSON || externalJSON {
 			// Quiet mode: suppress all non-error output
 			verbose = false
 			showProgress = false
@@ -1732,6 +1744,242 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	).WithFile(originalDir).WithSuggestion("Ensure directory exists and contains .sql files")
 }
 
+const externalValidationContractVersion = "pgsquash.external-validation.v1"
+
+type externalValidationResult struct {
+	ContractVersion   string   `json:"contract_version"`
+	Success           bool     `json:"success"`
+	Phase             string   `json:"phase"`
+	ComparisonValid   bool     `json:"comparison_valid"`
+	HasDifferences    bool     `json:"has_differences"`
+	Differences       []string `json:"differences"`
+	SnapshotContract  string   `json:"snapshot_contract"`
+	PostgreSQLVersion string   `json:"postgresql_version,omitempty"`
+	DurationMS        int64    `json:"duration_ms"`
+	Error             string   `json:"error,omitempty"`
+}
+
+func runValidateExternal(cmd *cobra.Command, args []string) error {
+	started := time.Now()
+	result := externalValidationResult{
+		ContractVersion:  externalValidationContractVersion,
+		Differences:      make([]string, 0),
+		SnapshotContract: validation.CatalogSnapshotContractVersion,
+	}
+
+	fail := func(err error) error {
+		result.DurationMS = time.Since(started).Milliseconds()
+		result.Error = err.Error()
+		if externalJSON {
+			_ = json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+		}
+		return err
+	}
+
+	dsn, err := resolveExternalValidationDSN()
+	if err != nil {
+		return fail(err)
+	}
+	if (snapshotOutput == "") == (againstSnapshot == "") {
+		return fail(errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"exactly one of --snapshot-output or --against-snapshot is required",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		))
+	}
+
+	result.Phase = "snapshot"
+	if againstSnapshot != "" {
+		result.Phase = "compare"
+	}
+
+	cfg, err := config.LoadConfig(resolveConfigPath())
+	if err != nil {
+		return fail(errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"failed to load validation configuration",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err))
+	}
+
+	valConfig := validation.DefaultValidationConfig()
+	valConfig.EnablePreprocessing = cfg.Validation.EnablePreprocessing
+	valConfig.EnableSQLFixes = false
+	valConfig.Verbose = verbose && !quietMode && !externalJSON
+	valConfig.AuthCompatibilitySQL = detectAuthCompatibilitySQL(args[0])
+
+	validator := validation.NewSchemaValidator(valConfig, nil, nil)
+	defer validator.Close()
+
+	snapshot, err := validator.ApplyAndSnapshot(cmd.Context(), args[0], dsn, validation.ExternalValidationOptions{
+		AllowedSchemas: externalAllowedSchemas,
+	})
+	if err != nil {
+		return fail(errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"external database validation failed",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithFile(args[0]).WithInnerError(err))
+	}
+	result.PostgreSQLVersion = snapshot.PostgreSQLVersion
+
+	if snapshotOutput != "" {
+		if err := writeCatalogSnapshot(snapshotOutput, snapshot); err != nil {
+			return fail(err)
+		}
+		result.Success = true
+		result.DurationMS = time.Since(started).Milliseconds()
+		return writeExternalValidationResult(cmd, result)
+	}
+
+	original, err := readCatalogSnapshot(againstSnapshot)
+	if err != nil {
+		return fail(err)
+	}
+	diff, err := validation.CompareCatalogSnapshots(original, snapshot)
+	if err != nil {
+		return fail(err)
+	}
+	result.ComparisonValid = true
+	result.HasDifferences = diff.HasDifferences
+	result.Differences = append(result.Differences, diff.Differences...)
+	result.Success = !diff.HasDifferences
+	result.DurationMS = time.Since(started).Milliseconds()
+	if err := writeExternalValidationResult(cmd, result); err != nil {
+		return err
+	}
+	if diff.HasDifferences {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"external validation found schema differences",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
+	return nil
+}
+
+func resolveExternalValidationDSN() (string, error) {
+	if strings.TrimSpace(externalDSN) != "" && strings.TrimSpace(externalDSNEnv) != "" {
+		return "", errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"--dsn and --dsn-env cannot be used together",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
+	if name := strings.TrimSpace(externalDSNEnv); name != "" {
+		value := strings.TrimSpace(os.Getenv(name))
+		if value == "" {
+			return "", errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("environment variable %s is empty", name),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			)
+		}
+		return value, nil
+	}
+	if value := strings.TrimSpace(externalDSN); value != "" {
+		return value, nil
+	}
+	return "", errors.NewError(
+		errors.ErrorCodeValidationFailed,
+		"one of --dsn or --dsn-env is required",
+		errors.SeverityError,
+		errors.CategoryValidation,
+	)
+}
+
+func detectAuthCompatibilitySQL(migrationPath string) string {
+	paths := make([]string, 0)
+	info, err := os.Stat(migrationPath)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		_ = filepath.WalkDir(migrationPath, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".sql") {
+				paths = append(paths, path)
+			}
+			return nil
+		})
+	} else {
+		paths = append(paths, migrationPath)
+	}
+
+	contents := make(map[int]string, len(paths))
+	for i, path := range paths {
+		content, readErr := os.ReadFile(path)
+		if readErr == nil {
+			contents[i] = string(content)
+		}
+	}
+	analysis := squasher.NewExtensionDetector().AnalyzeMigrations(contents)
+	return analysis.AuthCompatibilitySQL
+}
+
+func writeCatalogSnapshot(path string, snapshot *validation.CatalogSnapshot) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return fmt.Errorf("create catalog snapshot directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(directory, ".pgsquash-snapshot-*.json")
+	if err != nil {
+		return fmt.Errorf("create catalog snapshot: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+
+	encoder := json.NewEncoder(temporary)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(snapshot); err != nil {
+		temporary.Close()
+		return fmt.Errorf("encode catalog snapshot: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close catalog snapshot: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("publish catalog snapshot: %w", err)
+	}
+	return nil
+}
+
+func readCatalogSnapshot(path string) (*validation.CatalogSnapshot, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read catalog snapshot: %w", err)
+	}
+	var snapshot validation.CatalogSnapshot
+	if err := json.Unmarshal(content, &snapshot); err != nil {
+		return nil, fmt.Errorf("decode catalog snapshot: %w", err)
+	}
+	return &snapshot, nil
+}
+
+func writeExternalValidationResult(cmd *cobra.Command, result externalValidationResult) error {
+	if externalJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+	}
+	if result.Phase == "snapshot" {
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "Captured catalog snapshot (%s)\n", result.PostgreSQLVersion)
+		return err
+	}
+	if result.Success {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "Schemas are equivalent")
+		return err
+	}
+	_, err := fmt.Fprintln(cmd.OutOrStdout(), "Schemas differ")
+	return err
+}
+
 func runLint(cmd *cobra.Command, args []string) error {
 	files, err := collectSQLFilesFromArgs(args)
 	if err != nil {
@@ -2114,35 +2362,6 @@ func runInitConfig(cmd *cobra.Command, args []string) error {
 		color.Green("☑ Generated default configuration: %s\n", configFile)
 	}
 	fmt.Printf("Edit this file to customize pgsquash-engine behavior\n")
-
-	return nil
-}
-
-func runFeatures(cmd *cobra.Command, args []string) error {
-	// The feature catalog lives in pkg/harness (single source across the
-	// engine CLI and managed API surfaces); never duplicate the tuple here.
-	features := harnesscontract.FeatureCatalog()
-
-	if featuresJSON {
-		payload := map[string]any{
-			"binary":   rootCmd.Use,
-			"features": features,
-		}
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(payload)
-	}
-
-	fmt.Printf("%s feature availability\n\n", strings.ToUpper(rootCmd.Use))
-	for _, feature := range features {
-		fmt.Printf("- %s\n", feature.Name)
-		fmt.Printf("  availability: %s\n", feature.AvailabilityModel)
-		fmt.Printf("  local_execution: %t\n", feature.EnabledLocally)
-		fmt.Printf("  requires_auth: %t\n", feature.RequiresAuth)
-		fmt.Printf("  required_plan: %s\n", feature.RequiredPlan)
-		fmt.Printf("  upgrade_url: %s\n", feature.UpgradeURL)
-		fmt.Printf("  description: %s\n\n", feature.Description)
-	}
 
 	return nil
 }

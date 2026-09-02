@@ -28,7 +28,9 @@ func init() {
 	if os.Getenv("PGSQUASH_LOG_LEVEL") == "debug" {
 		logLevel = utils.LogLevelDebug
 	}
-	logger := utils.NewLogger(logLevel, os.Stdout)
+	// Diagnostics belong on stderr so machine-readable command output on
+	// stdout remains parseable by callers such as the CapyDB CLI.
+	logger := utils.NewLogger(logLevel, os.Stderr)
 	utils.SetDefaultLogger(logger)
 
 	// Set version information for CLI commands

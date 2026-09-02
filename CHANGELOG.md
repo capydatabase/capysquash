@@ -15,13 +15,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Coming Soon
+### Added
 
-- Smart split feature (split squashed migrations into multiple organized files)
-- Additional auth plugins (Auth0, NextAuth, Firebase Auth)
-- Platform plugins (Neon, Railway, PlanetScale)
-- Comprehensive test suite (target: >60% coverage)
-- Performance benchmarks and CI enforcement
+- `pgsquash validate-external` for applying a migration path to a caller-owned
+  empty PostgreSQL database, capturing a portable catalog snapshot, and
+  comparing a second build against it. The command refuses non-empty databases,
+  supports DSNs through an environment variable, and emits the stable
+  `pgsquash.external-validation.v1` JSON contract.
+- Public catalog snapshot types and comparison helpers in `pkg/validation`.
+- Catalog signatures for sequences, custom types and domains, relation and
+  function ownership, row-security flags, policy roles, grants, and comments.
+
+### Changed
+
+- Migration execution now honors context cancellation for compatibility SQL and
+  every migration statement.
+- CLI diagnostics use stderr so JSON output on stdout remains machine-readable.
+- Release automation now publishes only native GitHub archives and checksums;
+  obsolete Homebrew and container-registry publication paths were removed.
+- Project documentation now describes the engine as a standalone OSS component
+  and documents CapyDB-managed validation.
+
+### Removed
+
+- The unused GitHub App/webhook package and its authentication dependencies.
+- The managed subscription feature catalog and `features` CLI command; these
+  described the retired hosted product rather than an OSS engine capability.
+- Archived CapySquash platform manifests, Docker publishing, and self-analysis
+  workflows from the engine repository.
 
 ---
 

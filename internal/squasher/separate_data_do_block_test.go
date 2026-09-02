@@ -115,6 +115,8 @@ END $$;`,
 	require.GreaterOrEqual(t, addPosition, 0)
 	require.Greater(t, defaultPosition, addPosition)
 	require.Greater(t, indexPosition, defaultPosition)
+	_, err = parser.ParseMigration(result.BaselineSQL, "ordered_alters_baseline.sql")
+	require.NoError(t, err)
 }
 
 func TestInsertSQLAfterCreateTable_PrecedesIntegratedIndex(t *testing.T) {

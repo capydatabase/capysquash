@@ -106,7 +106,7 @@ jobs:
           timeout 60 bash -c 'until pg_isready -h localhost -p 5432; do sleep 1; done'
 
           # Run integration tests
-          go test -v -tags=integration ./test-fixtures/...
+          go test -v -tags=integration ./internal/validation ./test-fixtures/...
 
           # Test CLI with actual database
           go build -o pgsquash cmd/pgsquash/main.go

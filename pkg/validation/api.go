@@ -100,6 +100,12 @@ type (
 	// DockerValidationResult represents the result of Docker-based validation
 	DockerValidationResult = internal_validation.DockerValidationResult
 
+	// CatalogSnapshot is a portable schema signature captured from a caller-owned database.
+	CatalogSnapshot = internal_validation.CatalogSnapshot
+
+	// ExternalValidationOptions identifies platform-owned schemas allowed in an otherwise empty database.
+	ExternalValidationOptions = internal_validation.ExternalValidationOptions
+
 	// ValidationFix represents a fix applied during validation
 	ValidationFix = internal_validation.ValidationFix
 
@@ -121,6 +127,8 @@ type (
 	// SchemaDiff represents differences between two schemas (normalized)
 	SchemaDiff = internal_validation.SchemaDiff
 )
+
+const CatalogSnapshotContractVersion = internal_validation.CatalogSnapshotContractVersion
 
 // Validation levels
 const (
@@ -391,6 +399,11 @@ func ValidateSchemaEquivalence(
 // and want to see if they are equivalent.
 func ValidateSchemaDiff(schema1, schema2 string) (*SchemaDiff, error) {
 	return internal_validation.CompareSchemasDirectly(schema1, schema2)
+}
+
+// CompareCatalogSnapshots compares portable catalog snapshots without a live database.
+func CompareCatalogSnapshots(original, candidate *CatalogSnapshot) (*SchemaDiff, error) {
+	return internal_validation.CompareCatalogSnapshots(original, candidate)
 }
 
 // QuickValidate is a convenience function for fast validation with minimal setup.

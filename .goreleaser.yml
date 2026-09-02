@@ -1,174 +1,98 @@
-# GoReleaser configuration for pgsquash-engine
-#
-# Uses goreleaser-cross for robust CGO cross-compilation to all Platforms.
-# goreleaser-cross includes pre-built toolchains for Linux, macOS, and Windows.
-#
-# Supported Platforms:
-# - Linux: AMD64, ARM64
-# - macOS: AMD64 (Intel), ARM64 (Apple Silicon)
-# - Windows: AMD64, ARM64 (future)
-#
-# Requirements:
-# - goreleaser-cross distribution (set in GitHub Actions)
-# - CGO enabled for all builds (required by pg_query_go)
-# - Docker with QEMU for multi-Platform support
+# Native release archives for the standalone pgsquash CLI.
+# pg_query_go requires CGO, so release.yml runs this through goreleaser-cross.
 version: 2
 
-before:
-  hooks:
-    # Run tests before building
-    - go test -v ./...
-    - go mod tidy
-
 builds:
-  # pgsquash - Linux AMD64
   - id: pgsquash-linux-amd64
     main: ./cmd/pgsquash
     binary: pgsquash
-    env:
-      - CGO_ENABLED=1
-      - CC=x86_64-linux-gnu-gcc
-      - CXX=x86_64-linux-gnu-g++
-    goos:
-      - linux
-    goarch:
-      - amd64
+    env: [CGO_ENABLED=1, CC=x86_64-linux-gnu-gcc, CXX=x86_64-linux-gnu-g++]
+    goos: [linux]
+    goarch: [amd64]
+    flags: [-trimpath]
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
       - -X main.buildDate={{.Date}}
       - -X main.gitCommit={{.FullCommit}}
-    flags:
-      - -trimpath
-    mod_timestamp: '{{ .CommitTimestamp }}'
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
-  # pgsquash - Linux ARM64
   - id: pgsquash-linux-arm64
     main: ./cmd/pgsquash
     binary: pgsquash
-    env:
-      - CGO_ENABLED=1
-      - CC=aarch64-linux-gnu-gcc
-      - CXX=aarch64-linux-gnu-g++
-    goos:
-      - linux
-    goarch:
-      - arm64
+    env: [CGO_ENABLED=1, CC=aarch64-linux-gnu-gcc, CXX=aarch64-linux-gnu-g++]
+    goos: [linux]
+    goarch: [arm64]
+    flags: [-trimpath]
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
       - -X main.buildDate={{.Date}}
       - -X main.gitCommit={{.FullCommit}}
-    flags:
-      - -trimpath
-    mod_timestamp: '{{ .CommitTimestamp }}'
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
-  # pgsquash - macOS AMD64 (Intel)
   - id: pgsquash-darwin-amd64
     main: ./cmd/pgsquash
     binary: pgsquash
-    env:
-      - CGO_ENABLED=1
-      - CC=o64-clang
-      - CXX=o64-clang++
-    goos:
-      - darwin
-    goarch:
-      - amd64
+    env: [CGO_ENABLED=1, CC=o64-clang, CXX=o64-clang++]
+    goos: [darwin]
+    goarch: [amd64]
+    flags: [-trimpath]
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
       - -X main.buildDate={{.Date}}
       - -X main.gitCommit={{.FullCommit}}
-    flags:
-      - -trimpath
-    mod_timestamp: '{{ .CommitTimestamp }}'
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
-  # pgsquash - macOS ARM64 (Apple Silicon)
   - id: pgsquash-darwin-arm64
     main: ./cmd/pgsquash
     binary: pgsquash
-    env:
-      - CGO_ENABLED=1
-      - CC=oa64-clang
-      - CXX=oa64-clang++
-    goos:
-      - darwin
-    goarch:
-      - arm64
+    env: [CGO_ENABLED=1, CC=oa64-clang, CXX=oa64-clang++]
+    goos: [darwin]
+    goarch: [arm64]
+    flags: [-trimpath]
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
       - -X main.buildDate={{.Date}}
       - -X main.gitCommit={{.FullCommit}}
-    flags:
-      - -trimpath
-    mod_timestamp: '{{ .CommitTimestamp }}'
-
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
   - id: pgsquash-archive
-    formats:
-      - tar.gz
-    name_template: >-
-      {{ .ProjectName }}_
-      {{- .Version }}_
-      {{- if eq .Os "darwin" }}macOS
-      {{- else }}{{ .Os }}{{ end }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
     ids:
       - pgsquash-linux-amd64
       - pgsquash-linux-arm64
       - pgsquash-darwin-amd64
       - pgsquash-darwin-arm64
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- if eq .Os "darwin" }}macOS{{ else }}{{ .Os }}{{ end }}_
+      {{- if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
     files:
       - LICENSE
       - README.md
       - CHANGELOG.md
-      - docker/README.md
 
 checksum:
-  name_template: 'checksums.txt'
+  name_template: checksums.txt
   algorithm: sha256
 
 changelog:
   use: github
   sort: asc
-  abbrev: 7
-  groups:
-    - title: 🚀 Features
-      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
-      order: 0
-    - title: 🐛 Bug Fixes
-      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
-      order: 1
-    - title: 📚 Documentation
-      regexp: '^.*?docs?(\([[:word:]]+\))??!?:.+$'
-      order: 2
-    - title: 🔧 Performance & Refactors
-      regexp: '^.*?(perf|refactor)(\([[:word:]]+\))??!?:.+$'
-      order: 3
-    - title: 🧪 Tests & CI
-      regexp: '^.*?(test|ci)(\([[:word:]]+\))??!?:.+$'
-      order: 4
-    - title: 📦 Dependencies
-      regexp: '^.*?(build|deps?)(\([[:word:]]+\))??!?:.+$'
-      order: 5
-    - title: Other Changes
-      order: 999
   filters:
     exclude:
-      - '^chore:'
-      - '^style:'
+      - "^chore:"
+      - "^style:"
       - Merge pull request
       - Merge branch
 
 release:
   github:
-    owner: CAPYSQUASH
+    owner: capysquash
     name: pgsquash-engine
   draft: false
   prerelease: auto
@@ -176,150 +100,10 @@ release:
   header: |
     ## pgsquash-engine {{ .Version }}
 
-    **Release Date**: {{ .Date }}
-
-    ### Supported Platforms
-
-    This release includes native binaries for:
-    - **Linux**: AMD64 (x86_64), ARM64 (aarch64)
-    - **macOS**: AMD64 (Intel), ARM64 (Apple Silicon)
-
-    ### Installation
-
-    #### Homebrew (macOS & Linux)
-    ```bash
-    brew install capysquash/tap/pgsquash
-    ```
-
-    #### Go Install
-    ```bash
-    go install github.com/capysquash/pgsquash-engine/cmd/pgsquash@{{ .Tag }}
-    ```
-
-    #### Docker
-    ```bash
-    # GitHub Container Registry
-    docker pull ghcr.io/capysquash/pgsquash:{{ .Version }}
-
-    # Docker Hub
-    docker pull idominikos/pgsquash:{{ .Version }}
-    ```
-
-    #### Manual Installation
-    Download the appropriate binary for your Platform below.
-
+    Native archives are attached for Linux and macOS on amd64 and arm64.
+    Verify downloads against `checksums.txt` before installation.
   footer: |
-    ---
+    Full changelog: https://github.com/capysquash/pgsquash-engine/compare/{{ .PreviousTag }}...{{ .Tag }}
 
-    **Full Changelog**: https://github.com/CAPYSQUASH/pgsquash-engine/compare/{{ .PreviousTag }}...{{ .Tag }}
-
-    ## 🐳 Docker Images
-
-    Multi-Platform Docker images are available:
-
-    ```bash
-    # GitHub Container Registry
-    docker pull ghcr.io/capysquash/pgsquash:{{ .Version }}
-    docker pull ghcr.io/capysquash/pgsquash:latest
-
-    # Docker Hub
-    docker pull idominikos/pgsquash:{{ .Version }}
-    docker pull idominikos/pgsquash:latest
-    ```
-
-    ## 📦 Checksums
-
-    See `checksums.txt` for SHA256 checksums of all artifacts.
-
-    ## 🆘 Support
-
-    - 📖 [Documentation](https://github.com/CAPYSQUASH/pgsquash-engine)
-    - 🐛 [Report Issues](https://github.com/CAPYSQUASH/pgsquash-engine/issues)
-    - 💬 [Discussions](https://github.com/CAPYSQUASH/pgsquash-engine/discussions)
-
-# Homebrew tap
-brews:
-  - name: pgsquash
-    description: "PostgreSQL migration squasher and optimizer"
-    homepage: "https://github.com/CAPYSQUASH/pgsquash-engine"
-    license: "MIT"
-    repository:
-      owner: CAPYSQUASH
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
-    commit_author:
-      name: goreleaserbot
-      email: bot@goreleaser.com
-    commit_msg_template: "Brew formula update for {{ .ProjectName }} version {{ .Tag }}"
-    install: |
-      bin.install "pgsquash"
-
-# Snapcraft (Linux) - optional
-# snapcrafts:
-#   - name: pgsquash
-#     summary: PostgreSQL migration squasher and optimizer
-#     description: |
-#       pgsquash-engine analyzes PostgreSQL migration files and consolidates them
-#       into optimized, organized migration files while preserving data integrity.
-#     grade: stable
-#     confinement: classic
-#     publish: true
-
-# Scoop (Windows) - optional
-# scoops:
-#   - name: pgsquash
-#     description: "PostgreSQL migration squasher and optimizer"
-#     homepage: "https://github.com/CAPYSQUASH/pgsquash-engine"
-#     license: MIT
-#     repository:
-#       owner: CAPYSQUASH
-#       name: scoop-bucket
-#       token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
-
-# AUR (Arch Linux) - optional
-# aurs:
-#   - name: pgsquash-bin
-#     homepage: "https://github.com/CAPYSQUASH/pgsquash-engine"
-#     description: "PostgreSQL migration squasher and optimizer"
-#     maintainers:
-#       - "Your Name <your.email@example.com>"
-#     license: "MIT"
-#     private_key: "{{ .Env.AUR_SSH_PRIVATE_KEY }}"
-#     git_url: "ssh://aur@aur.archlinux.org/pgsquash-bin.git"
-#     skip_upload: auto
-
-# Metadata
 metadata:
-  mod_timestamp: '{{ .CommitTimestamp }}'
-
-# Announce (optional - for release announcements)
-# announce:
-#   discord:
-#     enabled: true
-#     message_template: '🚀 pgsquash {{ .Tag }} is out! Check it out: {{ .ReleaseURL }}'
-#   slack:
-#     enabled: true
-#     message_template: '🚀 pgsquash {{ .Tag }} has been released!'
-#   twitter:
-#     enabled: true
-#     message_template: '🚀 pgsquash {{ .Tag }} is now available! #PostgreSQL #DevTools'
-
-# Artifacts
-# nfpms:
-#   - id: packages
-#     package_name: pgsquash
-#     vendor: CAPYSQUASH
-#     homepage: https://github.com/CAPYSQUASH/pgsquash-engine
-#     maintainer: Your Name <your.email@example.com>
-#     description: PostgreSQL migration squasher and optimizer
-#     license: MIT
-#     formats:
-#       - deb
-#       - rpm
-#       - apk
-#     bindir: /usr/bin
-#     dependencies:
-#       - git
-#     recommends:
-#       - docker.io
+  mod_timestamp: "{{ .CommitTimestamp }}"

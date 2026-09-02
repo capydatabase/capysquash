@@ -1,6 +1,6 @@
 # TUI Package - Public API for pgsquash Terminal User Interface
 
-The `pkg/tui` package provides the complete Terminal User Interface (TUI) implementation for pgsquash, fully accessible to external applications like capysquash-cli.
+The `pkg/tui` package provides the Terminal User Interface (TUI) implementation for pgsquash and external CLI wrappers.
 
 ## Overview
 

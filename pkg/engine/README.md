@@ -485,6 +485,5 @@ go engine.SquashFiles(migrations2, nil)
 
 ## Support
 
-- 📖 [Full Documentation](https://capysquash.dev/docs)
 - 🐛 [Report Issues](https://github.com/capysquash/pgsquash-engine/issues)
 - 💬 [Discussions](https://github.com/capysquash/pgsquash-engine/discussions)

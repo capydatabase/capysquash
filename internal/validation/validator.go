@@ -1147,7 +1147,7 @@ func (sv *SchemaValidator) validateWithSchemaDiff(ctx context.Context, originalP
 		result.Error = err.Error()
 		return result, err
 	}
-	if squashedErr := sv.applyMigrationsToDatabase(diffDSN, squashedPath); squashedErr != nil {
+	if squashedErr := sv.applyMigrationsToDatabase(ctx, diffDSN, squashedPath); squashedErr != nil {
 		result.Error = squashedErr.Error()
 		return result, errors.NewError(
 			errors.ErrorCodeInvalidSQL,
@@ -1167,7 +1167,7 @@ func (sv *SchemaValidator) validateWithSchemaDiff(ctx context.Context, originalP
 		result.Error = err.Error()
 		return result, err
 	}
-	originalMigErr := sv.applyMigrationsToDatabase(diffDSN, originalPath)
+	originalMigErr := sv.applyMigrationsToDatabase(ctx, diffDSN, originalPath)
 	if originalMigErr != nil && sv.config.Verbose {
 		color.Yellow("📊 Original migrations failed to apply - schema equivalence cannot be proven\n")
 	}
@@ -2281,7 +2281,7 @@ func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *Co
 	squashedDSN := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/validation_squashed?sslmode=disable", containerInfo.Port)
 
 	// Apply original migrations - allow errors (broken originals are expected)
-	originalErr = sv.applyMigrationsToDatabase(originalDSN, originalPath)
+	originalErr = sv.applyMigrationsToDatabase(ctx, originalDSN, originalPath)
 	if originalErr != nil {
 		if sv.config.Verbose {
 			color.Yellow("⚠️  Original migrations have errors (this is expected): %v\n", originalErr)
@@ -2291,7 +2291,7 @@ func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *Co
 	}
 
 	// Apply squashed migrations - this MUST succeed
-	squashedErr = sv.applyMigrationsToDatabase(squashedDSN, squashedPath)
+	squashedErr = sv.applyMigrationsToDatabase(ctx, squashedDSN, squashedPath)
 	if squashedErr != nil {
 		return originalErr, errors.NewError(
 			errors.ErrorCodeInvalidSQL,
@@ -2304,7 +2304,7 @@ func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *Co
 	return originalErr, nil
 }
 
-func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) error {
+func (sv *SchemaValidator) applyMigrationsToDatabase(ctx context.Context, dsn, migrationPath string) error {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return err
@@ -2317,7 +2317,7 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) 
 
 	// Inject auth compatibility SQL from plugins (Clerk, Supabase, Auth0, etc.)
 	// This creates mock auth functions, roles, and schemas for validation
-	compatibilitySQL := sv.getPluginCompatibilitySQL(context.Background())
+	compatibilitySQL := sv.getPluginCompatibilitySQL(ctx)
 
 	// Allow caller-provided compatibility SQL when plugin discovery is unavailable.
 	if compatibilitySQL == "" && sv.config.AuthCompatibilitySQL != "" {
@@ -2335,7 +2335,7 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) 
 			if stmt == "" {
 				continue
 			}
-			if _, err := db.Exec(stmt); err != nil {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
 				return errors.NewError(
 					errors.ErrorCodeInvalidSQL,
 					fmt.Sprintf("failed to create compatibility layer (statement %d)", i+1),
@@ -2380,7 +2380,7 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) 
 		}
 
 		// Use executeSQLFile which can handle multiple statements
-		if err := sv.executeSQLFile(db, sqlContent, migrationPath); err != nil {
+		if err := sv.executeSQLFile(ctx, db, sqlContent, migrationPath); err != nil {
 			return err
 		}
 
@@ -2406,7 +2406,7 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) 
 		}
 
 		// Use executeSQLFile which can handle multiple statements
-		if err := sv.executeSQLFile(db, sqlContent, path); err != nil {
+		if err := sv.executeSQLFile(ctx, db, sqlContent, path); err != nil {
 			return err
 		}
 
@@ -2416,7 +2416,7 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) 
 
 // executeSQLFile executes a SQL file that may contain multiple statements
 // Splits the SQL into individual statements and executes them one by one
-func (sv *SchemaValidator) executeSQLFile(db *sql.DB, sqlContent, filePath string) error {
+func (sv *SchemaValidator) executeSQLFile(ctx context.Context, db *sql.DB, sqlContent, filePath string) error {
 	// Split SQL into individual statements
 	statements := splitSQLStatements(sqlContent)
 
@@ -2429,7 +2429,7 @@ func (sv *SchemaValidator) executeSQLFile(db *sql.DB, sqlContent, filePath strin
 		}
 
 		// Execute the statement
-		if _, err := db.Exec(stmt); err != nil {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return errors.NewError(
 				errors.ErrorCodeInvalidSQL,
 				fmt.Sprintf("failed to execute statement %d in migration %s", i+1, filePath),
@@ -2562,7 +2562,7 @@ func splitSQLStatements(sql string) []string {
 
 func (sv *SchemaValidator) applyMigrationsToContainer(ctx context.Context, containerInfo *ContainerInfo, migrationPath string) error {
 	dsn := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", containerInfo.Port)
-	return sv.applyMigrationsToDatabase(dsn, migrationPath)
+	return sv.applyMigrationsToDatabase(ctx, dsn, migrationPath)
 }
 
 // getDefaultExtensionMap returns a mapping of extensions to Debian/Ubuntu packages
