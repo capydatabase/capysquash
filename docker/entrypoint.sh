@@ -25,9 +25,9 @@ else
     cat << 'EOF'
     ____  ____      ____   ____  __  __  ____  _____ __  __
    |  _ \/ ___|    / ___| / ___||  \/  |/ _  \/ ___||  \/  |
-   | |_) \___ \   \___ \| |    | |\/| |  | | \___ \| |\/| |
+   | |_) ___ \   ___ \| |    | |\/| |  | | ___ \| |\/| |
    |  __/ ___) |   ___) | |___ | |  | |  |_| |___) | |  | |
-   |_|   |____/   |____/ \____||_|  |_|\____|____/|_|  |_|
+   |_|   |____/   |____/ ____||_|  |_|____|____/|_|  |_|
 
    🚀 PostgreSQL Migration Squasher - Fully Automated Setup
 
@@ -93,7 +93,9 @@ setup_docker() {
     if [[ "${PGSQUASH_AUTO_SETUP:-true}" == "true" ]]; then
         log_step "Pre-pulling required Docker images..."
         docker pull postgres:17 || log_warning "Failed to pull postgres:17"
+        docker pull postgres:16 || log_warning "Failed to pull postgres:16"
         docker pull postgres:15 || log_warning "Failed to pull postgres:15"
+        docker pull postgres:18 || log_warning "Failed to pull postgres:18 (experimental)"
         log_success "Docker images ready"
     fi
 }
@@ -131,7 +133,8 @@ setup_config() {
   "validation": {
     "enabled": ${PGSQUASH_AUTO_VALIDATE},
     "docker_enabled": ${PGSQUASH_DOCKER_ENABLED},
-    "postgresql_versions": ["17", "16", "15", "14"],
+        "postgresql_versions": ["15", "16", "17", "18"],
+        "experimental_postgresql_versions": ["18"],
     "timeout_minutes": 10,
     "parallel_validation": true
   },

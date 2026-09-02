@@ -20,7 +20,7 @@
 //
 //	import (
 //		"log"
-//		"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui"
+//		"github.com/capysquash/pgsquash-engine/pkg/tui"
 //	)
 //
 //	func main() {
@@ -37,7 +37,7 @@
 //
 //	import (
 //		"log"
-//		"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui"
+//		"github.com/capysquash/pgsquash-engine/pkg/tui"
 //		tea "github.com/charmbracelet/bubbletea"
 //	)
 //
@@ -66,7 +66,7 @@
 //
 //	import (
 //		"log"
-//		"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui"
+//		"github.com/capysquash/pgsquash-engine/pkg/tui"
 //	)
 //
 //	func main() {
@@ -88,6 +88,7 @@
 //   - ViewConfig: Interactive configuration wizard
 //   - ViewDependencyGraph: Visual dependency graph
 //   - ViewProgress: Real-time operation progress
+//   - ViewValidation: Schema validation results
 //   - ViewHelp: Keyboard shortcuts and help
 //
 // # Integration with CLI Tools
@@ -99,7 +100,7 @@
 //	import (
 //		"fmt"
 //		"os"
-//		"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui"
+//		"github.com/capysquash/pgsquash-engine/pkg/tui"
 //		"github.com/spf13/cobra"
 //	)
 //

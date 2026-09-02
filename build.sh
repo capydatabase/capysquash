@@ -2,8 +2,7 @@
 # =============================================================================
 # Build Script for pgsquash-engine
 # =============================================================================
-# Builds both the CLI tool and API server with proper version information
-# and places them in the correct locations
+# Builds the pgsquash CLI tool with proper version information
 
 set -e  # Exit on error
 
@@ -15,7 +14,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Build information
-VERSION="${VERSION:-0.9.5}"
+VERSION="${VERSION:-0.9.7}"
 BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
@@ -41,7 +40,7 @@ LDFLAGS="-X 'main.version=${VERSION}' -X 'main.buildDate=${BUILD_DATE}' -X 'main
 echo -e "${BLUE}==============================================================================${NC}"
 echo -e "${BLUE}Step 1: Clean previous builds${NC}"
 echo -e "${BLUE}==============================================================================${NC}"
-rm -f bin/pgsquash bin/api-server pgsquash main
+rm -f bin/pgsquash pgsquash
 echo -e "${GREEN}☑ Cleaned old binaries${NC}"
 echo ""
 
@@ -77,54 +76,25 @@ fi
 echo ""
 
 echo -e "${BLUE}==============================================================================${NC}"
-echo -e "${BLUE}Step 4: Build API Server${NC}"
-echo -e "${BLUE}==============================================================================${NC}"
-echo "Building: cmd/api-server → bin/api-server"
-CGO_ENABLED=1 go build -v \
-  -ldflags="${LDFLAGS}" \
-  -o bin/api-server \
-  ./cmd/api-server
-
-if [ -f bin/api-server ]; then
-  echo -e "${GREEN}☑ API Server built successfully${NC}"
-  ls -lh bin/api-server
-
-  # Test the binary (just check if it exists and is executable)
-  echo ""
-  echo "Testing binary..."
-  chmod +x bin/api-server
-  echo "Binary is executable"
-else
-  echo -e "${RED}✗ API Server build failed${NC}"
-  exit 1
-fi
-echo ""
-
-echo -e "${BLUE}==============================================================================${NC}"
-echo -e "${BLUE}Step 5: Create convenience symlinks${NC}"
+echo -e "${BLUE}Step 4: Create convenience symlink${NC}"
 echo -e "${BLUE}==============================================================================${NC}"
 
 # Create symlink in project root for convenience
 ln -sf bin/pgsquash pgsquash
 echo -e "${GREEN}☑ Created symlink: pgsquash → bin/pgsquash${NC}"
-
-ln -sf bin/api-server main
-echo -e "${GREEN}☑ Created symlink: main → bin/api-server${NC}"
 echo ""
 
 echo -e "${BLUE}==============================================================================${NC}"
 echo -e "${BLUE}Build Summary${NC}"
 echo -e "${BLUE}==============================================================================${NC}"
 echo ""
-echo -e "${GREEN}☑ All binaries built successfully!${NC}"
+echo -e "${GREEN}☑ Build completed successfully!${NC}"
 echo ""
-echo "Binaries location:"
+echo "Binary location:"
 echo "  ► CLI:        $(pwd)/bin/pgsquash"
-echo "  ► API Server: $(pwd)/bin/api-server"
 echo ""
-echo "Convenience symlinks:"
+echo "Convenience symlink:"
 echo "  ► ./pgsquash  → bin/pgsquash"
-echo "  ► ./main      → bin/api-server"
 echo ""
 echo "Build information:"
 echo "  ► Version:     ${VERSION}"
@@ -133,7 +103,7 @@ echo "  ► Git Commit:  ${GIT_COMMIT}"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
 echo "  1. Test CLI:        ./pgsquash --help"
-echo "  2. Test API:        ./main (or ./bin/api-server)"
-echo "  3. Deploy to Fly:   fly deploy"
+echo "  2. Run analysis:    ./pgsquash analyze migrations/"
+echo "  3. Install:         cp bin/pgsquash /usr/local/bin/"
 echo ""
-echo -e "${GREEN}Ready to deploy! 🚀${NC}"
+echo -e "${GREEN}Ready to use! 🚀${NC}"

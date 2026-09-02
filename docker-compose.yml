@@ -61,9 +61,14 @@ services:
       retries: 3
       start_period: 60s
 
-  # PostgreSQL 17 for validation and testing
+  # PostgreSQL 18 with PostGIS for validation and testing
   postgres-primary:
-    image: postgres:17
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+      args:
+        - PG_VERSION=18
+    image: pgsquash-postgres:18
     container_name: pgsquash-postgres-primary
     restart: unless-stopped
     environment:
@@ -88,7 +93,7 @@ services:
       start_period: 30s
     labels:
       - "com.pgsquash.service=postgres-primary"
-      - "com.pgsquash.version=17"
+      - "com.pgsquash.version=18"
 
 # Networks
 networks:

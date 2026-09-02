@@ -1,10 +1,10 @@
 package clerk
 
 import (
-    "context"
+	"context"
 
-    "github.com/CAPYSQUASH/pgsquash-engine/internal/plugins/auth"
-    "github.com/CAPYSQUASH/pgsquash-engine/internal/plugins/volatility"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/auth"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/volatility"
 )
 
 // InjectCompatibilityLayer returns SQL to mock Clerk authentication for validation
@@ -14,22 +14,21 @@ import (
 //   - Mock auth.jwt() function returning Clerk JWT v2 payload
 //   - Helper functions (current_user_id, current_organization_id, etc.)
 func (cp *ClerkPlugin) InjectCompatibilityLayer(ctx context.Context) string {
-    generator := auth.NewCompatibilityGenerator(auth.ServiceClerk)
-    return generator.Generate()
+	generator := auth.NewCompatibilityGenerator(auth.ServiceClerk)
+	return generator.Generate()
 }
 
 // TransformSQL performs Clerk-specific SQL transformations
 // Currently delegates to FixFunctionVolatility
 func (cp *ClerkPlugin) TransformSQL(ctx context.Context, sql string) (string, error) {
-    // Apply function volatility fixes for Clerk auth functions
-    return cp.FixFunctionVolatility(ctx, sql)
+	// Apply function volatility fixes for Clerk auth functions
+	return cp.FixFunctionVolatility(ctx, sql)
 }
 
 // FixFunctionVolatility adds STABLE markers to Clerk auth functions
-// Delegates to shared volatility fixer to eliminate duplication
+// Uses AST-based parsing for more accurate and maintainable transformations
 func (cp *ClerkPlugin) FixFunctionVolatility(ctx context.Context, functionSQL string) (string, error) {
-    registry := volatility.CreateClerkRegistry()
-    fixer := volatility.NewVolatilityFixer(registry)
-    return fixer.Fix(functionSQL)
+	registry := volatility.CreateClerkRegistry()
+	fixer := volatility.NewASTVolatilityFixer(registry)
+	return fixer.Fix(functionSQL)
 }
-

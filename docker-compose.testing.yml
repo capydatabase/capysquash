@@ -12,14 +12,19 @@ services:
         condition: service_healthy
       postgres-17:
         condition: service_healthy
+      postgres-16:
+        condition: service_healthy
       postgres-15:
         condition: service_healthy
-      postgres-13:
-        condition: service_healthy
 
-  # PostgreSQL 17 (Latest) - Full test suite
+  # PostgreSQL 17 (Latest) with PostGIS - Full test suite
   postgres-17:
-    image: postgres:17
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+      args:
+        - PG_VERSION=17
+    image: pgsquash-postgres:17
     container_name: pgsquash-postgres-17
     restart: unless-stopped
     environment:
@@ -45,9 +50,14 @@ services:
       - "com.pgsquash.service=postgres-testing"
       - "com.pgsquash.version=17"
 
-  # PostgreSQL 15 (LTS - Current Debian/Ubuntu default)
+  # PostgreSQL 15 (LTS - Current Debian/Ubuntu default) with PostGIS
   postgres-15:
-    image: postgres:15
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+      args:
+        - PG_VERSION=15
+    image: pgsquash-postgres:15
     container_name: pgsquash-postgres-15
     restart: unless-stopped
     environment:
@@ -73,33 +83,38 @@ services:
       - "com.pgsquash.service=postgres-testing"
       - "com.pgsquash.version=15"
 
-  # PostgreSQL 13 (Legacy - EOL November 2025)
-  postgres-13:
-    image: postgres:13
-    container_name: pgsquash-postgres-13
+  # PostgreSQL 16 with PostGIS
+  postgres-16:
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+      args:
+        - PG_VERSION=16
+    image: pgsquash-postgres:16
+    container_name: pgsquash-postgres-16
     restart: unless-stopped
     environment:
-      - POSTGRES_DB=pgsquash_test_13
+      - POSTGRES_DB=pgsquash_test_16
       - POSTGRES_USER=pgsquash
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pgsquash_secure_password}
       - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
     volumes:
-      - postgres-13-data:/var/lib/postgresql/data
-      - ./docker/init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - postgres-16-data:/var/lib/postgresql/data
+      - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
+      - ./docker/init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
     networks:
       - pgsquash-net
     ports:
-      - "${POSTGRES_13_PORT:-5413}:5432"
+      - "${POSTGRES_16_PORT:-5416}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pgsquash -d pgsquash_test_13"]
+      test: ["CMD-SHELL", "pg_isready -U pgsquash -d pgsquash_test_16"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
     labels:
       - "com.pgsquash.service=postgres-testing"
-      - "com.pgsquash.version=13"
-      - "com.pgsquash.legacy=true"
+      - "com.pgsquash.version=16"
 
 # Additional volumes for testing databases
 volumes:
@@ -107,11 +122,11 @@ volumes:
     driver: local
     labels:
       - "com.pgsquash.volume=postgres-17-testing"
+  postgres-16-data:
+    driver: local
+    labels:
+      - "com.pgsquash.volume=postgres-16-testing"
   postgres-15-data:
     driver: local
     labels:
       - "com.pgsquash.volume=postgres-15-testing"
-  postgres-13-data:
-    driver: local
-    labels:
-      - "com.pgsquash.volume=postgres-13-testing"

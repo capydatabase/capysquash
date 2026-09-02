@@ -1,8 +1,8 @@
 package views
 
 import (
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/styles"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/viewtypes"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/styles"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/viewtypes"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -152,7 +152,7 @@ func (h *HelpView) renderAbout() string {
 		"",
 		styles.SubtitleStyle.Render("About"),
 		"",
-		styles.TextStyle.Render("  pgsquash v0.9.5"),
+		styles.TextStyle.Render("  pgsquash v0.9.7"),
 		styles.MutedStyle.Render("  PostgreSQL Migration Consolidation Tool"),
 		"",
 		styles.TextStyle.Render("  Features:"),
@@ -163,7 +163,7 @@ func (h *HelpView) renderAbout() string {
 		styles.MutedStyle.Render("    ► Docker-based schema validation"),
 		"",
 		styles.TextStyle.Render("  For more information:"),
-		styles.MutedStyle.Render("    ► GitHub: github.com/CAPYSQUASH/pgsquash-engine"),
+		styles.MutedStyle.Render("    ► GitHub: github.com/capysquash/pgsquash-engine"),
 		styles.MutedStyle.Render("    ► Docs: See docs/ directory"),
 	}
 

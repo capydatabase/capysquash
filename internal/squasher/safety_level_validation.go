@@ -3,7 +3,7 @@ package squasher
 import (
 	"fmt"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // ValidSafetyLevels returns all valid SafetyLevel values

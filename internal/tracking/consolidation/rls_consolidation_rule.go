@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // RLSConsolidationRule consolidates Row Level Security operations
@@ -15,6 +15,10 @@ type RLSConsolidationRule struct{}
 // CanApply checks if the rule can be applied to the given lifecycle
 func (r *RLSConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool {
 	if lifecycle.Type != types.TypeTable {
+		return false
+	}
+
+	if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
 		return false
 	}
 
@@ -38,50 +42,103 @@ func (r *RLSConsolidationRule) CanApply(lifecycle *tracking.ObjectLifecycle) boo
 // Apply applies the consolidation rule to the given lifecycle
 func (r *RLSConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "RLSConsolidationRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "RLSConsolidationRule"})
 	}
 
-	// Analyze RLS operations in lifecycle
-	finalRLSState := r.determineFinalRLSState(lifecycle)
+	// When consolidating RLS operations, we must also handle other ALTER operations
+	// (like ADD COLUMN) that may exist in the same lifecycle. Otherwise, we lose those ALTER statements.
+	//
+	// Example: collection_items has:
+	//   1. CREATE TABLE
+	//   2. ALTER TABLE ADD COLUMN command_id
+	//   3. ALTER TABLE ADD COLUMN item_type
+	//   4. ALTER TABLE ADD CONSTRAINT ...
+	//   5. ALTER TABLE ENABLE ROW LEVEL SECURITY
+	//
+	// If we only consolidate RLS (step 5), we lose steps 2-4!
+	//
+	// Solution: Use the same integration logic as CreateAlterConsolidationRule - integrate ALL ALTERs
 
-	// Find all RLS-related statements AND the CREATE TABLE statement
-	var originalStmts []types.Statement
+	// Find CREATE TABLE statement and ALL ALTER statements (not just RLS)
 	var createStmt *types.Statement
+	var alterStmts []types.Statement
+	var rlsAlterStmts []types.Statement // Track RLS separately for optimization message
+
 	for _, event := range lifecycle.History {
 		if event.Operation == types.OpCreate {
 			createStmt = &event.Statement
-		} else if event.Operation == types.OpAlter && r.isRLSOperation(event.Statement.SQL) {
-			originalStmts = append(originalStmts, event.Statement)
+		} else if event.Operation == types.OpAlter && !event.HasDataOps {
+			alterStmts = append(alterStmts, event.Statement)
+			if r.isRLSOperation(event.Statement.SQL) {
+				rlsAlterStmts = append(rlsAlterStmts, event.Statement)
+			}
 		}
 	}
 
-	// Generate consolidated SQL: CREATE TABLE + RLS ALTER
+	// Generate consolidated SQL by integrating ALL ALTER operations into CREATE
+	// This uses the same proven logic as CreateAlterConsolidationRule
 	var consolidatedSQL string
-	if createStmt != nil {
-		consolidatedSQL = createStmt.SQL
-		// Add RLS operation if there is one
-		if finalRLSState != "" {
-			tableName := lifecycle.Name
-			rlsStatement := fmt.Sprintf("\nALTER TABLE %s %s;", tableName, finalRLSState)
-			consolidatedSQL += rlsStatement
+	if createStmt != nil && len(alterStmts) > 0 {
+		// Use integrateAlterIntoCreate to properly merge ALL ALTER operations
+		consolidatedSQL = integrateAlterIntoCreate(createStmt, alterStmts)
+	} else if createStmt != nil {
+		// No ALTER statements, just the CREATE
+		consolidatedSQL = strings.TrimSpace(createStmt.SQL)
+		if !strings.HasSuffix(consolidatedSQL, ";") {
+			consolidatedSQL += ";"
 		}
-	} else if finalRLSState != "" {
-		// Fallback: no CREATE found, just the RLS ALTER
-		tableName := lifecycle.Name
-		consolidatedSQL = fmt.Sprintf("ALTER TABLE %s %s;", tableName, finalRLSState)
+	} else {
+		// Fallback: no CREATE found (shouldn't happen for tables, but be safe)
+		finalRLSState := r.determineFinalRLSState(lifecycle)
+		if finalRLSState != "" && finalRLSState != "DISABLE ROW LEVEL SECURITY" {
+			tableName := lifecycle.Name
+			consolidatedSQL = fmt.Sprintf("ALTER TABLE %s %s;", tableName, finalRLSState)
+		}
 	}
+
+	// Ensure RLS is enforced if we generated a CREATE statement
+	// integrateAlterIntoCreate intentionally skips RLS statements, so we must append the final state manually
+	if createStmt != nil {
+		finalRLSState := r.determineFinalRLSState(lifecycle)
+		if finalRLSState != "" && finalRLSState != "DISABLE ROW LEVEL SECURITY" {
+			tableName := lifecycle.Name
+			if consolidatedSQL != "" {
+				if !strings.HasSuffix(consolidatedSQL, ";") {
+					consolidatedSQL += ";"
+				}
+				consolidatedSQL += "\n"
+			}
+			consolidatedSQL += fmt.Sprintf("ALTER TABLE %s %s;", tableName, finalRLSState)
+		}
+	}
+
+	// Build optimizations list
+	optimizations := []string{}
+	if len(rlsAlterStmts) > 0 {
+		finalRLSState := r.determineFinalRLSState(lifecycle)
+		optimizations = append(optimizations, fmt.Sprintf("Consolidated %d RLS operations into final state: %s", len(rlsAlterStmts), finalRLSState))
+	}
+	if len(alterStmts) > len(rlsAlterStmts) {
+		nonRLSCount := len(alterStmts) - len(rlsAlterStmts)
+		optimizations = append(optimizations, fmt.Sprintf("Integrated %d non-RLS ALTER operations (ADD COLUMN, ADD CONSTRAINT, etc.)", nonRLSCount))
+	}
+
+	// Collect all original statements for tracking
+	allStmts := []types.Statement{}
+	if createStmt != nil {
+		allStmts = append(allStmts, *createStmt)
+	}
+	allStmts = append(allStmts, alterStmts...)
 
 	result := &tracking.ConsolidationResult{
-		OriginalStatements: originalStmts,
+		OriginalStatements: allStmts,
 		ConsolidatedSQL:    consolidatedSQL,
-		Optimizations: []string{
-			fmt.Sprintf("Consolidated %d RLS operations into final state: %s", len(originalStmts), finalRLSState),
-		},
-		RiskLevel: tracking.RiskLevelLow, // RLS is usually safe to consolidate
+		Optimizations:      optimizations,
+		RiskLevel:          tracking.RiskLevelLow, // RLS is usually safe to consolidate
 		EstimatedSavings: tracking.SquashSavings{
-			StatementsReduced: len(originalStmts) - 1,
-			FilesAffected:     len(originalStmts),
-			LinesReduced:      len(originalStmts),
+			StatementsReduced: len(alterStmts), // All ALTERs get consolidated
+			FilesAffected:     len(allStmts),
+			LinesReduced:      len(alterStmts) * 2, // Estimate
 		},
 	}
 

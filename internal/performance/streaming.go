@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/parser"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
+	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // StreamingProcessor handles memory-efficient processing of large migration sets
@@ -283,9 +283,8 @@ func (sp *StreamingProcessor) Stop() error {
 // BatchProcessor handles batch processing with configurable batch sizes
 type BatchProcessor struct {
 	batchSize        int
-	processor        func([]*MigrationFile) ([]*ProcessedFile, error) //nolint:unused // Reserved for future batch processing
 	memManager       *MemoryManager
-	deduplicator     *Deduplicator
+	deduplicator     *Deduplicator[*MigrationFile]
 	currentBatch     []*MigrationFile
 	currentBatchSize int64
 	maxBatchSize     int64
@@ -293,11 +292,8 @@ type BatchProcessor struct {
 
 // NewBatchProcessor creates a new batch processor
 func NewBatchProcessor(batchSize int, maxBatchSizeMB int, memManager *MemoryManager) *BatchProcessor {
-	dedup := NewDeduplicator(func(item interface{}) string {
-		if file, ok := item.(*MigrationFile); ok {
-			return fmt.Sprintf("%s_%d", filepath.Base(file.Path), file.Size)
-		}
-		return ""
+	dedup := NewDeduplicator[*MigrationFile](func(file *MigrationFile) string {
+		return fmt.Sprintf("%s_%d", filepath.Base(file.Path), file.Size)
 	})
 
 	return &BatchProcessor{

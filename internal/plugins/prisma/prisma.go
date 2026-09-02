@@ -5,12 +5,11 @@ package prisma
 import (
 	"context"
 	"database/sql"
-	"regexp"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/plugins"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // PrismaPlugin implements Prisma ORM integration
@@ -21,10 +20,10 @@ type PrismaPlugin struct {
 
 // PrismaConfig holds Prisma-specific configuration
 type PrismaConfig struct {
-	Enabled              bool   `json:"enabled"`
+	Enabled                bool `json:"enabled"`
 	PreserveMigrationTable bool `json:"preserve_migration_table"` // Preserve _prisma_migrations
-	ShadowDatabase       bool   `json:"shadow_database"`          // Handle shadow database patterns
-	OptimizeIndices      bool   `json:"optimize_indices"`         // Optimize Prisma-generated indices
+	ShadowDatabase         bool `json:"shadow_database"`          // Handle shadow database patterns
+	OptimizeIndices        bool `json:"optimize_indices"`         // Optimize Prisma-generated indices
 }
 
 // NewPrismaPlugin creates a new Prisma plugin instance
@@ -32,28 +31,27 @@ func NewPrismaPlugin() *PrismaPlugin {
 	return &PrismaPlugin{
 		BasePlugin: plugins.NewBasePlugin("prisma", 75), // ORM priority
 		config: PrismaConfig{
-			Enabled:              true,
+			Enabled:                true,
 			PreserveMigrationTable: true,
-			ShadowDatabase:       true,
-			OptimizeIndices:      true,
+			ShadowDatabase:         true,
+			OptimizeIndices:        true,
 		},
 	}
 }
 
 // Detect checks if migrations contain Prisma patterns
 // Detection patterns:
-//   1. _prisma_migrations table (most reliable)
-//   2. Prisma-style timestamp directory structure (migrations/20210313140442_init/)
-//   3. Prisma schema comments (-- CreateTable, -- CreateIndex, etc.)
-//   4. Prisma-specific naming patterns (autoincrement vs SERIAL preference)
+//  1. _prisma_migrations table (most reliable)
+//  2. Prisma-style timestamp directory structure (migrations/20210313140442_init/)
+//  3. Prisma schema comments (-- CreateTable, -- CreateIndex, etc.)
+//  4. Prisma-specific naming patterns (autoincrement vs SERIAL preference)
 func (pp *PrismaPlugin) Detect(migrations []*types.Migration) bool {
 	for _, migration := range migrations {
 		filename := strings.ToLower(migration.Filename)
 
 		// Pattern 1: Migration filename contains Prisma timestamp pattern
 		// Format: YYYYMMDDHHMMSS_migration_name
-		timestampPattern := regexp.MustCompile(`\d{14}_[a-z_]+`)
-		if timestampPattern.MatchString(filename) {
+		if isPrismaTimestampPath(filename) {
 			return true
 		}
 
@@ -84,7 +82,7 @@ func (pp *PrismaPlugin) Detect(migrations []*types.Migration) bool {
 			// Pattern 4: Prisma prefers @default(autoincrement()) over SERIAL
 			// This generates: DEFAULT nextval() explicitly instead of SERIAL
 			if strings.Contains(sqlLower, "default nextval") &&
-			   strings.Contains(sqlLower, "_seq'::regclass)") {
+				strings.Contains(sqlLower, "_seq'::regclass)") {
 				return true
 			}
 
@@ -100,14 +98,14 @@ func (pp *PrismaPlugin) Detect(migrations []*types.Migration) bool {
 }
 
 // Initialize configures the Prisma plugin
-func (pp *PrismaPlugin) Initialize(ctx context.Context, config interface{}) error {
+func (pp *PrismaPlugin) Initialize(ctx context.Context, config any) error {
 	if config == nil {
 		return nil
 	}
 
 	if prismaConfig, ok := config.(PrismaConfig); ok {
 		pp.config = prismaConfig
-	} else if configMap, ok := config.(map[string]interface{}); ok {
+	} else if configMap, ok := config.(map[string]any); ok {
 		if enabled, ok := configMap["enabled"].(bool); ok {
 			pp.config.Enabled = enabled
 		}
@@ -140,12 +138,11 @@ func (pp *PrismaPlugin) EnrichStatement(ctx context.Context, stmt *types.Stateme
 	}
 
 	// Detect Prisma migration comments and extract metadata
-	commentPattern := regexp.MustCompile(`--\s*(CreateTable|CreateIndex|CreateEnum|AlterTable|AddForeignKey|DropTable)\s+(.*)`)
-	if matches := commentPattern.FindStringSubmatch(sql); len(matches) > 2 {
+	if action, target, found := extractPrismaCommentActionTarget(sql); found {
 		if stmt.Comments == nil {
 			stmt.Comments = []string{}
 		}
-		stmt.Comments = append(stmt.Comments, "Prisma: "+matches[1]+" "+matches[2])
+		stmt.Comments = append(stmt.Comments, "Prisma: "+action+" "+target)
 	}
 
 	// Mark shadow database operations
@@ -194,27 +191,29 @@ func (pp *PrismaPlugin) DetectPatterns(sql string) []plugins.Pattern {
 	}
 
 	// Pattern 2: Prisma autoincrement pattern
-	autoIncrementPattern := regexp.MustCompile(`DEFAULT nextval\('([^']+)_seq'::regclass\)`)
-	if matches := autoIncrementPattern.FindStringSubmatch(sql); len(matches) > 1 {
+	if sequenceName, found := extractNextvalSequenceName(sql); found {
 		patterns = append(patterns, plugins.Pattern{
 			Type:     plugins.PatternTypeORM,
 			Name:     "prisma_autoincrement",
 			Severity: plugins.SeverityMedium,
 			Metadata: map[string]string{
-				"sequence": matches[1] + "_seq",
+				"sequence": sequenceName,
 			},
 		})
 	}
 
 	// Pattern 3: Prisma migration comments
-	commentPattern := regexp.MustCompile(`--\s*(CreateTable|CreateIndex|CreateEnum|AlterTable)`)
-	if matches := commentPattern.FindStringSubmatch(sql); len(matches) > 1 {
+	if action, _, found := extractPrismaCommentActionTarget(sql); found {
+		if action != "CreateTable" && action != "CreateIndex" && action != "CreateEnum" && action != "AlterTable" {
+			return patterns
+		}
+
 		patterns = append(patterns, plugins.Pattern{
 			Type:     plugins.PatternTypeORM,
 			Name:     "prisma_migration_comment",
 			Severity: plugins.SeverityLow,
 			Metadata: map[string]string{
-				"action": matches[1],
+				"action": action,
 			},
 		})
 	}
@@ -272,13 +271,13 @@ func (pp *PrismaPlugin) ValidateSchema(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return errors.Wrap(err, errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"failed to check _prisma_migrations table",
-				map[string]interface{}{"table": "_prisma_migrations"})
+				map[string]any{"table": "_prisma_migrations"})
 		}
 
 		if !tableExists {
 			return errors.New(errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"_prisma_migrations table does not exist (expected for Prisma project)",
-				map[string]interface{}{"table": "_prisma_migrations"})
+				map[string]any{"table": "_prisma_migrations"})
 		}
 
 		// Verify table structure
@@ -289,14 +288,14 @@ func (pp *PrismaPlugin) ValidateSchema(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return errors.Wrap(err, errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"failed to validate _prisma_migrations structure",
-				map[string]interface{}{"table": "_prisma_migrations"})
+				map[string]any{"table": "_prisma_migrations"})
 		}
 
 		// Expected columns: id, checksum, finished_at, migration_name, logs, rolled_back_at, started_at, applied_steps_count
 		if columnCount < 7 {
 			return errors.New(errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"_prisma_migrations table has incomplete structure",
-				map[string]interface{}{
+				map[string]any{
 					"table":            "_prisma_migrations",
 					"found_columns":    columnCount,
 					"expected_columns": 7,
@@ -305,4 +304,104 @@ func (pp *PrismaPlugin) ValidateSchema(ctx context.Context, db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func isPrismaTimestampPath(path string) bool {
+	lowerPath := strings.ToLower(path)
+
+	for i := 0; i+15 < len(lowerPath); i++ {
+		if !isDigitSequence(lowerPath, i, 14) || lowerPath[i+14] != '_' {
+			continue
+		}
+
+		j := i + 15
+		hasNameChar := false
+		for j < len(lowerPath) {
+			ch := lowerPath[j]
+			if (ch >= 'a' && ch <= 'z') || ch == '_' {
+				hasNameChar = true
+				j++
+				continue
+			}
+			break
+		}
+
+		if hasNameChar {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isDigitSequence(value string, start int, length int) bool {
+	if start < 0 || start+length > len(value) {
+		return false
+	}
+
+	for i := start; i < start+length; i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+
+	return true
+}
+
+func extractNextvalSequenceName(sql string) (string, bool) {
+	lower := strings.ToLower(sql)
+	prefix := "default nextval('"
+	start := strings.Index(lower, prefix)
+	if start == -1 {
+		return "", false
+	}
+
+	start += len(prefix)
+	endMarker := "_seq'::regclass)"
+	end := strings.Index(lower[start:], endMarker)
+	if end == -1 {
+		return "", false
+	}
+
+	base := sql[start : start+end]
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "", false
+	}
+
+	return base + "_seq", true
+}
+
+var prismaCommentActions = []string{
+	"CreateTable",
+	"CreateIndex",
+	"CreateEnum",
+	"AlterTable",
+	"AddForeignKey",
+	"DropTable",
+}
+
+func extractPrismaCommentActionTarget(sql string) (string, string, bool) {
+	for line := range strings.SplitSeq(sql, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+
+		body := strings.TrimSpace(strings.TrimPrefix(trimmed, "--"))
+		for _, action := range prismaCommentActions {
+			if !strings.HasPrefix(body, action) {
+				continue
+			}
+
+			remainder := strings.TrimSpace(body[len(action):])
+			if remainder == "" {
+				return action, "", true
+			}
+
+			return action, remainder, true
+		}
+	}
+
+	return "", "", false
 }

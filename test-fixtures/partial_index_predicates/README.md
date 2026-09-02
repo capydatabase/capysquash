@@ -1,4 +1,5 @@
 # Test fixture: partial_index_predicates
+
 # Tests partial index consolidation and predicate normalization
 
 This fixture tests how pgsquash handles partial indexes with WHERE clauses:
@@ -9,10 +10,10 @@ This fixture tests how pgsquash handles partial indexes with WHERE clauses:
 
 ## Original migrations:
 
-001_create_users.sql: Creates users table with status and email
-002_create_active_idx.sql: Creates partial index on active users
-003_create_pending_idx.sql: Creates partial index on pending users
-004_create_verified_idx.sql: Creates partial index on verified users
+001_create_users.sql: Creates users table with status and email.
+002_create_active_idx.sql: Creates partial index on active users.
+003_create_pending_idx.sql: Creates partial index on pending users.
+004_create_verified_idx.sql: Creates partial index on verified users.
 
 ## Expected behavior:
 

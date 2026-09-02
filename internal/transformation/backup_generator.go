@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/patterns"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // BackupType defines the type of backup to generate
@@ -103,7 +103,14 @@ type BackupGenerator struct {
 	workDir    string
 }
 
-// NewBackupGenerator creates a new backup generator
+// NewBackupGenerator creates a new backup generator.
+//
+// The default working directory is a dedicated pgsquash-backups directory
+// under the system temp dir - never the shared temp dir itself, because
+// CleanupOldBackups glob-deletes "*backup*.sql" inside the working directory
+// and must only ever touch files pgsquash created. Callers that want backups
+// somewhere durable (e.g. <output>/.backups, as the squasher engine enforces)
+// use SetWorkingDirectory.
 func NewBackupGenerator(config *BackupConfig, db *sql.DB) *BackupGenerator {
 	if config == nil {
 		config = DefaultBackupConfig()
@@ -113,7 +120,7 @@ func NewBackupGenerator(config *BackupConfig, db *sql.DB) *BackupGenerator {
 		config:     config,
 		db:         db,
 		pgDumpPath: findPgDumpPath(),
-		workDir:    os.TempDir(),
+		workDir:    filepath.Join(os.TempDir(), "pgsquash-backups"),
 	}
 }
 
@@ -189,6 +196,18 @@ func (bg *BackupGenerator) generateBackup(ctx context.Context, dbURL, name, desc
 
 	if bg.config.Compression && bg.config.Format == SQLFormat {
 		extension += ".gz"
+	}
+
+	// Ensure the working directory exists (the default dedicated directory is
+	// created lazily; SetWorkingDirectory already created explicit ones).
+	if err := os.MkdirAll(bg.workDir, 0755); err != nil {
+		result.Error = err.Error()
+		return result, errors.NewError(
+			errors.ErrorCodeBackupGenerationFailed,
+			"failed to create backup working directory",
+			errors.SeverityError,
+			errors.CategoryBackup,
+		).WithInnerError(err)
 	}
 
 	backupPath := filepath.Join(bg.workDir, name+extension)
@@ -316,8 +335,56 @@ func (bg *BackupGenerator) buildPgDumpArgs(dbURL, outputPath string) []string {
 	return args
 }
 
+// validatePgDumpArgs validates pg_dump arguments to prevent command injection
+func validatePgDumpArgs(args []string) error {
+	if len(args) == 0 {
+		return errors.NewError(
+			errors.ErrorCodeBackupGenerationFailed,
+			"no arguments provided to pg_dump",
+			errors.SeverityError,
+			errors.CategoryBackup,
+		)
+	}
+
+	// Whitelist valid pg_dump commands
+	validCommands := map[string]bool{
+		"pg_dump":    true,
+		"pg_restore": true,
+	}
+
+	command := filepath.Base(args[0]) // Use base name to allow full paths
+	if !validCommands[command] {
+		return errors.NewError(
+			errors.ErrorCodeBackupGenerationFailed,
+			fmt.Sprintf("invalid command: %s (allowed: pg_dump, pg_restore)", command),
+			errors.SeverityError,
+			errors.CategoryBackup,
+		)
+	}
+
+	// Prevent shell metacharacters in arguments that could enable command injection
+	dangerousChars := ";&|<>`$(){}[]!#\n\r"
+	for i, arg := range args {
+		if strings.ContainsAny(arg, dangerousChars) {
+			return errors.NewError(
+				errors.ErrorCodeBackupGenerationFailed,
+				fmt.Sprintf("argument %d contains dangerous shell metacharacters: %s", i, arg),
+				errors.SeverityError,
+				errors.CategoryBackup,
+			)
+		}
+	}
+
+	return nil
+}
+
 // executePgDump runs the pg_dump command
 func (bg *BackupGenerator) executePgDump(ctx context.Context, args []string) error {
+	// Validate arguments to prevent command injection
+	if err := validatePgDumpArgs(args); err != nil {
+		return err
+	}
+
 	// Use os/exec to run pg_dump with proper context cancellation
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 
@@ -442,8 +509,13 @@ func (bg *BackupGenerator) generateRollbackForStatement(stmt types.Statement, or
 			rollback.Description = fmt.Sprintf("Recreate function %s", stmt.ObjectName)
 			rollback.SQL = fmt.Sprintf("-- Cannot automatically rollback DROP FUNCTION %s (requires backup restore)", stmt.ObjectName)
 		default:
-			rollback.Description = fmt.Sprintf("Recreate %s %s", stmt.ObjectType, stmt.ObjectName)
-			rollback.SQL = fmt.Sprintf("-- Cannot automatically rollback DROP %s %s", stmt.ObjectType, stmt.ObjectName)
+			// Handle UNKNOWN type gracefully
+			objectTypeStr := string(stmt.ObjectType)
+			if stmt.ObjectType == types.TypeUnknown || stmt.ObjectType == "" {
+				objectTypeStr = "object"
+			}
+			rollback.Description = fmt.Sprintf("Recreate %s %s", objectTypeStr, stmt.ObjectName)
+			rollback.SQL = fmt.Sprintf("-- Cannot automatically rollback DROP %s %s", objectTypeStr, stmt.ObjectName)
 		}
 
 	case types.OpAlter:
@@ -475,13 +547,17 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 	// Parse the ALTER TABLE command to extract operation type
 	sql := strings.ToUpper(strings.TrimSpace(stmt.SQL))
 	tableName := stmt.ObjectName
+	if tableName == "" {
+		tableName = extractIdentifierAfterKeywordSequence(stmt.SQL, "ALTER", "TABLE")
+	}
 
 	// Handle ADD COLUMN
 	if strings.Contains(sql, "ADD COLUMN") {
-		// Extract column name
-		matches := patterns.AddColumnPattern.FindStringSubmatch(sql)
-		if len(matches) > 1 {
-			columnName := matches[1]
+		columnName := extractIdentifierAfterKeywordSequence(stmt.SQL, "ADD", "COLUMN")
+		if columnName == "" {
+			columnName = extractIdentifierAfterKeywordSequence(stmt.SQL, "ADD", "COLUMN", "IF", "NOT", "EXISTS")
+		}
+		if columnName != "" {
 			return fmt.Sprintf("ALTER TABLE %s DROP COLUMN IF EXISTS %s;", tableName, columnName)
 		}
 		return fmt.Sprintf("-- Rollback ADD COLUMN: DROP COLUMN %s.<column_name>;", tableName)
@@ -489,9 +565,11 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 
 	// Handle DROP COLUMN
 	if strings.Contains(sql, "DROP COLUMN") {
-		matches := patterns.DropColumnBackupPattern.FindStringSubmatch(sql)
-		if len(matches) > 1 {
-			columnName := matches[1]
+		columnName := extractIdentifierAfterKeywordSequence(stmt.SQL, "DROP", "COLUMN")
+		if columnName == "" {
+			columnName = extractIdentifierAfterKeywordSequence(stmt.SQL, "DROP", "COLUMN", "IF", "EXISTS")
+		}
+		if columnName != "" {
 			return fmt.Sprintf("-- Rollback DROP COLUMN: ADD COLUMN %s (requires column definition from backup)", columnName)
 		}
 		return "-- Rollback DROP COLUMN: requires column definition from backup"
@@ -499,9 +577,8 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 
 	// Handle ADD CONSTRAINT
 	if strings.Contains(sql, "ADD CONSTRAINT") {
-		matches := patterns.AddConstraintPattern.FindStringSubmatch(sql)
-		if len(matches) > 1 {
-			constraintName := matches[1]
+		constraintName := extractIdentifierAfterKeywordSequence(stmt.SQL, "ADD", "CONSTRAINT")
+		if constraintName != "" {
 			return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s;", tableName, constraintName)
 		}
 		return fmt.Sprintf("-- Rollback ADD CONSTRAINT: DROP CONSTRAINT %s.<constraint_name>;", tableName)
@@ -509,9 +586,11 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 
 	// Handle DROP CONSTRAINT
 	if strings.Contains(sql, "DROP CONSTRAINT") {
-		matches := patterns.DropConstraintPattern.FindStringSubmatch(sql)
-		if len(matches) > 1 {
-			constraintName := matches[1]
+		constraintName := extractIdentifierAfterKeywordSequence(stmt.SQL, "DROP", "CONSTRAINT")
+		if constraintName == "" {
+			constraintName = extractIdentifierAfterKeywordSequence(stmt.SQL, "DROP", "CONSTRAINT", "IF", "EXISTS")
+		}
+		if constraintName != "" {
 			return "-- Rollback DROP CONSTRAINT " + constraintName + ": requires constraint definition from backup"
 		}
 		return "-- Rollback DROP CONSTRAINT: requires constraint definition from backup"
@@ -519,9 +598,8 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 
 	// Handle ALTER COLUMN TYPE
 	if strings.Contains(sql, "ALTER COLUMN") && strings.Contains(sql, "TYPE") {
-		matches := patterns.AlterColumnTypePattern.FindStringSubmatch(sql)
-		if len(matches) > 2 {
-			columnName := matches[1]
+		columnName := extractIdentifierAfterKeywordSequence(stmt.SQL, "ALTER", "COLUMN")
+		if columnName != "" {
 			return "-- Rollback ALTER COLUMN TYPE for " + tableName + "." + columnName + ": requires previous type from backup"
 		}
 		return "-- Rollback ALTER COLUMN TYPE: requires previous column type from backup"
@@ -529,11 +607,9 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 
 	// Handle ALTER COLUMN SET/DROP NOT NULL
 	if strings.Contains(sql, "ALTER COLUMN") && strings.Contains(sql, "NOT NULL") {
-		matches := patterns.AlterColumnNullPattern.FindStringSubmatch(sql)
-		if len(matches) > 2 {
-			columnName := matches[1]
-			operation := matches[2]
-			if operation == "SET" {
+		columnName := extractIdentifierAfterKeywordSequence(stmt.SQL, "ALTER", "COLUMN")
+		if columnName != "" {
+			if strings.Contains(sql, "SET NOT NULL") {
 				return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL;", tableName, columnName)
 			}
 			return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;", tableName, columnName)
@@ -542,11 +618,9 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 
 	// Handle ALTER COLUMN SET/DROP DEFAULT
 	if strings.Contains(sql, "ALTER COLUMN") && strings.Contains(sql, "DEFAULT") {
-		matches := patterns.AlterColumnDefaultPattern.FindStringSubmatch(sql)
-		if len(matches) > 2 {
-			columnName := matches[1]
-			operation := matches[2]
-			if operation == "SET" {
+		columnName := extractIdentifierAfterKeywordSequence(stmt.SQL, "ALTER", "COLUMN")
+		if columnName != "" {
+			if strings.Contains(sql, "SET DEFAULT") {
 				return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT;", tableName, columnName)
 			}
 			return fmt.Sprintf("-- Rollback DROP DEFAULT for %s.%s: requires previous default value from backup", tableName, columnName)
@@ -555,19 +629,17 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 
 	// Handle RENAME TABLE
 	if strings.Contains(sql, "RENAME TO") {
-		matches := patterns.RenameTablePattern.FindStringSubmatch(sql)
-		if len(matches) > 1 {
-			newName := matches[1]
+		newName := extractIdentifierAfterKeywordSequence(stmt.SQL, "RENAME", "TO")
+		if newName != "" {
 			return fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", newName, tableName)
 		}
 	}
 
 	// Handle RENAME COLUMN
 	if strings.Contains(sql, "RENAME COLUMN") {
-		matches := patterns.RenameColumnPattern.FindStringSubmatch(sql)
-		if len(matches) > 2 {
-			oldName := matches[1]
-			newName := matches[2]
+		oldName := extractIdentifierAfterKeywordSequence(stmt.SQL, "RENAME", "COLUMN")
+		newName := extractIdentifierAfterKeywordSequence(stmt.SQL, "TO")
+		if oldName != "" && newName != "" {
 			return fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s;", tableName, newName, oldName)
 		}
 	}
@@ -580,15 +652,13 @@ func (bg *BackupGenerator) generateAlterTableRollback(stmt types.Statement) stri
 	// Handle ENABLE/DISABLE TRIGGER
 	if strings.Contains(sql, "TRIGGER") {
 		if strings.Contains(sql, "ENABLE") {
-			matches := patterns.EnableTriggerPattern.FindStringSubmatch(sql)
-			if len(matches) > 1 {
-				triggerName := matches[1]
+			triggerName := extractIdentifierAfterKeywordSequence(stmt.SQL, "ENABLE", "TRIGGER")
+			if triggerName != "" {
 				return fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER %s;", tableName, triggerName)
 			}
 		} else if strings.Contains(sql, "DISABLE") {
-			matches := patterns.DisableTriggerPattern.FindStringSubmatch(sql)
-			if len(matches) > 1 {
-				triggerName := matches[1]
+			triggerName := extractIdentifierAfterKeywordSequence(stmt.SQL, "DISABLE", "TRIGGER")
+			if triggerName != "" {
 				return fmt.Sprintf("ALTER TABLE %s ENABLE TRIGGER %s;", tableName, triggerName)
 			}
 		}
@@ -603,6 +673,59 @@ func (bg *BackupGenerator) generateInsertRollback(stmt types.Statement) string {
 	// For INSERT statements, we could generate DELETE statements
 	// This would require parsing the INSERT to extract the data
 	return fmt.Sprintf("-- DELETE rollback for INSERT into %s (implement based on INSERT values)", stmt.ObjectName)
+}
+
+func extractIdentifierAfterKeywordSequence(sql string, keywords ...string) string {
+	if strings.TrimSpace(sql) == "" || len(keywords) == 0 {
+		return ""
+	}
+
+	tokens := tokenizeSQLIdentifiers(sql)
+	if len(tokens) == 0 {
+		return ""
+	}
+
+	for i := range tokens {
+		index := i
+		matched := true
+		for _, keyword := range keywords {
+			if index >= len(tokens) || !strings.EqualFold(tokens[index], keyword) {
+				matched = false
+				break
+			}
+			index++
+		}
+
+		if !matched || index >= len(tokens) {
+			continue
+		}
+
+		candidate := strings.TrimSpace(tokens[index])
+		if candidate == "" || strings.EqualFold(candidate, "IF") {
+			continue
+		}
+
+		return candidate
+	}
+
+	return ""
+}
+
+func tokenizeSQLIdentifiers(sql string) []string {
+	raw := strings.FieldsFunc(sql, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.')
+	})
+
+	tokens := make([]string, 0, len(raw))
+	for _, token := range raw {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		tokens = append(tokens, token)
+	}
+
+	return tokens
 }
 
 // ValidateBackup verifies that a backup can be restored
@@ -707,7 +830,9 @@ func (bg *BackupGenerator) CleanupOldBackups(maxAge time.Duration, maxCount int)
 	var remainingFiles []fileInfo
 	for _, info := range fileInfos {
 		if info.modTime.Before(cutoff) {
-			_ = os.Remove(info.path)
+			if err := os.Remove(info.path); err != nil {
+				utils.GetDefaultLogger().Warn("Failed to remove old backup %s: %v", info.path, err)
+			}
 		} else {
 			remainingFiles = append(remainingFiles, info)
 		}
@@ -726,7 +851,9 @@ func (bg *BackupGenerator) CleanupOldBackups(maxAge time.Duration, maxCount int)
 
 		// Remove files beyond maxCount
 		for i := maxCount; i < len(remainingFiles); i++ {
-			_ = os.Remove(remainingFiles[i].path)
+			if err := os.Remove(remainingFiles[i].path); err != nil {
+				utils.GetDefaultLogger().Warn("Failed to remove old backup %s: %v", remainingFiles[i].path, err)
+			}
 		}
 	}
 

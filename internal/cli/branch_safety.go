@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/fatih/color"
@@ -36,12 +37,7 @@ func (bsc *BranchSafetyChecker) GetCurrentBranch() (string, error) {
 // IsProtectedBranch checks if the branch is a protected branch
 func (bsc *BranchSafetyChecker) IsProtectedBranch(branch string) bool {
 	branchLower := strings.ToLower(branch)
-	for _, protected := range bsc.protectedBranches {
-		if branchLower == protected {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(bsc.protectedBranches, branchLower)
 }
 
 // CheckBranchSafety checks if it's safe to squash and prompts user if needed
@@ -94,7 +90,7 @@ func (bsc *BranchSafetyChecker) promptUserForConfirmation(currentBranch string) 
 `, currentBranch))
 
 	fmt.Print("\nDo you want to continue? [yes/NO]: ")
-	
+
 	reader := bufio.NewReader(os.Stdin)
 	response, err := reader.ReadString('\n')
 	if err != nil {
@@ -112,10 +108,10 @@ func (bsc *BranchSafetyChecker) promptUserForConfirmation(currentBranch string) 
 // FormatBranchWarning formats a warning message about branch safety
 func (bsc *BranchSafetyChecker) FormatBranchWarning(currentBranch string) string {
 	isProtected := bsc.IsProtectedBranch(currentBranch)
-	
+
 	if isProtected {
 		return color.GreenString("✓ On protected branch: %s", currentBranch)
 	}
-	
+
 	return color.YellowString("⚠️  On non-protected branch: %s (consider squashing on main/master)", currentBranch)
 }

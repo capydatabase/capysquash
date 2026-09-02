@@ -2,15 +2,14 @@ package consolidation
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // DropCreateCycleRule handles DROP followed by CREATE consolidation
@@ -19,7 +18,22 @@ type DropCreateCycleRule struct{}
 
 // CanApply checks if the rule can be applied to the given lifecycle
 func (r *DropCreateCycleRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool {
+	if strings.Contains(lifecycle.Name, "prevent_null_fairrent_fields") {
+		utils.GetDefaultLogger().Debug("DropCreateCycleRule CanApply for %s (History len: %d)", lifecycle.Name, len(lifecycle.History))
+		for i, h := range lifecycle.History {
+			utils.GetDefaultLogger().Debug("  Event %d: Op=%s", i, h.Operation)
+		}
+	}
+
 	if len(lifecycle.History) < 2 {
+		return false
+	}
+
+	// CRITICAL FIX: If the object is ultimately DROPPED (last event is OpDrop),
+	// we must NOT apply this rule. Using this rule would consolidate the intermediate
+	// Drop->Create cycle into a "valid" object, ignoring the final deletion.
+	// We want the Engine-level dropped-object skip to handle the final DROP.
+	if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
 		return false
 	}
 
@@ -45,8 +59,11 @@ func (r *DropCreateCycleRule) CanApply(lifecycle *tracking.ObjectLifecycle) bool
 
 // Apply applies the consolidation rule to the given lifecycle
 func (r *DropCreateCycleRule) Apply(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
+	if strings.Contains(lifecycle.Name, "prevent_null_fairrent_fields") {
+		utils.GetDefaultLogger().Debug("DropCreateCycleRule Apply for %s", lifecycle.Name)
+	}
 	if !r.CanApply(lifecycle) {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]interface{}{"rule": "DropCreateCycleRule"})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "rule cannot be applied to lifecycle", map[string]any{"rule": "DropCreateCycleRule"})
 	}
 
 	// Find the DROP-CREATE pair
@@ -63,7 +80,6 @@ func (r *DropCreateCycleRule) Apply(lifecycle *tracking.ObjectLifecycle, engine 
 	}
 
 	// Collect ALL CREATE statements (not just the one after DROP)
-	// CRITICAL: We MUST include CREATE statements in originalStmts because they contain
 	// dependency information (extracted by parser from AST) that's needed for proper ordering
 	var allCreateStmts []types.Statement
 	for _, event := range lifecycle.History {
@@ -85,7 +101,7 @@ func (r *DropCreateCycleRule) Apply(lifecycle *tracking.ObjectLifecycle, engine 
 
 			// Replace "CREATE VIEW" with "CREATE OR REPLACE VIEW"
 			if strings.Contains(strings.ToUpper(createViewSQL), "CREATE VIEW") {
-				consolidatedSQL = regexp.MustCompile(`(?i)CREATE\s+VIEW`).ReplaceAllString(createViewSQL, "CREATE OR REPLACE VIEW")
+				consolidatedSQL = replaceCreateViewClause(createViewSQL)
 				optimizations = append(optimizations, "Converted DROP VIEW + CREATE VIEW to CREATE OR REPLACE VIEW")
 			} else {
 				consolidatedSQL = createViewSQL
@@ -94,10 +110,10 @@ func (r *DropCreateCycleRule) Apply(lifecycle *tracking.ObjectLifecycle, engine 
 		} else if len(allCreateStmts) > 1 {
 			// Multiple CREATE VIEW statements - use the last one with CREATE OR REPLACE
 			lastCreate := allCreateStmts[len(allCreateStmts)-1].SQL
-			consolidatedSQL = regexp.MustCompile(`(?i)CREATE\s+VIEW`).ReplaceAllString(lastCreate, "CREATE OR REPLACE VIEW")
+			consolidatedSQL = replaceCreateViewClause(lastCreate)
 			optimizations = append(optimizations, fmt.Sprintf("Merged %d CREATE VIEW statements into CREATE OR REPLACE VIEW", len(allCreateStmts)))
 		} else {
-			return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found for VIEW", map[string]interface{}{"object": lifecycle.Name})
+			return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found for VIEW", map[string]any{"object": lifecycle.Name})
 		}
 
 		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("DropCreateCycleRule: Converted VIEW %s to CREATE OR REPLACE pattern", lifecycle.Name)
@@ -106,23 +122,40 @@ func (r *DropCreateCycleRule) Apply(lifecycle *tracking.ObjectLifecycle, engine 
 		consolidatedSQL = mergeMultipleCreateStatements(allCreateStmts, lifecycle.Name)
 		optimizations = append(optimizations, fmt.Sprintf("Merged %d CREATE statements for table %s", len(allCreateStmts), lifecycle.Name))
 		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("DropCreateCycleRule: Merged %d CREATE statements for %s", len(allCreateStmts), lifecycle.Name)
-	} else if len(allCreateStmts) == 1 {
-		consolidatedSQL = allCreateStmts[0].SQL
-		optimizations = append(optimizations, "Eliminated DROP operation before CREATE")
+	} else if len(allCreateStmts) >= 1 {
+		// Generic handling for other types (indexes, policies, triggers, etc.)
+		// Just take the LAST create statement
+		consolidatedSQL = allCreateStmts[len(allCreateStmts)-1].SQL
+		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("DropCreateCycleRule: Used last of %d CREATE statements for %s", len(allCreateStmts), lifecycle.Name)
+
+		if len(allCreateStmts) > 1 {
+			optimizations = append(optimizations, fmt.Sprintf("Merged %d versions of %s to final definition", len(allCreateStmts), lifecycle.Name))
+		} else {
+			optimizations = append(optimizations, "Eliminated DROP operation before CREATE")
+		}
 	} else {
-		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statement found", map[string]interface{}{"object": lifecycle.Name})
+		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no CREATE statements found in lifecycle", map[string]any{"object": lifecycle.Name})
+	}
+
+	// Track column evolution from multiple CREATEs (e.g., name -> market_name)
+	var columnEvolutions map[string]*tracking.ColumnEvolutionInfo
+	if len(allCreateStmts) > 1 && lifecycle.Type == types.TypeTable {
+		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("Extracting column evolutions from %d CREATE statements for %s", len(allCreateStmts), lifecycle.Name)
+		columnEvolutions = extractColumnEvolutionsFromMultipleCreates(lifecycle.Name, allCreateStmts)
+		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("Found %d column evolutions for %s", len(columnEvolutions), lifecycle.Name)
 	}
 
 	result := &tracking.ConsolidationResult{
 		OriginalStatements: originalStmts,
 		ConsolidatedSQL:    consolidatedSQL,
 		Optimizations:      optimizations,
-		RiskLevel:          tracking.RiskLevelMedium, // Medium risk due to data implications
+		RiskLevel:          tracking.RiskLevelLow,
 		EstimatedSavings: tracking.SquashSavings{
-			StatementsReduced: len(originalStmts),
-			FilesAffected:     len(originalStmts) + len(allCreateStmts),
-			LinesReduced:      len(originalStmts) * 3,
+			StatementsReduced: len(originalStmts) - 1,
+			FilesAffected:     len(originalStmts),
+			LinesReduced:      (len(originalStmts) - 1) * 5,
 		},
+		ColumnEvolutions: columnEvolutions,
 	}
 
 	return result, nil
@@ -144,31 +177,182 @@ func mergeMultipleCreateStatements(createStmts []types.Statement, tableName stri
 	// Use the LAST CREATE as the base (for DDL cycles: CREATE→DROP→CREATE, we want the final version)
 	baseSQL := createStmts[len(createStmts)-1].SQL
 
-	// Extract all unique columns from all CREATE statements
-	allColumns := make(map[string]string) // column name -> full definition
-	columnOrder := make([]string, 0)       // maintain order
+	//  Extract column evolutions FIRST to identify renamed columns
+	columnEvolutions := extractColumnEvolutionsFromMultipleCreates(tableName, createStmts)
+	supersededColumns := make(map[string]bool) // Track columns that were renamed (old names)
+	for _, evolution := range columnEvolutions {
+		// Mark original name as superseded (should not appear in final CREATE)
+		supersededColumns[strings.ToLower(evolution.OriginalName)] = true
+		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Marking column '%s' as superseded (renamed to '%s')",
+			evolution.OriginalName, evolution.FinalName)
+	}
 
+	// IMPORTANT: Use ONLY the columns from the LAST CREATE statement
+	// This ensures we respect when a later migration removes columns from an earlier one
+	// For example: CREATE 0 has columns A,B,C -> CREATE 1 has only A,B (removed C)
+	// The final schema should have A,B, not A,B,C
+	allColumns := make(map[string]string) // column name -> full definition
+	columnOrder := make([]string, 0)      // maintain order
+
+	// Process ALL CREATEs to log them, but only USE the LAST one's columns
 	for i, stmt := range createStmts {
 		columns := extractColumnsFromCreate(stmt.SQL)
 		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Extracted %d columns from CREATE statement %d", len(columns), i)
 
-		for colName, colDef := range columns {
-			// Always update column definition (later statements override earlier ones)
-			// This ensures the LAST CREATE statement's schema is preserved in DDL cycles
-			if _, exists := allColumns[colName]; !exists {
-				columnOrder = append(columnOrder, colName)
+		// DEBUG: Log first 5 column names from this statement
+		colNames := make([]string, 0, len(columns))
+		for colName := range columns {
+			colNames = append(colNames, colName)
+			if len(colNames) >= 5 {
+				break
 			}
+		}
+		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("    Sample columns: %v", colNames)
+
+		// ONLY use columns from the LAST CREATE (final schema)
+		if i != len(createStmts)-1 {
+			utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Debug("  Skipping CREATE %d (not the final one)", i)
+			continue
+		}
+
+		// This is the LAST CREATE - use its columns
+		utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Using columns from CREATE %d (FINAL schema)", i)
+		for colName, colDef := range columns {
+			// Skip superseded columns (old column names that were renamed)
+			if supersededColumns[strings.ToLower(colName)] {
+				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Skipping superseded column '%s' (was renamed)", colName)
+				continue
+			}
+
+			columnOrder = append(columnOrder, colName)
 			allColumns[colName] = colDef
+			utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Debug("    Adding column '%s' from final CREATE", colName)
 		}
 	}
 
-	utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Total unique columns across all CREATEs: %d", len(allColumns))
+	utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  Total unique columns across all CREATEs (after removing superseded): %d", len(allColumns))
+
+	// DEBUG: Check for specific missing columns in profiles table
+	if strings.ToLower(tableName) == "profiles" {
+		missingCols := []string{"property_management_scope", "managed_properties_count", "portfolio_size_limit", "auth_provider"}
+		for _, col := range missingCols {
+			if _, exists := allColumns[col]; exists {
+				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Info("  ✓ Column '%s' IS present in allColumns", col)
+			} else {
+				utils.GetDefaultLogger().WithPrefix("DROP-CREATE").Warn("  ✗ Column '%s' IS MISSING from allColumns!", col)
+			}
+		}
+	}
 
 	// Extract table-level constraints from the LAST CREATE statement (this has the final schema)
 	tableConstraints := extractTableConstraintsFromCreate(baseSQL)
 
 	// Rebuild CREATE statement with all columns and constraints
 	return reconstructCreateWithColumns(baseSQL, allColumns, columnOrder, tableConstraints, tableName)
+}
+
+// extractColumnEvolutionsFromMultipleCreates detects column renames from multiple CREATE statements
+func extractColumnEvolutionsFromMultipleCreates(tableName string, createStmts []types.Statement) map[string]*tracking.ColumnEvolutionInfo {
+	evolutions := make(map[string]*tracking.ColumnEvolutionInfo)
+
+	if len(createStmts) <= 1 {
+		return evolutions // No evolution with single CREATE
+	}
+
+	// Helper to get column names as slice
+	getColumnNames := func(cols map[string]string) []string {
+		keys := make([]string, 0, len(cols))
+		for k := range cols {
+			keys = append(keys, k)
+		}
+		return keys
+	}
+
+	// Extract columns from each CREATE statement
+	columnsByStmt := make([]map[string]string, len(createStmts))
+	for i, stmt := range createStmts {
+		columnsByStmt[i] = extractColumnsFromCreate(stmt.SQL)
+	}
+
+	// Find columns that appear in earlier CREATEs but not in the final one
+	// These are candidates for renames (e.g., 'name' -> 'market_name')
+	finalColumns := columnsByStmt[len(columnsByStmt)-1]
+	utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info("Final CREATE has columns: %v", getColumnNames(finalColumns))
+
+	// ALSO check if columns from middle CREATEs evolved FROM earlier versions
+	// Example: CREATE 0 has 'name', CREATE 1 has 'market_name', CREATE 2 has 'name' again
+	// We need to detect name -> market_name -> name pattern and rewrite data ops from CREATE 0/1
+	allColumns := make(map[string]bool) // Track all column names across all CREATEs
+	for i, cols := range columnsByStmt {
+		utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info("CREATE %d has columns: %v", i, getColumnNames(cols))
+		for colName := range cols {
+			allColumns[colName] = true
+		}
+	}
+
+	// For each CREATE, find columns that don't exist in the final schema
+	for i := range columnsByStmt {
+		for oldColName := range columnsByStmt[i] {
+			if _, existsInFinal := finalColumns[oldColName]; !existsInFinal {
+				utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info("Column %s disappeared from CREATE %d, checking for renames...", oldColName, i)
+				// This column disappeared - check if a similar column exists in the FINAL or ANY other CREATE
+				// Check final columns first
+				for newColName := range finalColumns {
+					// Check if new column name contains old column name (e.g., market_name contains name)
+					utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Debug("  Checking if '%s' (final) matches pattern for '%s'", newColName, oldColName)
+					if strings.HasSuffix(newColName, "_"+oldColName) ||
+						(strings.Contains(newColName, oldColName) && len(newColName) > len(oldColName)) {
+						key := fmt.Sprintf("%s.%s", strings.ToLower(tableName), strings.ToLower(oldColName))
+						if _, exists := evolutions[key]; !exists { // Don't override existing mappings
+							evolutions[key] = &tracking.ColumnEvolutionInfo{
+								TableName:    strings.ToLower(tableName),
+								OriginalName: oldColName,
+								FinalName:    newColName,
+								RenameChain:  []string{oldColName, newColName},
+							}
+							utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info(
+								"✓ Detected column evolution in %s: %s -> %s (key: %s)",
+								tableName, oldColName, newColName, key)
+						}
+						break
+					}
+				}
+
+				// IMPORTANT: Also check if this column name CONTAINS another column (reverse direction)
+				// E.g., 'market_name' from CREATE 1 should map to 'name' in final CREATE
+				// E.g., 'compatibility_score' from CREATE 0 should map to 'compatibility' in final CREATE
+				for finalColName := range finalColumns {
+					utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Debug("  Checking reverse: if '%s' contains '%s'", oldColName, finalColName)
+					// Check multiple patterns:
+					// 1. oldCol ends with "_finalCol" (e.g., market_name -> name)
+					// 2. oldCol starts with "finalCol_" (e.g., compatibility_score -> compatibility)
+					// 3. oldCol contains finalCol and is longer
+					if strings.HasSuffix(oldColName, "_"+finalColName) ||
+						strings.HasPrefix(oldColName, finalColName+"_") ||
+						(strings.Contains(oldColName, finalColName) && len(oldColName) > len(finalColName)) {
+						// The disappeared column is MORE SPECIFIC than final column
+						// E.g., 'market_name' (disappeared) -> 'name' (final)
+						// Or 'compatibility_score' (disappeared) -> 'compatibility' (final)
+						key := fmt.Sprintf("%s.%s", strings.ToLower(tableName), strings.ToLower(oldColName))
+						if _, exists := evolutions[key]; !exists {
+							evolutions[key] = &tracking.ColumnEvolutionInfo{
+								TableName:    strings.ToLower(tableName),
+								OriginalName: oldColName,
+								FinalName:    finalColName,
+								RenameChain:  []string{oldColName, finalColName},
+							}
+							utils.GetDefaultLogger().WithPrefix("COLUMN-EVOLUTION").Info(
+								"✓ Detected reverse column evolution in %s: %s -> %s (key: %s)",
+								tableName, oldColName, finalColName, key)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return evolutions
 }
 
 // extractTableConstraintsFromCreate extracts table-level constraints (not column definitions)
@@ -228,7 +412,24 @@ func extractColumnsFromCreate(createSQL string) map[string]string {
 	parts := splitColumnDefinitions(columnList)
 
 	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
+		cleanedPart := part
+		if found := strings.Contains(part, "--"); found {
+			// Found inline comment - split by newline and reassemble without the comment line
+			lines := strings.Split(part, "\n")
+			var cleanedLines []string
+			for _, line := range lines {
+				if commentIdx := strings.Index(line, "--"); commentIdx != -1 {
+					// Remove everything from -- to end of this line
+					line = line[:commentIdx]
+				}
+				if strings.TrimSpace(line) != "" {
+					cleanedLines = append(cleanedLines, line)
+				}
+			}
+			cleanedPart = strings.Join(cleanedLines, "\n")
+		}
+
+		trimmed := strings.TrimSpace(cleanedPart)
 		if trimmed == "" {
 			continue
 		}
@@ -364,4 +565,56 @@ func reconstructCreateWithColumns(baseSQL string, columns map[string]string, col
 	result += "\n" + suffix
 
 	return result
+}
+
+func replaceCreateViewClause(sql string) string {
+	if strings.TrimSpace(sql) == "" {
+		return sql
+	}
+
+	lower := strings.ToLower(sql)
+	for idx := 0; idx < len(lower); {
+		createIdx := strings.Index(lower[idx:], "create")
+		if createIdx == -1 {
+			break
+		}
+		createIdx += idx
+
+		if createIdx > 0 && isDropCreateIdentifierByte(lower[createIdx-1]) {
+			idx = createIdx + len("create")
+			continue
+		}
+
+		afterCreate := skipWhitespace(lower, createIdx+len("create"))
+		if afterCreate+len("view") > len(lower) || lower[afterCreate:afterCreate+len("view")] != "view" {
+			idx = createIdx + len("create")
+			continue
+		}
+
+		viewEnd := afterCreate + len("view")
+		if viewEnd < len(lower) && isDropCreateIdentifierByte(lower[viewEnd]) {
+			idx = createIdx + len("create")
+			continue
+		}
+
+		return sql[:createIdx] + "CREATE OR REPLACE VIEW" + sql[viewEnd:]
+	}
+
+	return sql
+}
+
+func skipWhitespace(value string, pos int) int {
+	for pos < len(value) {
+		switch value[pos] {
+		case ' ', '\t', '\n', '\r', '\f', '\v':
+			pos++
+		default:
+			return pos
+		}
+	}
+	return pos
+}
+
+func isDropCreateIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_'
 }

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // ModernPatternRule defines optimization rules for modern PostgreSQL patterns
@@ -201,7 +201,7 @@ func consolidateJWTV2OrgPolicies(statements []*types.Statement) []*types.Stateme
 	for _, stmt := range statements {
 		// Check for JWT-based org policies (generic pattern, plugins set specific strings)
 		if stmt.ObjectType == types.TypePolicy &&
-		   (stmt.AuthPattern == types.AuthPatternJWT || strings.Contains(string(stmt.AuthPattern), "jwt")) {
+			(stmt.AuthPattern == types.AuthPatternJWT || strings.Contains(string(stmt.AuthPattern), "jwt")) {
 			// Extract table name from policy
 			tableName := extractPolicyTable(stmt.SQL)
 			key := fmt.Sprintf("%s_org_policy", tableName)
@@ -290,8 +290,8 @@ func consolidateAuthFunctions(statements []*types.Statement) []*types.Statement 
 	for _, stmt := range statements {
 		// Check for JWT-based auth functions (generic pattern, plugins set specific strings)
 		if stmt.ObjectType == types.TypeFunction &&
-		   (stmt.AuthPattern == types.AuthPatternJWT || strings.Contains(string(stmt.AuthPattern), "jwt") ||
-		    strings.Contains(string(stmt.AuthPattern), "auth")) {
+			(stmt.AuthPattern == types.AuthPatternJWT || strings.Contains(string(stmt.AuthPattern), "jwt") ||
+				strings.Contains(string(stmt.AuthPattern), "auth")) {
 			// Use function signature as key
 			funcSig := extractFunctionSignature(stmt)
 			funcGroups[funcSig] = append(funcGroups[funcSig], stmt)
@@ -362,9 +362,9 @@ func extractFunctionSignature(stmt *types.Statement) string {
 	sql := strings.ToUpper(stmt.SQL)
 	if strings.Contains(sql, "CREATE FUNCTION") || strings.Contains(sql, "CREATE OR REPLACE FUNCTION") {
 		// Find the function name and parameters
-		start := strings.Index(sql, "FUNCTION")
-		if start != -1 {
-			remaining := sql[start+8:] // Skip "FUNCTION"
+		_, after, ok := strings.Cut(sql, "FUNCTION")
+		if ok {
+			remaining := after // Skip "FUNCTION"
 			parenStart := strings.Index(remaining, "(")
 			if parenStart != -1 {
 				parenEnd := strings.Index(remaining, ")")
@@ -459,41 +459,6 @@ func createConsolidatedStoragePolicy(policies []*types.Statement, bucketName str
 }
 
 // New consolidation functions for modern PostgreSQL patterns
-
-// consolidateAuth0Policies consolidates Auth0 authentication policies
-//
-//nolint:unused // Reserved for future Auth0 pattern consolidation
-func consolidateAuth0Policies(statements []*types.Statement) []*types.Statement {
-	if len(statements) <= 1 {
-		return statements
-	}
-
-	// Group by table and policy type
-	policyGroups := make(map[string][]*types.Statement)
-
-	for _, stmt := range statements {
-		// Check for JWT-based policies (Auth0 would be detected as JWT pattern)
-		if stmt.ObjectType == types.TypePolicy &&
-		   (stmt.AuthPattern == types.AuthPatternJWT || strings.Contains(string(stmt.AuthPattern), "auth0")) {
-			tableName := extractPolicyTable(stmt.SQL)
-			key := fmt.Sprintf("%s_auth0_policy", tableName)
-			policyGroups[key] = append(policyGroups[key], stmt)
-		}
-	}
-
-	var consolidated []*types.Statement
-
-	for groupKey, policies := range policyGroups {
-		if len(policies) > 1 {
-			consolidatedPolicy := createConsolidatedAuth0Policy(policies, groupKey)
-			consolidated = append(consolidated, consolidatedPolicy)
-		} else {
-			consolidated = append(consolidated, policies...)
-		}
-	}
-
-	return consolidated
-}
 
 // consolidateNextAuthPolicies consolidates NextAuth session management policies
 func consolidateNextAuthPolicies(statements []*types.Statement) []*types.Statement {
@@ -646,45 +611,6 @@ func consolidateEventSourcing(statements []*types.Statement) []*types.Statement 
 }
 
 // Helper functions for new consolidation patterns
-
-//nolint:unused // Reserved for future Auth0 pattern consolidation
-func createConsolidatedAuth0Policy(policies []*types.Statement, groupKey string) *types.Statement {
-	// Use the auth pattern from the first policy (will be vendor-specific string from plugin)
-	authPattern := types.AuthPatternJWT
-	if len(policies) > 0 && policies[0].AuthPattern != "" {
-		authPattern = policies[0].AuthPattern
-	}
-
-	consolidated := &types.Statement{
-		ObjectType:  types.TypePolicy,
-		ObjectName:  groupKey + "_consolidated",
-		Operation:   types.OpCreate,
-		AuthPattern: authPattern,
-		Comments:    []string{fmt.Sprintf("Consolidated %d Auth0 policies", len(policies))},
-	}
-
-	tableName := extractPolicyTable(policies[0].SQL)
-	consolidated.SQL = fmt.Sprintf(`CREATE POLICY "%s_comprehensive_auth0_access" ON %s
-  FOR ALL TO authenticated
-  USING (
-    -- User owns the record
-    user_id = auth.jwt()->>'sub'
-    OR
-    -- User has admin role in Auth0
-    auth.jwt()->>'https://myapp.com/role' = 'admin'
-    OR
-    -- Custom Auth0 claim check
-    auth.jwt()->'https://myapp.com/permissions' ? 'read:all'
-  )
-  WITH CHECK (
-    -- Same logic for modifications
-    user_id = auth.jwt()->>'sub'
-    OR auth.jwt()->>'https://myapp.com/role' = 'admin'
-    OR auth.jwt()->'https://myapp.com/permissions' ? 'write:all'
-  );`, consolidated.ObjectName, tableName)
-
-	return consolidated
-}
 
 func createConsolidatedNextAuthPolicy(statements []*types.Statement, table string) *types.Statement {
 	// Use the auth pattern from the first statement (will be vendor-specific string from plugin)

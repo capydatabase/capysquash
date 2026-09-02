@@ -2,6 +2,10 @@
 // This avoids import cycles between parser, plugins, tracking, and other packages.
 package types
 
+import (
+	pg_query "github.com/pganalyze/pg_query_go/v6"
+)
+
 // Migration represents a parsed migration file with metadata and statements
 type Migration struct {
 	Filename    string      // Migration filename
@@ -17,21 +21,23 @@ type Migration struct {
 // In practice, this is typically *pg_query.ParseResult from the parser package.
 // Plugins and other packages should use SQL and metadata fields instead of ParseTree.
 type Statement struct {
-	SQL          string         // Original SQL text
-	ParseTree    interface{}    // Parse tree (kept as interface{} to avoid pg_query dependency)
-	ObjectType   ObjectType     // Type of database object (TABLE, INDEX, FUNCTION, etc.)
-	ObjectName   string         // Name of the object being operated on
-	Operation    Operation      // SQL operation (CREATE, ALTER, DROP, etc.)
-	Line         int            // Line number in migration file
-	IsDataOp     bool           // Whether this is a data operation (INSERT, UPDATE, DELETE)
-	Category     Category       // Statement category for organization
-	Dependencies []string       // Object dependencies (foreign keys, function calls, etc.)
-	Comments     []string       // Associated SQL comments
-	Schema       string         // Schema name (defaults to "public")
-	CrossSchema  []CrossSchemaRef // Cross-schema references
-	AuthPattern  AuthPatternType  // Detected authentication pattern
-	IsDynamic    bool           // Whether SQL contains dynamic elements
-	IfNotExists  bool           // Whether statement uses IF NOT EXISTS clause
+	SQL          string                // Original SQL text
+	ParseTree    *pg_query.ParseResult // Parse tree containing the raw AST
+	Filename     string                // Source filename for this statement
+	ObjectType   ObjectType            // Type of database object (TABLE, INDEX, FUNCTION, etc.)
+	ObjectName   string                // Name of the object being operated on
+	Operation    Operation             // SQL operation (CREATE, ALTER, DROP, etc.)
+	Line         int                   // Line number in migration file
+	Column       int                   // Column number in migration file
+	IsDataOp     bool                  // Whether this is a data operation (INSERT, UPDATE, DELETE)
+	Category     Category              // Statement category for organization
+	Dependencies []string              // Object dependencies (foreign keys, function calls, etc.)
+	Comments     []string              // Associated SQL comments
+	Schema       string                // Schema name (defaults to "public")
+	CrossSchema  []CrossSchemaRef      // Cross-schema references
+	AuthPattern  AuthPatternType       // Detected authentication pattern
+	IsDynamic    bool                  // Whether SQL contains dynamic elements
+	IfNotExists  bool                  // Whether statement uses IF NOT EXISTS clause
 
 	// GRANT/REVOKE specific fields
 	Grantees   []string // Users/roles receiving permissions
@@ -39,6 +45,9 @@ type Statement struct {
 
 	// ALTER TYPE specific fields
 	AlterTypeNewValue string // New ENUM value being added via ALTER TYPE ADD VALUE
+
+	// Index specific fields
+	IndexHadExplicitAccessMethod bool // Whether CREATE INDEX had explicit USING clause
 
 	// Statement metadata for transaction and lock analysis
 	Metadata StatementMetadata
@@ -72,15 +81,15 @@ type StatementMetadata struct {
 type LockLevel string
 
 const (
-	LockNone                  LockLevel = "NONE"                     // No lock required
-	LockAccessShare           LockLevel = "ACCESS_SHARE"             // SELECT
-	LockRowShare              LockLevel = "ROW_SHARE"                // SELECT FOR UPDATE/SHARE
-	LockRowExclusive          LockLevel = "ROW_EXCLUSIVE"            // INSERT, UPDATE, DELETE
-	LockShareUpdateExclusive  LockLevel = "SHARE_UPDATE_EXCLUSIVE"   // VACUUM, CREATE INDEX CONCURRENTLY
-	LockShare                 LockLevel = "SHARE"                    // CREATE INDEX (non-concurrent)
-	LockShareRowExclusive     LockLevel = "SHARE_ROW_EXCLUSIVE"      // Rare, some ALTER TABLE
-	LockExclusive             LockLevel = "EXCLUSIVE"                // REFRESH MATERIALIZED VIEW CONCURRENTLY
-	LockAccessExclusive       LockLevel = "ACCESS_EXCLUSIVE"         // Most DDL, TRUNCATE, VACUUM FULL
+	LockNone                 LockLevel = "NONE"                   // No lock required
+	LockAccessShare          LockLevel = "ACCESS_SHARE"           // SELECT
+	LockRowShare             LockLevel = "ROW_SHARE"              // SELECT FOR UPDATE/SHARE
+	LockRowExclusive         LockLevel = "ROW_EXCLUSIVE"          // INSERT, UPDATE, DELETE
+	LockShareUpdateExclusive LockLevel = "SHARE_UPDATE_EXCLUSIVE" // VACUUM, CREATE INDEX CONCURRENTLY
+	LockShare                LockLevel = "SHARE"                  // CREATE INDEX (non-concurrent)
+	LockShareRowExclusive    LockLevel = "SHARE_ROW_EXCLUSIVE"    // Rare, some ALTER TABLE
+	LockExclusive            LockLevel = "EXCLUSIVE"              // REFRESH MATERIALIZED VIEW CONCURRENTLY
+	LockAccessExclusive      LockLevel = "ACCESS_EXCLUSIVE"       // Most DDL, TRUNCATE, VACUUM FULL
 )
 
 // ExecutionTimeCategory estimates how long a statement might take
@@ -112,16 +121,17 @@ const (
 	TypePublication     ObjectType = "PUBLICATION"
 	TypeComment         ObjectType = "COMMENT"
 	TypeDoBlock         ObjectType = "DO_BLOCK"
-	TypeType            ObjectType = "TYPE"              // CREATE TYPE statements (enums, composites, domains)
-	TypeDomain          ObjectType = "DOMAIN"            // CREATE DOMAIN statements
-	TypeEnum            ObjectType = "ENUM"              // CREATE TYPE ... AS ENUM statements
-	TypeComposite       ObjectType = "COMPOSITE"         // CREATE TYPE ... AS (composite types)
-	TypeSubscription    ObjectType = "SUBSCRIPTION"      // PostgreSQL 15+
-	TypeStatistic       ObjectType = "STATISTIC"         // PostgreSQL 15+
-	TypeGeneratedColumn ObjectType = "GENERATED_COLUMN"  // PostgreSQL 15+
-	TypeMultirangeType  ObjectType = "MULTIRANGE_TYPE"   // PostgreSQL 14+
-	TypeVectorIndex     ObjectType = "VECTOR_INDEX"      // pgvector extension
-	TypeEventTrigger    ObjectType = "EVENT_TRIGGER"     // PostgreSQL 17+
+	TypeType            ObjectType = "TYPE"             // CREATE TYPE statements (enums, composites, domains)
+	TypeDomain          ObjectType = "DOMAIN"           // CREATE DOMAIN statements
+	TypeEnum            ObjectType = "ENUM"             // CREATE TYPE ... AS ENUM statements
+	TypeComposite       ObjectType = "COMPOSITE"        // CREATE TYPE ... AS (composite types)
+	TypeSubscription    ObjectType = "SUBSCRIPTION"     // PostgreSQL 15+
+	TypeStatistic       ObjectType = "STATISTIC"        // PostgreSQL 15+
+	TypeGeneratedColumn ObjectType = "GENERATED_COLUMN" // PostgreSQL 15+
+	TypeMultirangeType  ObjectType = "MULTIRANGE_TYPE"  // PostgreSQL 14+
+	TypeVectorIndex     ObjectType = "VECTOR_INDEX"     // pgvector extension
+	TypeEventTrigger    ObjectType = "EVENT_TRIGGER"    // PostgreSQL 17+
+	TypeData            ObjectType = "DATA"             // Data operations (INSERT, UPDATE, DELETE)
 	TypeUnknown         ObjectType = "UNKNOWN"
 )
 
@@ -137,7 +147,7 @@ type CrossSchemaRef struct {
 // The parser delegates auth pattern detection to the plugin layer.
 type AuthPatternType string
 
-// Generic auth pattern categories (for backward compatibility and filtering)
+// Generic auth pattern categories used when filtering generic auth rules.
 const (
 	AuthPatternNone    AuthPatternType = ""
 	AuthPatternRLS     AuthPatternType = "RLS_POLICY"     // Row-Level Security policies

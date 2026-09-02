@@ -6,12 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"regexp"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/plugins"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // DrizzlePlugin implements Drizzle ORM integration
@@ -43,19 +42,18 @@ func NewDrizzlePlugin() *DrizzlePlugin {
 
 // Detect checks if migrations contain Drizzle patterns
 // Detection patterns:
-//   1. GENERATED ALWAYS AS IDENTITY (Drizzle's preferred pattern)
-//   2. __drizzle_migrations metadata table
-//   3. Drizzle folder structure (drizzle/TIMESTAMP_name/)
-//   4. snapshot.json metadata files
-//   5. Drizzle-specific SQL comments
+//  1. GENERATED ALWAYS AS IDENTITY (Drizzle's preferred pattern)
+//  2. __drizzle_migrations metadata table
+//  3. Drizzle folder structure (drizzle/TIMESTAMP_name/)
+//  4. snapshot.json metadata files
+//  5. Drizzle-specific SQL comments
 func (dp *DrizzlePlugin) Detect(migrations []*types.Migration) bool {
 	for _, migration := range migrations {
 		filename := strings.ToLower(migration.Filename)
 
 		// Pattern 1: Drizzle timestamp directory pattern
 		// Format: drizzle/20242409125510_premium_mister_fear/migration.sql
-		drizzlePattern := regexp.MustCompile(`drizzle/\d{14}_[a-z_]+`)
-		if drizzlePattern.MatchString(filename) {
+		if isDrizzleTimestampPath(filename) {
 			return true
 		}
 
@@ -81,8 +79,12 @@ func (dp *DrizzlePlugin) Detect(migrations []*types.Migration) bool {
 
 			// Pattern 5: Drizzle-style sequence naming
 			// Drizzle: table_column_seq format with IDENTITY
-			identitySeqPattern := regexp.MustCompile(`(?i)GENERATED\s+(ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY\s*\(\s*sequence\s+name\s+"[^"]+_seq"`)
-			if identitySeqPattern.MatchString(sql) {
+			sqlUpper := strings.ToUpper(sql)
+			if (containsKeywordSequenceCI(sqlUpper, []string{"GENERATED", "ALWAYS", "AS", "IDENTITY"}) ||
+				containsKeywordSequenceCI(sqlUpper, []string{"GENERATED", "BY", "DEFAULT", "AS", "IDENTITY"})) &&
+				strings.Contains(sqlUpper, "SEQUENCE") &&
+				strings.Contains(sqlUpper, "NAME") &&
+				strings.Contains(sqlLower, "_seq\"") {
 				return true
 			}
 
@@ -98,14 +100,14 @@ func (dp *DrizzlePlugin) Detect(migrations []*types.Migration) bool {
 }
 
 // Initialize configures the Drizzle plugin
-func (dp *DrizzlePlugin) Initialize(ctx context.Context, config interface{}) error {
+func (dp *DrizzlePlugin) Initialize(ctx context.Context, config any) error {
 	if config == nil {
 		return nil
 	}
 
 	if drizzleConfig, ok := config.(DrizzleConfig); ok {
 		dp.config = drizzleConfig
-	} else if configMap, ok := config.(map[string]interface{}); ok {
+	} else if configMap, ok := config.(map[string]any); ok {
 		if enabled, ok := configMap["enabled"].(bool); ok {
 			dp.config.Enabled = enabled
 		}
@@ -158,8 +160,8 @@ func (dp *DrizzlePlugin) EnrichStatement(ctx context.Context, stmt *types.Statem
 
 // hasIdentityColumn checks if SQL uses IDENTITY columns
 func (dp *DrizzlePlugin) hasIdentityColumn(sql string) bool {
-	identityPattern := regexp.MustCompile(`(?i)GENERATED\s+(ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY`)
-	return identityPattern.MatchString(sql)
+	return containsKeywordSequenceCI(sql, []string{"GENERATED", "ALWAYS", "AS", "IDENTITY"}) ||
+		containsKeywordSequenceCI(sql, []string{"GENERATED", "BY", "DEFAULT", "AS", "IDENTITY"})
 }
 
 // DetectPatterns analyzes SQL for Drizzle-specific patterns
@@ -167,14 +169,13 @@ func (dp *DrizzlePlugin) DetectPatterns(sql string) []plugins.Pattern {
 	var patterns []plugins.Pattern
 
 	// Pattern 1: IDENTITY columns
-	identityPattern := regexp.MustCompile(`(?i)(GENERATED\s+(ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY\s*\([^)]+\))`)
-	if matches := identityPattern.FindStringSubmatch(sql); len(matches) > 0 {
+	if identityType, found := dp.ExtractIdentityType(sql); found {
 		patterns = append(patterns, plugins.Pattern{
 			Type:     plugins.PatternTypeORM,
 			Name:     "drizzle_identity_column",
 			Severity: plugins.SeverityHigh,
 			Metadata: map[string]string{
-				"type": strings.ToUpper(matches[2]),
+				"type": strings.ToUpper(identityType),
 			},
 		})
 	}
@@ -192,8 +193,10 @@ func (dp *DrizzlePlugin) DetectPatterns(sql string) []plugins.Pattern {
 	}
 
 	// Pattern 3: Generated columns
-	generatedPattern := regexp.MustCompile(`(?i)GENERATED\s+ALWAYS\s+AS\s+\([^)]+\)\s+STORED`)
-	if generatedPattern.MatchString(sql) {
+	sqlUpper := strings.ToUpper(sql)
+	if containsKeywordSequenceCI(sqlUpper, []string{"GENERATED", "ALWAYS", "AS"}) &&
+		strings.Contains(sqlUpper, "STORED") &&
+		strings.Contains(sql, "(") {
 		patterns = append(patterns, plugins.Pattern{
 			Type:     plugins.PatternTypeORM,
 			Name:     "drizzle_generated_column",
@@ -213,8 +216,8 @@ func (dp *DrizzlePlugin) GetConflictingPlugins() []string {
 // GetRequiredExtensions returns PostgreSQL extensions required by Drizzle
 func (dp *DrizzlePlugin) GetRequiredExtensions() []string {
 	return []string{
-		"uuid-ossp",  // For UUID generation
-		"pgcrypto",   // For gen_random_uuid()
+		"uuid-ossp", // For UUID generation
+		"pgcrypto",  // For gen_random_uuid()
 	}
 }
 
@@ -252,13 +255,13 @@ func (dp *DrizzlePlugin) ValidateSchema(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return errors.Wrap(err, errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"failed to check __drizzle_migrations table",
-				map[string]interface{}{"table": "__drizzle_migrations"})
+				map[string]any{"table": "__drizzle_migrations"})
 		}
 
 		if !tableExists {
 			return errors.New(errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"__drizzle_migrations table does not exist (expected for Drizzle project)",
-				map[string]interface{}{"table": "__drizzle_migrations"})
+				map[string]any{"table": "__drizzle_migrations"})
 		}
 
 		// Verify table structure
@@ -269,14 +272,14 @@ func (dp *DrizzlePlugin) ValidateSchema(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return errors.Wrap(err, errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"failed to validate __drizzle_migrations structure",
-				map[string]interface{}{"table": "__drizzle_migrations"})
+				map[string]any{"table": "__drizzle_migrations"})
 		}
 
 		// Expected columns: id, hash, created_at
 		if columnCount < 3 {
 			return errors.New(errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"__drizzle_migrations table has incomplete structure",
-				map[string]interface{}{
+				map[string]any{
 					"table":            "__drizzle_migrations",
 					"found_columns":    columnCount,
 					"expected_columns": 3,
@@ -296,7 +299,7 @@ func (dp *DrizzlePlugin) ValidateSchema(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return errors.Wrap(err, errors.ErrorCodeValidationFailed, errors.CategoryValidation,
 				"failed to check IDENTITY columns",
-				map[string]interface{}{"operation": "check_identity_columns"})
+				map[string]any{"operation": "check_identity_columns"})
 		}
 
 		if identityColumnCount == 0 {
@@ -306,4 +309,31 @@ func (dp *DrizzlePlugin) ValidateSchema(ctx context.Context, db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func isDrizzleTimestampPath(path string) bool {
+	lowerPath := strings.ToLower(path)
+	_, after, ok := strings.Cut(lowerPath, "drizzle/")
+	if !ok {
+		return false
+	}
+
+	segment := after
+	underscore := strings.Index(segment, "_")
+	if underscore <= 0 {
+		return false
+	}
+
+	timestamp := segment[:underscore]
+	if len(timestamp) != 14 {
+		return false
+	}
+
+	for i := 0; i < len(timestamp); i++ {
+		if timestamp[i] < '0' || timestamp[i] > '9' {
+			return false
+		}
+	}
+
+	return true
 }

@@ -74,8 +74,8 @@ package rules
 //   - Various plugin-specific optimizations
 
 import (
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking/consolidation"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/internal/tracking/consolidation"
 )
 
 // Re-export types from internal package
@@ -163,122 +163,6 @@ var (
 //   GetApplicableRules(lifecycle *ObjectLifecycle) []*RegisteredRule
 //   GetStats() RegistryStats
 //   Clear()
-
-// Example usage patterns
-
-// ExampleListAllRules demonstrates listing all rules
-func ExampleListAllRules() {
-	registry := GetRegistry()
-
-	allRules := registry.GetAllRules()
-	for _, rule := range allRules {
-		// Access rule metadata
-		_ = rule.Metadata.Name
-		_ = rule.Metadata.Description
-		_ = rule.Metadata.Category
-		_ = rule.Metadata.Priority
-		_ = rule.Metadata.Enabled
-	}
-}
-
-// ExampleEnableDisableRules demonstrates enabling and disabling rules
-func ExampleEnableDisableRules() {
-	registry := GetRegistry()
-
-	// Enable a rule
-	err := registry.EnableRule("create_alter_consolidation")
-	if err != nil {
-		panic(err)
-	}
-
-	// Disable a rule
-	err = registry.DisableRule("dead_code_removal")
-	if err != nil {
-		panic(err)
-	}
-}
-
-// ExampleFilterByCategory demonstrates category filtering
-func ExampleFilterByCategory() {
-	registry := GetRegistry()
-
-	// Get all table operation rules
-	tableRules := registry.GetRulesByCategory(CategoryTableOps)
-	for _, rule := range tableRules {
-		_ = rule.Metadata.Name
-	}
-
-	// Get all security rules
-	securityRules := registry.GetRulesByCategory(CategorySecurity)
-	for _, rule := range securityRules {
-		_ = rule.Metadata.Name
-	}
-}
-
-// ExampleBulkOperations demonstrates bulk enable/disable
-func ExampleBulkOperations() {
-	registry := GetRegistry()
-
-	// Enable all rules in a category
-	tableRules := registry.GetRulesByCategory(CategoryTableOps)
-	for _, rule := range tableRules {
-		if err := registry.EnableRule(rule.Metadata.Name); err != nil {
-			// Handle error
-		}
-	}
-
-	// Disable all aggressive rules
-	aggressiveRules := registry.GetRulesByTag("aggressive")
-	for _, rule := range aggressiveRules {
-		if err := registry.DisableRule(rule.Metadata.Name); err != nil {
-			// Handle error
-		}
-	}
-}
-
-// ExampleRegistryStats demonstrates getting registry statistics
-func ExampleRegistryStats() {
-	registry := GetRegistry()
-
-	stats := registry.GetStats()
-
-	// Total counts
-	_ = stats.TotalRules
-	_ = stats.EnabledRules
-	_ = stats.DisabledRules
-
-	// By category
-	for category, count := range stats.RulesByCategory {
-		_ = category
-		_ = count
-	}
-
-	// By provider
-	for provider, count := range stats.RulesByProvider {
-		_ = provider
-		_ = count
-	}
-}
-
-// ExampleRuleMetadata demonstrates accessing rule metadata
-func ExampleRuleMetadata() {
-	registry := GetRegistry()
-
-	rule, err := registry.GetRule("create_alter_consolidation")
-	if err != nil {
-		panic(err)
-	}
-
-	// Access metadata
-	_ = rule.Metadata.Name        // "create_alter_consolidation"
-	_ = rule.Metadata.Description // Human-readable description
-	_ = rule.Metadata.Category    // CategoryTableOps
-	_ = rule.Metadata.Priority    // Higher = executed first
-	_ = rule.Metadata.Provider    // "core", "supabase", etc.
-	_ = rule.Metadata.Tags        // ["safe", "standard"]
-	_ = rule.Metadata.Enabled     // true/false
-	_ = rule.Metadata.Version     // "1.0.0"
-}
 
 // CategoryNames returns human-readable names for all categories
 func CategoryNames() map[RuleCategory]string {

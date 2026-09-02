@@ -38,7 +38,7 @@
   "validation": {
     "enabled": ${PGSQUASH_AUTO_VALIDATE},
     "docker_enabled": ${PGSQUASH_DOCKER_ENABLED},
-    "postgresql_versions": ["17", "15", "14"],
+    "postgresql_versions": ["17", "16", "15", "18"],
     "validation_approach": "two_databases",
     "timeout_minutes": 10,
     "parallel_validation": true,

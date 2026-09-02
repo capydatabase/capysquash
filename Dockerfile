@@ -3,15 +3,15 @@
 # ======================================================================
 
 # Build arguments
-ARG GO_VERSION=1.25.3
+ARG GO_VERSION=1.26.5
 ARG BUILD_VERSION=dev
 ARG BUILD_DATE
 ARG GIT_COMMIT
 
 # Build stage
 
-# Alternative: golang:1.25.3 (Debian) works fine for building
-FROM ubuntu:noble AS builder
+# Alternative: golang:1.26.4 (Debian) works fine for building
+FROM ubuntu:resolute AS builder
 
 # Re-declare ARGs for this stage
 ARG GO_VERSION
@@ -64,7 +64,7 @@ RUN CGO_ENABLED=1 go build \
     -o pgsquash ./cmd/pgsquash
 
 # Runtime stage
-FROM ubuntu:noble AS runtime
+FROM ubuntu:resolute AS runtime
 
 # Re-declare build metadata for labels
 ARG BUILD_VERSION

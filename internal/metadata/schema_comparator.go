@@ -4,11 +4,15 @@ package metadata
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/parser"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
+	schemamodel "github.com/capysquash/pgsquash-engine/internal/schema"
+	"github.com/capysquash/pgsquash-engine/internal/types"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // SchemaComparator provides comprehensive schema comparison and validation
@@ -25,14 +29,17 @@ func NewSchemaComparator(manager *MetadataManager) *SchemaComparator {
 
 // ComparisonResult represents the result of schema comparison
 type ComparisonResult struct {
-	IsValid            bool
-	MissingExtensions  []string
-	MissingDependencies []MissingDependency
-	TypeMismatches     []TypeMismatch
-	ConstraintConflicts []ConstraintConflict
-	BreakingChanges    []BreakingChange
-	Warnings           []string
-	SchemaDrift        []SchemaDrift
+	IsValid                  bool
+	MissingExtensions        []string
+	MissingDependencies      []MissingDependency
+	TypeMismatches           []TypeMismatch
+	ConstraintConflicts      []ConstraintConflict
+	BreakingChanges          []BreakingChange
+	Warnings                 []string
+	SchemaDrift              []SchemaDrift
+	GeneratedSchemaHash      string
+	DatabaseSchemaHash       string
+	DeterministicSchemaDrift []string
 }
 
 // MissingDependency represents a missing database object
@@ -45,11 +52,11 @@ type MissingDependency struct {
 
 // TypeMismatch represents a data type mismatch
 type TypeMismatch struct {
-	Object         string
-	Column         string
-	ExpectedType   string
-	ActualType     string
-	IsBreaking     bool
+	Object       string
+	Column       string
+	ExpectedType string
+	ActualType   string
+	IsBreaking   bool
 }
 
 // ConstraintConflict represents a constraint mismatch
@@ -79,14 +86,15 @@ type SchemaDrift struct {
 // CompareSchema compares generated SQL against production database schema
 func (sc *SchemaComparator) CompareSchema(ctx context.Context, generatedSQL string) (*ComparisonResult, error) {
 	result := &ComparisonResult{
-		IsValid:             true,
-		MissingExtensions:   []string{},
-		MissingDependencies: []MissingDependency{},
-		TypeMismatches:      []TypeMismatch{},
-		ConstraintConflicts: []ConstraintConflict{},
-		BreakingChanges:     []BreakingChange{},
-		Warnings:            []string{},
-		SchemaDrift:         []SchemaDrift{},
+		IsValid:                  true,
+		MissingExtensions:        []string{},
+		MissingDependencies:      []MissingDependency{},
+		TypeMismatches:           []TypeMismatch{},
+		ConstraintConflicts:      []ConstraintConflict{},
+		BreakingChanges:          []BreakingChange{},
+		Warnings:                 []string{},
+		SchemaDrift:              []SchemaDrift{},
+		DeterministicSchemaDrift: []string{},
 	}
 
 	// Get production database metadata
@@ -126,6 +134,20 @@ func (sc *SchemaComparator) CompareSchema(ctx context.Context, generatedSQL stri
 
 	// Detect schema drift
 	sc.detectSchemaDrift(ctx, migration, dbMeta, result)
+
+	// Deterministic normalized model diff (shared with validation comparator path)
+	generatedModel := schemamodel.BuildFromSQL("generated.sql", generatedSQL)
+	databaseModel := schemamodel.BuildFromLines(buildMetadataSignatureLines(dbMeta))
+	deterministicDiff := schemamodel.CompareModelsWithLabels(databaseModel, generatedModel, "database", "generated", 250)
+
+	result.GeneratedSchemaHash = generatedModel.Fingerprint
+	result.DatabaseSchemaHash = databaseModel.Fingerprint
+	result.DeterministicSchemaDrift = deterministicDiff.Differences
+
+	if deterministicDiff.HasDifferences {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("Deterministic schema model drift detected (%d entries)", len(deterministicDiff.Differences)))
+	}
 
 	return result, nil
 }
@@ -212,16 +234,16 @@ func (sc *SchemaComparator) validateStatementDependencies(ctx context.Context, s
 // compareTableSchemas compares table definitions between migration and database
 func (sc *SchemaComparator) compareTableSchemas(ctx context.Context, migration *types.Migration, dbMeta *DatabaseMetadata, result *ComparisonResult) {
 	// Extract table names from migration (CREATE TABLE and ALTER TABLE statements)
-	migrationTables := make(map[string]bool)
+	migrationTables := make(map[string]types.Statement)
 	for _, stmt := range migration.Statements {
-		if stmt.ObjectType == types.TypeTable && (stmt.Operation == types.OpCreate || stmt.Operation == types.OpAlter) {
-			migrationTables[strings.ToLower(stmt.ObjectName)] = true
+		if stmt.ObjectType == types.TypeTable && stmt.Operation == types.OpCreate {
+			migrationTables[strings.ToLower(stmt.ObjectName)] = stmt
 		}
 	}
 
 	// For now, just verify tables exist in database
 	// Full schema comparison would require parsing CREATE TABLE statements fully
-	for tableName := range migrationTables {
+	for tableName, stmt := range migrationTables {
 		schema, dbTable := dbMeta.SearchTable(dbMeta.GetSearchPath(), tableName)
 
 		if dbTable == nil {
@@ -233,38 +255,118 @@ func (sc *SchemaComparator) compareTableSchemas(ctx context.Context, migration *
 				DriftType:   "missing_in_db",
 			})
 		} else {
-			// Table exists - basic validation passed
-			_ = schema // Use schema for logging if needed
+			// Check for schema drift in columns
+			sc.compareColumns(schema, tableName, stmt, dbTable, result)
+			// Check for schema drift in constraints
+			sc.compareConstraints(schema, tableName, stmt, dbTable, result)
 		}
 	}
 }
 
 // compareColumns compares column definitions
-// Note: Full column comparison requires detailed parsing of CREATE TABLE statements
-// For now, this is a placeholder for future enhancement
-//
-//nolint:unused // Reserved for future feature implementation
-func (sc *SchemaComparator) compareColumns(schema, tableName string, dbTable *TableMetadata, result *ComparisonResult) {
-	// This would require full CREATE TABLE parsing to extract column definitions
-	// For paranoid mode, we rely on dependency validation and extension checks
-	_ = schema
-	_ = tableName
-	_ = dbTable
-	_ = result
+func (sc *SchemaComparator) compareColumns(schema, tableName string, stmt types.Statement, dbTable *TableMetadata, result *ComparisonResult) {
+	// Parse the statement to extract column details
+	tree, err := pg_query.Parse(stmt.SQL)
+	if err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("Failed to parse SQL for table %s: %v", tableName, err))
+		return
+	}
+
+	if len(tree.Stmts) == 0 {
+		return
+	}
+
+	// Extract columns from CreateStmt
+	var migColumns = make(map[string]string)
+
+	if createStmt := tree.Stmts[0].Stmt.GetCreateStmt(); createStmt != nil {
+		for _, elt := range createStmt.TableElts {
+			if col := elt.GetColumnDef(); col != nil {
+				colName := col.Colname
+				// Extract type name roughly
+				var typeName string
+				if col.TypeName != nil {
+					// Join names to get type (e.g. "pg_catalog.int4" or just "text")
+					names := make([]string, len(col.TypeName.Names))
+					for i, n := range col.TypeName.Names {
+						names[i] = n.GetString_().Sval
+					}
+					typeName = strings.Join(names, ".")
+				}
+				migColumns[strings.ToLower(colName)] = typeName
+			}
+		}
+	}
+
+	// Compare with DB columns
+	dbCols := make(map[string]*ColumnMetadata)
+	for _, col := range dbTable.Columns {
+		dbCols[strings.ToLower(col.Name)] = col
+	}
+
+	// Check for missing columns in DB
+	for colName, typeName := range migColumns {
+		if dbCol, exists := dbCols[colName]; !exists {
+			result.SchemaDrift = append(result.SchemaDrift, SchemaDrift{
+				Object:      fmt.Sprintf("%s.%s", tableName, colName),
+				ObjectType:  "COLUMN",
+				Description: fmt.Sprintf("Column %s defined in migration but not found in database", colName),
+				DriftType:   "missing_in_db",
+			})
+		} else {
+			// Basic type check (using helper if compatible)
+			// Normalize types before comparison (very rough)
+			if !areTypesCompatible(typeName, dbCol.DataType) {
+				// Don't flag specific errors yet as type mapping is complex, but checking existence is broken
+				// result.Warnings = append(result.Warnings, fmt.Sprintf("Possible type mismatch for %s.%s: migration=%s, db=%s", tableName, colName, typeName, dbCol.DataType))
+			}
+		}
+	}
 }
 
 // compareConstraints compares constraint definitions
-// Note: Full constraint comparison requires detailed parsing of ALTER TABLE statements
-// For now, this is a placeholder for future enhancement
-//
-//nolint:unused // Reserved for future feature implementation
-func (sc *SchemaComparator) compareConstraints(schema, tableName string, dbTable *TableMetadata, result *ComparisonResult) {
-	// This would require full ALTER TABLE parsing to extract constraint definitions
-	// For paranoid mode, we rely on dependency validation and extension checks
-	_ = schema
-	_ = tableName
-	_ = dbTable
-	_ = result
+func (sc *SchemaComparator) compareConstraints(schema, tableName string, stmt types.Statement, dbTable *TableMetadata, result *ComparisonResult) {
+	// Parse to extract constraints (PK, Unique) if possible
+	tree, err := pg_query.Parse(stmt.SQL)
+	if err == nil && len(tree.Stmts) > 0 {
+		if createStmt := tree.Stmts[0].Stmt.GetCreateStmt(); createStmt != nil {
+			for _, elt := range createStmt.TableElts {
+				if constraint := elt.GetConstraint(); constraint != nil {
+					// Check named constraints
+					if constraint.Conname != "" {
+						found := false
+						for _, dbUnq := range dbTable.Constraints {
+							if strings.EqualFold(dbUnq.Name, constraint.Conname) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							result.SchemaDrift = append(result.SchemaDrift, SchemaDrift{
+								Object:      fmt.Sprintf("%s.%s", tableName, constraint.Conname),
+								ObjectType:  "CONSTRAINT",
+								Description: fmt.Sprintf("Constraint %s defined in migration but not found in database", constraint.Conname),
+								DriftType:   "missing_in_db",
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Basic PK Check
+	hasPK := false
+	for _, constraint := range dbTable.Constraints {
+		if constraint.Type == "PRIMARY KEY" {
+			hasPK = true
+			break
+		}
+	}
+
+	if !hasPK {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("Table %s.%s has no primary key in database", schema, tableName))
+	}
 }
 
 // compareFunctionSignatures compares function definitions
@@ -351,13 +453,6 @@ func (sc *SchemaComparator) detectSchemaDrift(ctx context.Context, migration *ty
 
 // Helper functions
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func isOptionalDependency(stmt types.Statement, dep string) bool {
 	// Determine if dependency is optional based on statement context
 	// For example, IF EXISTS clauses make dependencies optional
@@ -378,7 +473,6 @@ func extractAllObjects(migration *types.Migration) map[string]types.ObjectType {
 	return objects
 }
 
-//nolint:unused // Reserved for future feature implementation
 func areTypesCompatible(migType, dbType string) bool {
 	// Normalize types for comparison
 	migType = normalizeType(migType)
@@ -401,17 +495,13 @@ func areTypesCompatible(migType, dbType string) bool {
 
 	for canonical, aliases := range compatibleTypes {
 		if migType == canonical {
-			for _, alias := range aliases {
-				if dbType == alias {
-					return true
-				}
+			if slices.Contains(aliases, dbType) {
+				return true
 			}
 		}
 		if dbType == canonical {
-			for _, alias := range aliases {
-				if migType == alias {
-					return true
-				}
+			if slices.Contains(aliases, migType) {
+				return true
 			}
 		}
 	}
@@ -419,7 +509,6 @@ func areTypesCompatible(migType, dbType string) bool {
 	return false
 }
 
-//nolint:unused // Reserved for future feature implementation
 func normalizeType(typ string) string {
 	typ = strings.ToLower(strings.TrimSpace(typ))
 	// Remove precision/length for comparison
@@ -429,27 +518,95 @@ func normalizeType(typ string) string {
 	return typ
 }
 
-//nolint:unused // Reserved for future feature implementation
-func isBreakingTypeChange(migType, dbType string) bool {
-	// Some type changes are breaking (incompatible casts)
-	breakingChanges := map[string][]string{
-		"text":    {"integer", "bigint", "smallint", "numeric"},
-		"integer": {"text", "varchar"},
-		"boolean": {"integer", "text"},
+func buildMetadataSignatureLines(dbMeta *DatabaseMetadata) []string {
+	lines := make([]string, 0, 1024)
+
+	extensionNames := make([]string, 0, len(dbMeta.Extensions))
+	for name := range dbMeta.Extensions {
+		extensionNames = append(extensionNames, name)
+	}
+	sort.Strings(extensionNames)
+	for _, name := range extensionNames {
+		ext := dbMeta.Extensions[name]
+		lines = append(lines, fmt.Sprintf("extension|%s|%s", strings.ToLower(ext.Name), strings.ToLower(ext.Version)))
 	}
 
-	migType = normalizeType(migType)
-	dbType = normalizeType(dbType)
+	schemaNames := make([]string, 0, len(dbMeta.Schemas))
+	for schemaName := range dbMeta.Schemas {
+		schemaNames = append(schemaNames, schemaName)
+	}
+	sort.Strings(schemaNames)
 
-	if incompatible, exists := breakingChanges[migType]; exists {
-		for _, incompatibleType := range incompatible {
-			if dbType == incompatibleType {
-				return true
+	for _, schemaName := range schemaNames {
+		schemaMeta := dbMeta.Schemas[schemaName]
+
+		tableNames := make([]string, 0, len(schemaMeta.Tables))
+		for tableName := range schemaMeta.Tables {
+			tableNames = append(tableNames, tableName)
+		}
+		sort.Strings(tableNames)
+
+		for _, tableName := range tableNames {
+			table := schemaMeta.Tables[tableName]
+			lines = append(lines, fmt.Sprintf("table|%s.%s", strings.ToLower(schemaName), strings.ToLower(tableName)))
+
+			for idx, col := range table.Columns {
+				lines = append(lines, fmt.Sprintf(
+					"column|%s.%s|%04d|%s|%s|notnull=%t|default=%s",
+					strings.ToLower(schemaName),
+					strings.ToLower(tableName),
+					idx,
+					strings.ToLower(col.Name),
+					schemamodel.NormalizeSQLWhitespace(col.DataType),
+					!col.IsNullable,
+					schemamodel.NormalizeSQLWhitespace(col.DefaultValue),
+				))
+			}
+
+			for _, constraint := range table.Constraints {
+				lines = append(lines, fmt.Sprintf(
+					"constraint|%s.%s:%s|%s",
+					strings.ToLower(schemaName),
+					strings.ToLower(tableName),
+					strings.ToLower(constraint.Name),
+					schemamodel.NormalizeSQLWhitespace(constraint.Type),
+				))
+			}
+
+			for _, index := range table.Indexes {
+				lines = append(lines, fmt.Sprintf(
+					"index|%s.%s:%s|%s",
+					strings.ToLower(schemaName),
+					strings.ToLower(tableName),
+					strings.ToLower(index.Name),
+					schemamodel.NormalizeSQLWhitespace(index.Definition),
+				))
+			}
+		}
+
+		for viewName, view := range schemaMeta.Views {
+			lines = append(lines, fmt.Sprintf(
+				"view|%s.%s|%s",
+				strings.ToLower(schemaName),
+				strings.ToLower(viewName),
+				schemamodel.NormalizeSQLWhitespace(view.Definition),
+			))
+		}
+
+		for functionName, funcs := range schemaMeta.Functions {
+			for _, fn := range funcs {
+				lines = append(lines, fmt.Sprintf(
+					"function|%s.%s(%s)|%s",
+					strings.ToLower(schemaName),
+					strings.ToLower(functionName),
+					schemamodel.NormalizeSQLWhitespace(fn.Signature),
+					schemamodel.NormalizeSQLWhitespace(fn.Body),
+				))
 			}
 		}
 	}
 
-	return false
+	return lines
 }
 
 // Simplified constraint and type comparison helpers

@@ -10,9 +10,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // SquashMap represents the complete mapping of a squash operation
@@ -220,42 +221,42 @@ func LoadSquashMap(filePath string) (*SquashMap, error) {
 
 // FormatSquashMap formats the squash map for human-readable display
 func (sm *SquashMap) FormatSquashMap() string {
-	var output string
+	var output strings.Builder
 
-	output += "=== Squash Map ===\n\n"
-	output += fmt.Sprintf("Version:      %s\n", sm.Version)
-	output += fmt.Sprintf("Timestamp:    %s\n", sm.Timestamp.Format(time.RFC3339))
-	output += fmt.Sprintf("Safety Mode:  %s\n", sm.SafetyMode)
-	output += fmt.Sprintf("PG Version:   %s\n", sm.PGVersion)
-	output += fmt.Sprintf("Extensions:   %v\n", sm.Extensions)
-	output += fmt.Sprintf("Content Hash: %s\n\n", sm.ContentHash)
+	output.WriteString("=== Squash Map ===\n\n")
+	output.WriteString(fmt.Sprintf("Version:      %s\n", sm.Version))
+	output.WriteString(fmt.Sprintf("Timestamp:    %s\n", sm.Timestamp.Format(time.RFC3339)))
+	output.WriteString(fmt.Sprintf("Safety Mode:  %s\n", sm.SafetyMode))
+	output.WriteString(fmt.Sprintf("PG Version:   %s\n", sm.PGVersion))
+	output.WriteString(fmt.Sprintf("Extensions:   %v\n", sm.Extensions))
+	output.WriteString(fmt.Sprintf("Content Hash: %s\n\n", sm.ContentHash))
 
-	output += "=== Input/Output ===\n\n"
-	output += fmt.Sprintf("Input Files:  %d\n", len(sm.Inputs))
+	output.WriteString("=== Input/Output ===\n\n")
+	output.WriteString(fmt.Sprintf("Input Files:  %d\n", len(sm.Inputs)))
 	for _, input := range sm.Inputs {
-		output += fmt.Sprintf("  - %s\n", input)
+		output.WriteString(fmt.Sprintf("  - %s\n", input))
 	}
 
-	output += fmt.Sprintf("\nOutput Files: %d\n", len(sm.Outputs))
+	output.WriteString(fmt.Sprintf("\nOutput Files: %d\n", len(sm.Outputs)))
 	for _, out := range sm.Outputs {
-		output += fmt.Sprintf("  - %s\n", out)
+		output.WriteString(fmt.Sprintf("  - %s\n", out))
 	}
 
-	output += "\n=== Statistics ===\n\n"
-	output += fmt.Sprintf("Original Statements:     %d\n", sm.Stats.OriginalStatements)
-	output += fmt.Sprintf("Consolidated Statements: %d\n", sm.Stats.ConsolidatedStatements)
-	output += fmt.Sprintf("Reduction Rate:          %.2f%%\n", sm.Stats.ReductionRate)
-	output += fmt.Sprintf("Files Processed:         %d\n", sm.Stats.FilesProcessed)
-	output += fmt.Sprintf("Files Generated:         %d\n", sm.Stats.FilesGenerated)
+	output.WriteString("\n=== Statistics ===\n\n")
+	output.WriteString(fmt.Sprintf("Original Statements:     %d\n", sm.Stats.OriginalStatements))
+	output.WriteString(fmt.Sprintf("Consolidated Statements: %d\n", sm.Stats.ConsolidatedStatements))
+	output.WriteString(fmt.Sprintf("Reduction Rate:          %.2f%%\n", sm.Stats.ReductionRate))
+	output.WriteString(fmt.Sprintf("Files Processed:         %d\n", sm.Stats.FilesProcessed))
+	output.WriteString(fmt.Sprintf("Files Generated:         %d\n", sm.Stats.FilesGenerated))
 
 	if len(sm.Warnings) > 0 {
-		output += "\n=== Warnings ===\n\n"
+		output.WriteString("\n=== Warnings ===\n\n")
 		for i, warning := range sm.Warnings {
-			output += fmt.Sprintf("%d. %s\n", i+1, warning)
+			output.WriteString(fmt.Sprintf("%d. %s\n", i+1, warning))
 		}
 	}
 
-	return output
+	return output.String()
 }
 
 // VerifyContentHash verifies the content hash matches the squashed output

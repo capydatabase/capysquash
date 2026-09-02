@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // RollbackPlan represents a complete rollback strategy
@@ -53,15 +53,15 @@ const (
 
 // RollbackExecution tracks the execution of a rollback plan
 type RollbackExecution struct {
-	PlanID        string                 `json:"plan_id"`
-	StartedAt     time.Time              `json:"started_at"`
-	CompletedAt   *time.Time             `json:"completed_at,omitempty"`
-	Status        RollbackStatus         `json:"status"`
-	Progress      int                    `json:"progress"` // Percentage
-	CurrentScript int                    `json:"current_script"`
-	Results       []*ScriptResult        `json:"results"`
-	Error         string                 `json:"error,omitempty"`
-	Context       map[string]interface{} `json:"context"`
+	PlanID        string          `json:"plan_id"`
+	StartedAt     time.Time       `json:"started_at"`
+	CompletedAt   *time.Time      `json:"completed_at,omitempty"`
+	Status        RollbackStatus  `json:"status"`
+	Progress      int             `json:"progress"` // Percentage
+	CurrentScript int             `json:"current_script"`
+	Results       []*ScriptResult `json:"results"`
+	Error         string          `json:"error,omitempty"`
+	Context       map[string]any  `json:"context"`
 }
 
 // ScriptResult tracks the result of executing a single rollback script
@@ -259,7 +259,7 @@ func (rm *RollbackManager) ExecuteRollbackPlan(ctx context.Context, planID strin
 		Status:    RollbackInProgress,
 		Progress:  0,
 		Results:   make([]*ScriptResult, 0, len(plan.Scripts)),
-		Context:   map[string]interface{}{"dry_run": dryRun},
+		Context:   map[string]any{"dry_run": dryRun},
 	}
 
 	rm.executions[executionID] = execution

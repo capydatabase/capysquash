@@ -4,13 +4,10 @@ import (
 	"os"
 
 	// Use public API packages
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/cli"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/plugins"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/utils"
-
-	// Still need internal/errors for structured error handling
-	// This could be exported in the future if needed externally
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/pkg/cli"
+	"github.com/capysquash/pgsquash-engine/pkg/errors"
+	"github.com/capysquash/pgsquash-engine/pkg/plugins"
+	"github.com/capysquash/pgsquash-engine/pkg/utils"
 )
 
 // pgsquash: The PostgreSQL migration consolidation engine
@@ -20,7 +17,7 @@ import (
 
 // Version information (set via ldflags during build)
 var (
-	version   = "0.9.5" // Default version, can be overridden via ldflags: -ldflags "-X main.version=x.y.z"
+	version   = "0.9.7" // Default version, can be overridden via ldflags: -ldflags "-X main.version=x.y.z"
 	buildDate = "unknown"
 	gitCommit = "unknown"
 )
@@ -31,7 +28,9 @@ func init() {
 	if os.Getenv("PGSQUASH_LOG_LEVEL") == "debug" {
 		logLevel = utils.LogLevelDebug
 	}
-	logger := utils.NewLogger(logLevel, os.Stdout)
+	// Diagnostics belong on stderr so machine-readable command output on
+	// stdout remains parseable by callers such as the CapyDB CLI.
+	logger := utils.NewLogger(logLevel, os.Stderr)
 	utils.SetDefaultLogger(logger)
 
 	// Set version information for CLI commands

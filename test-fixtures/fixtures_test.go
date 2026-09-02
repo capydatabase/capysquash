@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+	"github.com/capysquash/pgsquash-engine/pkg/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,63 +35,63 @@ type FixtureTest struct {
 func GetAllFixtures() []FixtureTest {
 	return []FixtureTest{
 		{
-			Name: "enums_append_reorder",
-			Path: "enums_append_reorder",
+			Name:        "enums_append_reorder",
+			Path:        "enums_append_reorder",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "fk_cycles",
-			Path: "fk_cycles",
+			Name:        "fk_cycles",
+			Path:        "fk_cycles",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "partial_index_predicates",
-			Path: "partial_index_predicates",
+			Name:        "partial_index_predicates",
+			Path:        "partial_index_predicates",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "rls_policies",
-			Path: "rls_policies",
+			Name:        "rls_policies",
+			Path:        "rls_policies",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "matviews",
-			Path: "matviews",
+			Name:        "matviews",
+			Path:        "matviews",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "collations",
-			Path: "collations",
+			Name:        "collations",
+			Path:        "collations",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "generated_columns_identity",
-			Path: "generated_columns_identity",
+			Name:        "generated_columns_identity",
+			Path:        "generated_columns_identity",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "partitions",
-			Path: "partitions",
+			Name:        "partitions",
+			Path:        "partitions",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "extensions_versioning",
-			Path: "extensions_versioning",
+			Name:        "extensions_versioning",
+			Path:        "extensions_versioning",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "triggers_function_versions",
-			Path: "triggers_function_versions",
+			Name:        "triggers_function_versions",
+			Path:        "triggers_function_versions",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "supabase_auth_schema",
-			Path: "supabase_auth_schema",
+			Name:        "supabase_auth_schema",
+			Path:        "supabase_auth_schema",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
-			Name: "pragma_examples",
-			Path: "pragma_examples",
+			Name:        "pragma_examples",
+			Path:        "pragma_examples",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 	}
@@ -120,10 +120,7 @@ func TestFixture(t *testing.T) {
 
 	fixtures := GetAllFixtures()
 	for _, fixture := range fixtures {
-		if fixture.Name == "enums_append_reorder" { // Test specific fixture
-			testFixture(t, fixture)
-			break
-		}
+		testFixture(t, fixture)
 	}
 }
 
@@ -150,6 +147,9 @@ func testFixture(t *testing.T, fixture FixtureTest) {
 	// Test each safety mode
 	for _, safetyMode := range fixture.SafetyModes {
 		t.Run(string(safetyMode), func(t *testing.T) {
+			if safetyMode == Paranoid && strings.TrimSpace(os.Getenv("PROD_DB_DSN")) == "" {
+				t.Skip("paranoid fixture requires PROD_DB_DSN")
+			}
 			if reason, shouldSkip := fixture.SkipReasons[safetyMode]; shouldSkip {
 				t.Skipf("Skipping %s mode: %s", safetyMode, reason)
 				return
@@ -193,15 +193,22 @@ func testSafetyMode(t *testing.T, fixture FixtureTest, safetyMode SafetyLevel, o
 	// Basic validation - check that result is not empty and contains SQL
 	t.Logf("Safety mode: %s", safetyMode)
 	t.Logf("Original migrations: %d", len(originalMigrations))
-	t.Logf("Result length: %d bytes", len(result.SQL))
+	t.Logf("Result length: %d bytes", len(result.BaselineSQL))
 
 	// Basic assertions
-	assert.NotEmpty(t, result.SQL, "Squashed result should not be empty")
-	assert.Contains(t, strings.ToUpper(result.SQL), "CREATE", "Result should contain CREATE statements")
+	assert.NotEmpty(t, result.BaselineSQL, "Squashed result should not be empty")
+	assert.Contains(t, strings.ToUpper(result.BaselineSQL), "CREATE", "Result should contain CREATE statements")
 
-	// TODO: Add more sophisticated comparison with expected output
-	// For now, just verify the engine can process the fixture without errors
-	t.Logf("✅ Fixture %s processed successfully in %s mode", fixture.Name, safetyMode)
+	// Improved validation: Normalize and check crucial keywords
+	normalizedSQL := normalizeSQL(result.BaselineSQL)
+	assert.NotEmpty(t, normalizedSQL, "Normalized SQL should not be empty")
+
+	// Ensure we have at least some CREATE statements
+	createCount := strings.Count(strings.ToUpper(normalizedSQL), "CREATE")
+	assert.Greater(t, createCount, 0, "Result should contain CREATE statements")
+
+	t.Logf("✅ Fixture %s processed successfully in %s mode (Output size: %d, CREATEs: %d)",
+		fixture.Name, safetyMode, len(result.BaselineSQL), createCount)
 }
 
 // TestFixtureValidation runs schema validation tests with Docker
@@ -260,6 +267,10 @@ func benchmarkFixture(t *testing.T, fixture FixtureTest) {
 	// Benchmark each safety mode
 	for _, safetyMode := range fixture.SafetyModes {
 		t.Run(string(safetyMode), func(t *testing.T) {
+			if safetyMode == Paranoid && strings.TrimSpace(os.Getenv("PROD_DB_DSN")) == "" {
+				t.Skip("paranoid performance fixture requires PROD_DB_DSN")
+			}
+
 			start := time.Now()
 
 			// Convert safety mode to engine format

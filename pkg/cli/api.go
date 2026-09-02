@@ -1,11 +1,11 @@
 // Package cli provides a public API for the pgsquash CLI functionality.
 //
 // This package exports the internal CLI implementation for use by external tools
-// like capysquash-cli while keeping the internal implementation details private.
+// while keeping the internal implementation details private.
 package cli
 
 import (
-	internal_cli "github.com/CAPYSQUASH/pgsquash-engine/internal/cli"
+	internal_cli "github.com/capysquash/pgsquash-engine/internal/cli"
 )
 
 // Execute runs the pgsquash CLI.
@@ -20,13 +20,13 @@ func Execute() error {
 // This should be called during application initialization, typically in init().
 //
 // Parameters:
-//   - version: The semantic version string (e.g., "0.9.5")
+//   - version: The semantic version string (e.g., "0.9.7")
 //   - buildDate: The build timestamp in ISO 8601 format
 //   - gitCommit: The git commit hash (short or full)
 //
 // Example:
 //
-//	cli.SetVersionInfo("0.9.5", "2024-10-21T10:00:00Z", "abc123")
+//	cli.SetVersionInfo("0.9.7", "2024-10-21T10:00:00Z", "abc123")
 func SetVersionInfo(version, buildDate, gitCommit string) {
 	internal_cli.SetVersionInfo(version, buildDate, gitCommit)
 }

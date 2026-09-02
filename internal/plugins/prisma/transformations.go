@@ -3,10 +3,9 @@ package prisma
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // TransformSQL performs Prisma-specific SQL transformations
@@ -26,17 +25,11 @@ func (pp *PrismaPlugin) TransformSQL(ctx context.Context, sql string) (string, e
 
 // preservePrismaComments ensures Prisma migration comments are not stripped
 func (pp *PrismaPlugin) preservePrismaComments(sql string) string {
-	// Prisma uses specific comment patterns that should be preserved
-	// Pattern: -- CreateTable, -- CreateIndex, etc.
-
-	// If SQL already has Prisma comments, ensure they're at the start
-	prismaCommentPattern := regexp.MustCompile(`(?m)^--\s*(CreateTable|CreateIndex|CreateEnum|AlterTable|AddForeignKey|DropTable)\s+(.*)$`)
-
-	if prismaCommentPattern.MatchString(sql) {
-		// Already has Prisma comments, preserve as-is
+	// Prisma comments should be preserved verbatim.
+	// We still detect them to keep this hook explicit and future-proof.
+	if action, _, found := extractPrismaCommentActionTarget(sql); found && action != "" {
 		return sql
 	}
-
 	return sql
 }
 
@@ -46,14 +39,8 @@ func (pp *PrismaPlugin) optimizeVarcharLength(sql string) string {
 	// Only optimize if this is a non-indexed column
 	// Keep VARCHAR(191) for indexed columns for consistency
 
-	// Pattern: VARCHAR(191) not followed by index-related keywords
-	// Note: Using standard regex without negative lookahead which is not supported by RE2
-	varcharPattern := regexp.MustCompile(`VARCHAR\(191\)`)
-
 	// Replace with VARCHAR(255) for non-indexed columns (more standard PostgreSQL length)
-	optimized := varcharPattern.ReplaceAllString(sql, "VARCHAR(255)")
-
-	return optimized
+	return strings.ReplaceAll(sql, "VARCHAR(191)", "VARCHAR(255)")
 }
 
 // InjectCompatibilityLayer returns SQL for Prisma compatibility during validation
@@ -105,10 +92,7 @@ func (pp *PrismaPlugin) FixFunctionVolatility(ctx context.Context, functionSQL s
 	}
 
 	// Add STABLE marker before AS keyword
-	asPattern := regexp.MustCompile(`(?i)(\s+AS\s+)`)
-	fixed := asPattern.ReplaceAllString(functionSQL, " STABLE$1")
-
-	return fixed, nil
+	return insertMarkerBeforeAS(functionSQL, "STABLE"), nil
 }
 
 // GeneratePrismaMetadata creates metadata for Prisma migrations
@@ -118,14 +102,7 @@ func (pp *PrismaPlugin) GeneratePrismaMetadata(tableName string, action string) 
 
 // ExtractPrismaComment extracts Prisma action from migration comment
 func (pp *PrismaPlugin) ExtractPrismaComment(sql string) (action string, target string, found bool) {
-	commentPattern := regexp.MustCompile(`--\s*(CreateTable|CreateIndex|CreateEnum|AlterTable|AddForeignKey|DropTable)\s+(.*)`)
-	matches := commentPattern.FindStringSubmatch(sql)
-
-	if len(matches) > 2 {
-		return matches[1], matches[2], true
-	}
-
-	return "", "", false
+	return extractPrismaCommentActionTarget(sql)
 }
 
 // IsPrismaGeneratedSQL checks if SQL appears to be Prisma-generated
@@ -150,4 +127,58 @@ func (pp *PrismaPlugin) IsPrismaGeneratedSQL(sql string) bool {
 	}
 
 	return false
+}
+
+func insertMarkerBeforeAS(sql string, marker string) string {
+	trimmedMarker := strings.TrimSpace(marker)
+	if strings.TrimSpace(sql) == "" || trimmedMarker == "" {
+		return sql
+	}
+
+	asIdx := findStandaloneASIndex(sql)
+	if asIdx == -1 {
+		return sql
+	}
+
+	prefix := strings.TrimRight(sql[:asIdx], " \t\r\n")
+	suffix := strings.TrimLeft(sql[asIdx:], " \t\r\n")
+	if prefix == "" {
+		return trimmedMarker + " " + suffix
+	}
+
+	return prefix + " " + trimmedMarker + " " + suffix
+}
+
+func findStandaloneASIndex(sql string) int {
+	for i := 0; i < len(sql); i++ {
+		if hasKeywordAtCI(sql, i, "AS") {
+			return i
+		}
+	}
+	return -1
+}
+
+func hasKeywordAtCI(sql string, pos int, keyword string) bool {
+	if pos < 0 || pos+len(keyword) > len(sql) {
+		return false
+	}
+
+	if !strings.EqualFold(sql[pos:pos+len(keyword)], keyword) {
+		return false
+	}
+
+	if pos > 0 && isIdentifierByte(sql[pos-1]) {
+		return false
+	}
+
+	end := pos + len(keyword)
+	if end < len(sql) && isIdentifierByte(sql[end]) {
+		return false
+	}
+
+	return true
+}
+
+func isIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_'
 }

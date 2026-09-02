@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/parser"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/styles"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/viewtypes"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/styles"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/viewtypes"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -160,10 +160,7 @@ func (d *DependencyGraphView) renderObjectList() string {
 
 	maxVisible := 15
 	startIdx := d.scrollOffset
-	endIdx := d.scrollOffset + maxVisible
-	if endIdx > len(d.objects) {
-		endIdx = len(d.objects)
-	}
+	endIdx := min(d.scrollOffset+maxVisible, len(d.objects))
 
 	visibleObjects := d.objects[startIdx:endIdx]
 

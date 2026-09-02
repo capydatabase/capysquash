@@ -1,10 +1,11 @@
 package parser
 
 import (
+	"maps"
 	"strings"
 	"unicode"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
 )
 
 // NormalizationContext provides context for PostgreSQL identifier normalization
@@ -21,9 +22,9 @@ func DefaultNormalizationContext() *NormalizationContext {
 	return &NormalizationContext{
 		DefaultSchema:       "public",
 		CaseSensitive:       false, // PostgreSQL folds to lowercase unless quoted
-		PreserveQuotes:      true,
-		MaxIdentifierLength: 63, // PostgreSQL NAMEDATALEN - 1
-		PostgreSQLVersion:   15,
+		PreserveQuotes:      false, // Normalize "id" to id (BUT "ID" stays ID and id becomes id -> different)
+		MaxIdentifierLength: 63,    // PostgreSQL NAMEDATALEN - 1
+		PostgreSQLVersion:   17,
 	}
 }
 
@@ -298,9 +299,9 @@ func (vkm *VersionedKeywordManager) loadVersionSpecificKeywords() {
 		})
 	}
 
-	// PostgreSQL 15+ keywords
-	if vkm.version >= 15 {
-		vkm.addVersionKeywords(15, map[string]KeywordType{
+	// PostgreSQL 17+ keywords
+	if vkm.version >= 17 {
+		vkm.addVersionKeywords(17, map[string]KeywordType{
 			"MERGE":  KeywordTypeReserved,
 			"STORED": KeywordTypeNonReserved,
 		})
@@ -312,9 +313,7 @@ func (vkm *VersionedKeywordManager) addVersionKeywords(version int, keywords map
 	if vkm.versionWords[version] == nil {
 		vkm.versionWords[version] = make(map[string]KeywordType)
 	}
-	for keyword, keywordType := range keywords {
-		vkm.versionWords[version][keyword] = keywordType
-	}
+	maps.Copy(vkm.versionWords[version], keywords)
 }
 
 // IsKeyword checks if a word is a PostgreSQL keyword
@@ -454,12 +453,8 @@ func (ckc *ContextualKeywordChecker) isConstraintKeyword(word string) bool {
 	return constraintKeywords[word]
 }
 
-// NormalizationError is now an alias to errors.StructuredError
-// This maintains backward compatibility
-type NormalizationError = ParseError
-
 // NewNormalizationError creates a new normalization error
-func NewNormalizationError(message string, index int) *NormalizationError {
+func NewNormalizationError(message string, index int) *ParseError {
 	return &ParseError{
 		StructuredError: errors.NewParseError(errors.ErrorCodeNormalizationFailed, message).
 			WithAdditional("index", index),

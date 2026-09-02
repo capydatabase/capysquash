@@ -2,20 +2,21 @@ package consolidation
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/internal/types"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // AdvancedColumnLifecycleRule handles complex column evolution patterns with edge cases
 type AdvancedColumnLifecycleRule struct {
-	enableDataTypeEvolution bool
+	enableDataTypeEvolution  bool
 	enableConstraintTracking bool
-	enableColumnRenaming    bool
+	enableColumnRenaming     bool
 }
 
 // ColumnLifecycleState represents the complete state of a column through its lifecycle
@@ -42,12 +43,12 @@ type ColumnConstraint struct {
 
 // ColumnTransformation tracks changes to a column
 type ColumnTransformation struct {
-	Operation    ColumnOperation `json:"operation"`
-	OldValue     string          `json:"old_value"`
-	NewValue     string          `json:"new_value"`
-	AtSequence   int             `json:"at_sequence"`
-	SQL          string          `json:"sql"`
-	HasDataOps   bool            `json:"has_data_ops"`
+	Operation  ColumnOperation `json:"operation"`
+	OldValue   string          `json:"old_value"`
+	NewValue   string          `json:"new_value"`
+	AtSequence int             `json:"at_sequence"`
+	SQL        string          `json:"sql"`
+	HasDataOps bool            `json:"has_data_ops"`
 }
 
 // ColumnStatus represents the current status of a column
@@ -64,15 +65,15 @@ const (
 type ColumnOperation string
 
 const (
-	ColumnOpAdd           ColumnOperation = "ADD"
-	ColumnOpDrop          ColumnOperation = "DROP"
-	ColumnOpRename        ColumnOperation = "RENAME"
-	ColumnOpChangeType    ColumnOperation = "CHANGE_TYPE"
-	ColumnOpSetDefault    ColumnOperation = "SET_DEFAULT"
-	ColumnOpDropDefault   ColumnOperation = "DROP_DEFAULT"
-	ColumnOpSetNotNull    ColumnOperation = "SET_NOT_NULL"
-	ColumnOpDropNotNull   ColumnOperation = "DROP_NOT_NULL"
-	ColumnOpAddConstraint ColumnOperation = "ADD_CONSTRAINT"
+	ColumnOpAdd            ColumnOperation = "ADD"
+	ColumnOpDrop           ColumnOperation = "DROP"
+	ColumnOpRename         ColumnOperation = "RENAME"
+	ColumnOpChangeType     ColumnOperation = "CHANGE_TYPE"
+	ColumnOpSetDefault     ColumnOperation = "SET_DEFAULT"
+	ColumnOpDropDefault    ColumnOperation = "DROP_DEFAULT"
+	ColumnOpSetNotNull     ColumnOperation = "SET_NOT_NULL"
+	ColumnOpDropNotNull    ColumnOperation = "DROP_NOT_NULL"
+	ColumnOpAddConstraint  ColumnOperation = "ADD_CONSTRAINT"
 	ColumnOpDropConstraint ColumnOperation = "DROP_CONSTRAINT"
 )
 
@@ -118,7 +119,7 @@ func (r *AdvancedColumnLifecycleRule) Apply(lifecycle *tracking.ObjectLifecycle,
 	if !r.CanApply(lifecycle) {
 		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation,
 			"rule cannot be applied to lifecycle",
-			map[string]interface{}{"rule": "AdvancedColumnLifecycleRule"})
+			map[string]any{"rule": "AdvancedColumnLifecycleRule"})
 	}
 
 	// Build comprehensive column lifecycle map
@@ -126,7 +127,7 @@ func (r *AdvancedColumnLifecycleRule) Apply(lifecycle *tracking.ObjectLifecycle,
 	if err != nil {
 		return nil, errors.Wrap(err, errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation,
 			"failed to build column lifecycle map",
-			map[string]interface{}{"object": lifecycle.Name})
+			map[string]any{"object": lifecycle.Name})
 	}
 
 	// Generate optimized schema with advanced column handling
@@ -134,7 +135,7 @@ func (r *AdvancedColumnLifecycleRule) Apply(lifecycle *tracking.ObjectLifecycle,
 	if err != nil {
 		return nil, errors.Wrap(err, errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation,
 			"failed to generate advanced schema",
-			map[string]interface{}{"object": lifecycle.Name})
+			map[string]any{"object": lifecycle.Name})
 	}
 
 	// Collect all column-related statements
@@ -143,6 +144,19 @@ func (r *AdvancedColumnLifecycleRule) Apply(lifecycle *tracking.ObjectLifecycle,
 		if event.Operation == types.OpCreate || r.isAdvancedColumnOperation(event.Statement.SQL) {
 			originalStmts = append(originalStmts, event.Statement)
 		}
+	}
+
+	// Extract column evolution information for data operation rewriting
+	columnEvolutions := r.extractColumnEvolutions(lifecycle.Name, columnStates)
+
+	// Identify and warn about orphaned indexes (indexes on dropped columns)
+	orphanedIndexes := r.identifyOrphanedIndexes(lifecycle, columnStates, engine)
+	var warnings []string
+	if len(orphanedIndexes) > 0 {
+		for _, indexName := range orphanedIndexes {
+			warnings = append(warnings, fmt.Sprintf("Index %s references dropped columns and should be removed", indexName))
+		}
+		optimizations = append(optimizations, fmt.Sprintf("Identified %d orphaned indexes on dropped columns", len(orphanedIndexes)))
 	}
 
 	result := &tracking.ConsolidationResult{
@@ -155,6 +169,8 @@ func (r *AdvancedColumnLifecycleRule) Apply(lifecycle *tracking.ObjectLifecycle,
 			FilesAffected:     len(originalStmts),
 			LinesReduced:      r.estimateLinesSaved(originalStmts),
 		},
+		ColumnEvolutions: columnEvolutions,
+		Warnings:         warnings,
 	}
 
 	return result, nil
@@ -174,26 +190,26 @@ func (r *AdvancedColumnLifecycleRule) buildColumnLifecycleMap(lifecycle *trackin
 		switch event.Operation {
 		case types.OpCreate:
 			// Extract initial columns from CREATE statement
-			initialColumns := r.extractInitialColumns(event.Statement.SQL)
+			initialColumns := r.extractInitialColumns(event.Statement)
 			for pos, col := range initialColumns {
 				columnStates[col.Name] = &ColumnLifecycleState{
-					Name:         col.Name,
-					OriginalName: col.Name,
-					DataType:     col.DataType,
-					IsNullable:   col.IsNullable,
-					DefaultValue: col.DefaultValue,
-					Constraints:  col.Constraints,
-					Position:     pos,
-					Status:       ColumnStatusActive,
+					Name:            col.Name,
+					OriginalName:    col.Name,
+					DataType:        col.DataType,
+					IsNullable:      col.IsNullable,
+					DefaultValue:    col.DefaultValue,
+					Constraints:     col.Constraints,
+					Position:        pos,
+					Status:          ColumnStatusActive,
 					Transformations: []ColumnTransformation{},
 				}
 			}
 		case types.OpAlter:
 			// Process ALTER operations
-			if err := r.processAlterOperation(columnStates, event.Statement.SQL, i); err != nil {
+			if err := r.processAlterOperation(columnStates, event.Statement, i); err != nil {
 				return nil, errors.Wrap(err, errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation,
 					"failed to process ALTER operation",
-					map[string]interface{}{"sequence": i})
+					map[string]any{"sequence": i})
 			}
 		}
 	}
@@ -205,8 +221,8 @@ func (r *AdvancedColumnLifecycleRule) buildColumnLifecycleMap(lifecycle *trackin
 }
 
 // processAlterOperation processes an ALTER TABLE statement and updates column states
-func (r *AdvancedColumnLifecycleRule) processAlterOperation(columnStates map[string]*ColumnLifecycleState, sql string, sequence int) error {
-	alterOps := r.parseAlterOperations(sql)
+func (r *AdvancedColumnLifecycleRule) processAlterOperation(columnStates map[string]*ColumnLifecycleState, stmt types.Statement, sequence int) error {
+	alterOps := r.parseAlterOperations(stmt)
 
 	for _, op := range alterOps {
 		switch op.Operation {
@@ -230,66 +246,218 @@ func (r *AdvancedColumnLifecycleRule) processAlterOperation(columnStates map[str
 	return nil
 }
 
-// parseAlterOperations parses an ALTER TABLE statement to extract individual operations
-func (r *AdvancedColumnLifecycleRule) parseAlterOperations(sql string) []ColumnTransformation {
-	var operations []ColumnTransformation
-
-	// Regular expressions for different ALTER operations
-	patterns := map[ColumnOperation]*regexp.Regexp{
-		ColumnOpAdd:           regexp.MustCompile(`ADD\s+COLUMN\s+(\w+)\s+([^,;]+)`),
-		ColumnOpDrop:          regexp.MustCompile(`DROP\s+COLUMN\s+(\w+)`),
-		ColumnOpRename:        regexp.MustCompile(`RENAME\s+COLUMN\s+(\w+)\s+TO\s+(\w+)`),
-		ColumnOpChangeType:    regexp.MustCompile(`ALTER\s+COLUMN\s+(\w+)\s+TYPE\s+([^,;]+)`),
-		ColumnOpSetDefault:    regexp.MustCompile(`ALTER\s+COLUMN\s+(\w+)\s+SET\s+DEFAULT\s+([^,;]+)`),
-		ColumnOpDropDefault:   regexp.MustCompile(`ALTER\s+COLUMN\s+(\w+)\s+DROP\s+DEFAULT`),
-		ColumnOpSetNotNull:    regexp.MustCompile(`ALTER\s+COLUMN\s+(\w+)\s+SET\s+NOT\s+NULL`),
-		ColumnOpDropNotNull:   regexp.MustCompile(`ALTER\s+COLUMN\s+(\w+)\s+DROP\s+NOT\s+NULL`),
+// parseAlterOperations parses ALTER and RENAME statements into column lifecycle transformations.
+func (r *AdvancedColumnLifecycleRule) parseAlterOperations(stmt types.Statement) []ColumnTransformation {
+	operations := r.parseAlterOperationsFromAST(stmt)
+	if len(operations) > 0 {
+		return operations
 	}
 
-	upperSQL := strings.ToUpper(sql)
+	return r.parseAlterOperationsFallback(stmt.SQL)
+}
 
-	for operation, pattern := range patterns {
-		matches := pattern.FindAllStringSubmatch(upperSQL, -1)
-		for _, match := range matches {
-			transformation := ColumnTransformation{
-				Operation: operation,
-				SQL:       sql,
-			}
+func (r *AdvancedColumnLifecycleRule) parseAlterOperationsFromAST(stmt types.Statement) []ColumnTransformation {
+	parseTree := stmt.ParseTree
+	if parseTree == nil {
+		parsed, err := parser.ParseMigration(stmt.SQL, "__advanced_column_alter__.sql")
+		if err != nil || parsed == nil || len(parsed.Statements) == 0 {
+			return nil
+		}
 
-			switch operation {
-			case ColumnOpAdd:
-				if len(match) >= 3 {
-					transformation.NewValue = match[1] // Column name
-					transformation.OldValue = match[2]  // Column definition
+		parseTree = parsed.Statements[0].ParseTree
+	}
+
+	if parseTree == nil || len(parseTree.Stmts) == 0 {
+		return nil
+	}
+
+	operations := make([]ColumnTransformation, 0)
+
+	for _, raw := range parseTree.Stmts {
+		switch node := raw.Stmt.Node.(type) {
+		case *pg_query.Node_AlterTableStmt:
+			for _, cmd := range node.AlterTableStmt.Cmds {
+				alterCmd := cmd.GetAlterTableCmd()
+				if alterCmd == nil {
+					continue
 				}
-			case ColumnOpDrop:
-				if len(match) >= 2 {
-					transformation.OldValue = match[1] // Column name being dropped
-				}
-			case ColumnOpRename:
-				if len(match) >= 3 {
-					transformation.OldValue = match[1] // Old name
-					transformation.NewValue = match[2] // New name
-				}
-			case ColumnOpChangeType:
-				if len(match) >= 3 {
-					transformation.OldValue = match[1] // Column name
-					transformation.NewValue = match[2] // New type
-				}
-			default:
-				if len(match) >= 2 {
-					transformation.OldValue = match[1] // Column name
-					if len(match) >= 3 {
-						transformation.NewValue = match[2] // Value (for DEFAULT, etc.)
+
+				switch alterCmd.Subtype {
+				case pg_query.AlterTableType_AT_AddColumn:
+					colDef := alterCmd.Def.GetColumnDef()
+					if colDef == nil {
+						continue
 					}
+
+					operations = append(operations, ColumnTransformation{
+						Operation: ColumnOpAdd,
+						NewValue:  strings.ToLower(colDef.Colname),
+						OldValue:  r.buildColumnDefinitionFromAST(colDef),
+						SQL:       stmt.SQL,
+					})
+
+				case pg_query.AlterTableType_AT_DropColumn:
+					operations = append(operations, ColumnTransformation{
+						Operation: ColumnOpDrop,
+						OldValue:  strings.ToLower(alterCmd.Name),
+						SQL:       stmt.SQL,
+					})
+
+				case pg_query.AlterTableType_AT_AlterColumnType:
+					operations = append(operations, ColumnTransformation{
+						Operation: ColumnOpChangeType,
+						OldValue:  strings.ToLower(alterCmd.Name),
+						NewValue:  r.extractAlterColumnTypeName(alterCmd),
+						SQL:       stmt.SQL,
+					})
+
+				case pg_query.AlterTableType_AT_AddConstraint:
+					constraint := alterCmd.Def.GetConstraint()
+					if constraint == nil {
+						continue
+					}
+
+					operations = append(operations, ColumnTransformation{
+						Operation: ColumnOpAddConstraint,
+						OldValue:  strings.ToLower(constraint.Conname),
+						NewValue:  r.buildConstraintDefinitionFromAST(constraint),
+						SQL:       stmt.SQL,
+					})
+
+				case pg_query.AlterTableType_AT_DropConstraint:
+					operations = append(operations, ColumnTransformation{
+						Operation: ColumnOpDropConstraint,
+						OldValue:  strings.ToLower(alterCmd.Name),
+						SQL:       stmt.SQL,
+					})
 				}
 			}
 
-			operations = append(operations, transformation)
+		case *pg_query.Node_RenameStmt:
+			renameStmt := node.RenameStmt
+			if renameStmt != nil && renameStmt.RenameType == pg_query.ObjectType_OBJECT_COLUMN {
+				operations = append(operations, ColumnTransformation{
+					Operation: ColumnOpRename,
+					OldValue:  strings.ToLower(renameStmt.Subname),
+					NewValue:  strings.ToLower(renameStmt.Newname),
+					SQL:       stmt.SQL,
+				})
+			}
 		}
 	}
 
 	return operations
+}
+
+func (r *AdvancedColumnLifecycleRule) parseAlterOperationsFallback(sql string) []ColumnTransformation {
+	upperSQL := strings.ToUpper(sql)
+	operations := make([]ColumnTransformation, 0)
+
+	columnName := extractAlterColumnTarget(sql)
+	if columnName == "" {
+		return operations
+	}
+
+	switch {
+	case strings.Contains(upperSQL, "DROP DEFAULT"):
+		operations = append(operations, ColumnTransformation{Operation: ColumnOpDropDefault, OldValue: columnName, SQL: sql})
+	case strings.Contains(upperSQL, "SET DEFAULT"):
+		operations = append(operations, ColumnTransformation{Operation: ColumnOpSetDefault, OldValue: columnName, NewValue: extractDefaultClause(sql), SQL: sql})
+	case strings.Contains(upperSQL, "SET NOT NULL"):
+		operations = append(operations, ColumnTransformation{Operation: ColumnOpSetNotNull, OldValue: columnName, SQL: sql})
+	case strings.Contains(upperSQL, "DROP NOT NULL"):
+		operations = append(operations, ColumnTransformation{Operation: ColumnOpDropNotNull, OldValue: columnName, SQL: sql})
+	}
+
+	return operations
+}
+
+func extractAlterColumnTarget(sql string) string {
+	tokens := strings.Fields(sql)
+	for i := 0; i+2 < len(tokens); i++ {
+		if strings.EqualFold(tokens[i], "ALTER") && strings.EqualFold(tokens[i+1], "COLUMN") {
+			return strings.ToLower(strings.Trim(tokens[i+2], ",;"))
+		}
+	}
+
+	return ""
+}
+
+func extractDefaultClause(sql string) string {
+	upper := strings.ToUpper(sql)
+	idx := strings.Index(upper, "SET DEFAULT")
+	if idx == -1 {
+		return ""
+	}
+
+	defaultExpr := strings.TrimSpace(sql[idx+len("SET DEFAULT"):])
+	defaultExpr = strings.TrimSuffix(defaultExpr, ";")
+	return strings.TrimSpace(defaultExpr)
+}
+
+func (r *AdvancedColumnLifecycleRule) extractAlterColumnTypeName(alterCmd *pg_query.AlterTableCmd) string {
+	if alterCmd == nil || alterCmd.Def == nil {
+		return ""
+	}
+
+	if typeName := alterCmd.Def.GetTypeName(); typeName != nil {
+		return strings.ToUpper(typeNameFromTypeName(typeName))
+	}
+
+	if colDef := alterCmd.Def.GetColumnDef(); colDef != nil && colDef.TypeName != nil {
+		return strings.ToUpper(typeNameFromTypeName(colDef.TypeName))
+	}
+
+	return ""
+}
+
+func (r *AdvancedColumnLifecycleRule) buildColumnDefinitionFromAST(colDef *pg_query.ColumnDef) string {
+	if colDef == nil {
+		return ""
+	}
+
+	typeName := typeNameFromTypeName(colDef.TypeName)
+	parts := make([]string, 0, 4)
+	if typeName != "" {
+		parts = append(parts, strings.ToUpper(typeName))
+	}
+
+	for _, cnode := range colDef.Constraints {
+		constraint := cnode.GetConstraint()
+		if constraint == nil {
+			continue
+		}
+
+		switch constraint.Contype {
+		case pg_query.ConstrType_CONSTR_NOTNULL:
+			parts = append(parts, "NOT NULL")
+		case pg_query.ConstrType_CONSTR_DEFAULT:
+			parts = append(parts, "DEFAULT")
+		}
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func typeNameFromTypeName(typeName *pg_query.TypeName) string {
+	if typeName == nil || len(typeName.Names) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(typeName.Names))
+	for _, node := range typeName.Names {
+		strNode := node.GetString_()
+		if strNode == nil {
+			continue
+		}
+		parts = append(parts, strNode.Sval)
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return strings.Join(parts, ".")
 }
 
 // processAddColumn handles ADD COLUMN operations
@@ -473,6 +641,19 @@ func (r *AdvancedColumnLifecycleRule) processConstraintChange(columnStates map[s
 		return
 	}
 
+	if len(constraintInfo.AffectedColumns) == 0 {
+		if op.Operation == ColumnOpDropConstraint && constraintInfo.Name != "" {
+			for _, col := range columnStates {
+				for i := len(col.Constraints) - 1; i >= 0; i-- {
+					if strings.EqualFold(col.Constraints[i].Name, constraintInfo.Name) {
+						col.Constraints = append(col.Constraints[:i], col.Constraints[i+1:]...)
+					}
+				}
+			}
+		}
+		return
+	}
+
 	// If constraint affects specific columns, update those column states
 	for _, columnName := range constraintInfo.AffectedColumns {
 		if col, exists := columnStates[columnName]; exists {
@@ -517,98 +698,199 @@ type ColumnConstraintInfo struct {
 
 // parseConstraintDefinition parses a constraint definition from SQL
 func (r *AdvancedColumnLifecycleRule) parseConstraintDefinition(sql string) *ColumnConstraintInfo {
+	info := &ColumnConstraintInfo{AffectedColumns: make([]string, 0)}
+
+	migration, err := parser.ParseMigration(sql, "__constraint_parse__.sql")
+	if err == nil && migration != nil && len(migration.Statements) > 0 {
+		for _, stmt := range migration.Statements {
+			if stmt.ParseTree == nil {
+				continue
+			}
+
+			for _, raw := range stmt.ParseTree.Stmts {
+				alterStmt := raw.Stmt.GetAlterTableStmt()
+				if alterStmt == nil {
+					continue
+				}
+
+				for _, cmd := range alterStmt.Cmds {
+					alterCmd := cmd.GetAlterTableCmd()
+					if alterCmd == nil {
+						continue
+					}
+
+					switch alterCmd.Subtype {
+					case pg_query.AlterTableType_AT_AddConstraint:
+						constraint := alterCmd.Def.GetConstraint()
+						if constraint == nil {
+							continue
+						}
+
+						info.Name = strings.ToLower(strings.TrimSpace(constraint.Conname))
+						info.Type = mapConstraintType(constraint.Contype)
+						info.Definition = r.buildConstraintDefinitionFromAST(constraint)
+						info.TableLevel = true
+
+						info.AffectedColumns = append(info.AffectedColumns, extractNodeStringNames(constraint.Keys)...)
+						info.AffectedColumns = append(info.AffectedColumns, extractNodeStringNames(constraint.FkAttrs)...)
+						info.AffectedColumns = r.uniqueLowercase(info.AffectedColumns)
+						return info
+
+					case pg_query.AlterTableType_AT_DropConstraint:
+						info.Name = strings.ToLower(strings.TrimSpace(alterCmd.Name))
+						info.TableLevel = true
+						return info
+					}
+				}
+			}
+		}
+	}
+
+	// Minimal fallback for statements parser may not recover.
 	upperSQL := strings.ToUpper(sql)
-
-	info := &ColumnConstraintInfo{
-		AffectedColumns: make([]string, 0),
+	if strings.Contains(upperSQL, "SET NOT NULL") {
+		info.Type = ConstraintNotNull
+		info.TableLevel = false
+		if column := extractAlterColumnTarget(sql); column != "" {
+			info.AffectedColumns = append(info.AffectedColumns, column)
+		}
+		info.Definition = "NOT NULL"
+		return info
 	}
 
-	// Extract constraint name
-	constraintNamePattern := regexp.MustCompile(`CONSTRAINT\s+(\w+)`)
-	if matches := constraintNamePattern.FindStringSubmatch(upperSQL); len(matches) > 1 {
-		info.Name = matches[1]
+	if strings.Contains(upperSQL, "SET DEFAULT") {
+		info.Type = ConstraintDefault
+		info.TableLevel = false
+		if column := extractAlterColumnTarget(sql); column != "" {
+			info.AffectedColumns = append(info.AffectedColumns, column)
+		}
+		info.Definition = "DEFAULT " + extractDefaultClause(sql)
+		return info
 	}
 
-	// Determine constraint type and affected columns
-	switch {
-	case strings.Contains(upperSQL, "PRIMARY KEY"):
-		info.Type = ConstraintPrimaryKey
-		info.TableLevel = true
-		// Extract column(s) in parentheses
-		if matches := regexp.MustCompile(`PRIMARY\s+KEY\s*\(([^)]+)\)`).FindStringSubmatch(upperSQL); len(matches) > 1 {
-			columnList := strings.Split(matches[1], ",")
-			for _, col := range columnList {
-				info.AffectedColumns = append(info.AffectedColumns, strings.TrimSpace(col))
-			}
-			info.Definition = "PRIMARY KEY (" + matches[1] + ")"
+	return nil
+}
+
+func mapConstraintType(ctype pg_query.ConstrType) ConstraintType {
+	switch ctype {
+	case pg_query.ConstrType_CONSTR_PRIMARY:
+		return ConstraintPrimaryKey
+	case pg_query.ConstrType_CONSTR_FOREIGN:
+		return ConstraintForeignKey
+	case pg_query.ConstrType_CONSTR_UNIQUE:
+		return ConstraintUnique
+	case pg_query.ConstrType_CONSTR_CHECK:
+		return ConstraintCheck
+	case pg_query.ConstrType_CONSTR_DEFAULT:
+		return ConstraintDefault
+	case pg_query.ConstrType_CONSTR_NOTNULL:
+		return ConstraintNotNull
+	default:
+		return ""
+	}
+}
+
+func extractNodeStringNames(nodes []*pg_query.Node) []string {
+	names := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node == nil {
+			continue
 		}
 
-	case strings.Contains(upperSQL, "FOREIGN KEY"):
-		info.Type = ConstraintForeignKey
-		info.TableLevel = true
-		// Extract source column(s)
-		if matches := regexp.MustCompile(`FOREIGN\s+KEY\s*\(([^)]+)\)`).FindStringSubmatch(upperSQL); len(matches) > 1 {
-			columnList := strings.Split(matches[1], ",")
-			for _, col := range columnList {
-				info.AffectedColumns = append(info.AffectedColumns, strings.TrimSpace(col))
-			}
-		}
-		info.Definition = r.extractConstraintDefinition(sql, "FOREIGN KEY")
-
-	case strings.Contains(upperSQL, "UNIQUE"):
-		info.Type = ConstraintUnique
-		// Check if table-level or column-level
-		if matches := regexp.MustCompile(`UNIQUE\s*\(([^)]+)\)`).FindStringSubmatch(upperSQL); len(matches) > 1 {
-			info.TableLevel = true
-			columnList := strings.Split(matches[1], ",")
-			for _, col := range columnList {
-				info.AffectedColumns = append(info.AffectedColumns, strings.TrimSpace(col))
-			}
-			info.Definition = "UNIQUE (" + matches[1] + ")"
-		} else {
-			// Column-level UNIQUE
-			info.TableLevel = false
-			info.Definition = "UNIQUE"
+		strNode := node.GetString_()
+		if strNode == nil {
+			continue
 		}
 
-	case strings.Contains(upperSQL, "CHECK"):
-		info.Type = ConstraintCheck
-		info.TableLevel = true
-		// Extract CHECK expression
-		if matches := regexp.MustCompile(`CHECK\s*\(([^)]+)\)`).FindStringSubmatch(upperSQL); len(matches) > 1 {
-			info.Definition = "CHECK (" + matches[1] + ")"
-			// Try to extract column names from CHECK expression
-			columnPattern := regexp.MustCompile(`\b([a-z_][a-z0-9_]*)\b`)
-			colMatches := columnPattern.FindAllStringSubmatch(strings.ToLower(matches[1]), -1)
-			for _, match := range colMatches {
-				// Filter out SQL keywords
-				colName := match[1]
-				if !r.isSQLKeyword(colName) {
-					info.AffectedColumns = append(info.AffectedColumns, colName)
+		name := strings.ToLower(strings.TrimSpace(strNode.Sval))
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	return names
+}
+
+func (r *AdvancedColumnLifecycleRule) uniqueLowercase(items []string) []string {
+	seen := make(map[string]struct{}, len(items))
+	result := make([]string, 0, len(items))
+
+	for _, item := range items {
+		normalized := strings.ToLower(strings.TrimSpace(item))
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
+	}
+
+	return result
+}
+
+func (r *AdvancedColumnLifecycleRule) buildConstraintDefinitionFromAST(constraint *pg_query.Constraint) string {
+	if constraint == nil {
+		return ""
+	}
+
+	switch constraint.Contype {
+	case pg_query.ConstrType_CONSTR_PRIMARY:
+		cols := extractNodeStringNames(constraint.Keys)
+		if len(cols) == 0 {
+			return "PRIMARY KEY"
+		}
+		return fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(cols, ", "))
+
+	case pg_query.ConstrType_CONSTR_FOREIGN:
+		localCols := extractNodeStringNames(constraint.FkAttrs)
+		refCols := extractNodeStringNames(constraint.PkAttrs)
+
+		var b strings.Builder
+		b.WriteString("FOREIGN KEY")
+		if len(localCols) > 0 {
+			b.WriteString(" (")
+			b.WriteString(strings.Join(localCols, ", "))
+			b.WriteString(")")
+		}
+
+		if constraint.Pktable != nil {
+			refTable := strings.ToLower(strings.TrimSpace(constraint.Pktable.Relname))
+			if schema := strings.ToLower(strings.TrimSpace(constraint.Pktable.Schemaname)); schema != "" {
+				refTable = schema + "." + refTable
+			}
+
+			if refTable != "" {
+				b.WriteString(" REFERENCES ")
+				b.WriteString(refTable)
+				if len(refCols) > 0 {
+					b.WriteString(" (")
+					b.WriteString(strings.Join(refCols, ", "))
+					b.WriteString(")")
 				}
 			}
 		}
 
-	case strings.Contains(upperSQL, "NOT NULL"):
-		info.Type = ConstraintNotNull
-		info.TableLevel = false
-		// Extract column name from "ALTER COLUMN columnname SET NOT NULL"
-		if matches := regexp.MustCompile(`ALTER\s+COLUMN\s+(\w+)\s+SET\s+NOT\s+NULL`).FindStringSubmatch(upperSQL); len(matches) > 1 {
-			info.AffectedColumns = append(info.AffectedColumns, matches[1])
-		}
-		info.Definition = "NOT NULL"
+		return strings.TrimSpace(b.String())
 
-	case strings.Contains(upperSQL, "DEFAULT"):
-		info.Type = ConstraintDefault
-		info.TableLevel = false
-		// Extract column name and default value
-		if matches := regexp.MustCompile(`ALTER\s+COLUMN\s+(\w+)\s+SET\s+DEFAULT\s+([^,;]+)`).FindStringSubmatch(upperSQL); len(matches) > 2 {
-			info.AffectedColumns = append(info.AffectedColumns, matches[1])
-			info.Definition = "DEFAULT " + matches[2]
+	case pg_query.ConstrType_CONSTR_UNIQUE:
+		cols := extractNodeStringNames(constraint.Keys)
+		if len(cols) == 0 {
+			return "UNIQUE"
 		}
+		return fmt.Sprintf("UNIQUE (%s)", strings.Join(cols, ", "))
+
+	case pg_query.ConstrType_CONSTR_CHECK:
+		return "CHECK"
+
+	default:
+		if constraint.Conname != "" {
+			return strings.ToLower(strings.TrimSpace(constraint.Conname))
+		}
+		return ""
 	}
-
-	return info
 }
 
 // extractConstraintDefinition extracts the full constraint definition
@@ -713,7 +995,7 @@ func (r *AdvancedColumnLifecycleRule) generateAdvancedSchema(lifecycle *tracking
 	if baseCreateSQL == "" {
 		return "", nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation,
 			"no CREATE statement found",
-			map[string]interface{}{"object": lifecycle.Name})
+			map[string]any{"object": lifecycle.Name})
 	}
 
 	// Build final column list
@@ -770,24 +1052,25 @@ func (r *AdvancedColumnLifecycleRule) generateOptimizedCreate(baseSQL string, co
 
 // buildColumnDefinition builds a column definition from its lifecycle state
 func (r *AdvancedColumnLifecycleRule) buildColumnDefinition(col *ColumnLifecycleState) string {
-	def := fmt.Sprintf("%s %s", col.Name, col.DataType)
+	var def strings.Builder
+	def.WriteString(fmt.Sprintf("%s %s", col.Name, col.DataType))
 
 	if !col.IsNullable {
-		def += " NOT NULL"
+		def.WriteString(" NOT NULL")
 	}
 
 	if col.DefaultValue != "" {
-		def += " DEFAULT " + col.DefaultValue
+		def.WriteString(" DEFAULT " + col.DefaultValue)
 	}
 
 	// Add constraints
 	for _, constraint := range col.Constraints {
 		if !constraint.TableLevel {
-			def += " " + constraint.Definition
+			def.WriteString(" " + constraint.Definition)
 		}
 	}
 
-	return def
+	return def.String()
 }
 
 // generateOptimizationReport generates a report of optimizations performed
@@ -860,9 +1143,79 @@ func (r *AdvancedColumnLifecycleRule) isAdvancedColumnOperation(sql string) bool
 	return false
 }
 
-func (r *AdvancedColumnLifecycleRule) extractInitialColumns(sql string) []ColumnLifecycleState {
-	// Simplified column extraction - in practice would use proper SQL parsing
-	return []ColumnLifecycleState{}
+func (r *AdvancedColumnLifecycleRule) extractInitialColumns(stmt types.Statement) []ColumnLifecycleState {
+	parseTree := stmt.ParseTree
+	if parseTree == nil {
+		parsed, err := parser.ParseMigration(stmt.SQL, "__advanced_column_create__.sql")
+		if err == nil && parsed != nil && len(parsed.Statements) > 0 {
+			parseTree = parsed.Statements[0].ParseTree
+		}
+	}
+
+	if parseTree == nil || len(parseTree.Stmts) == 0 {
+		return nil
+	}
+
+	columns := make([]ColumnLifecycleState, 0)
+
+	for _, raw := range parseTree.Stmts {
+		createStmt := raw.Stmt.GetCreateStmt()
+		if createStmt == nil {
+			continue
+		}
+
+		for _, tableElt := range createStmt.TableElts {
+			colDef := tableElt.GetColumnDef()
+			if colDef == nil {
+				continue
+			}
+
+			dataType := strings.ToUpper(typeNameFromTypeName(colDef.TypeName))
+			if dataType == "" {
+				dataType = "TEXT"
+			}
+
+			isNullable := true
+			defaultValue := ""
+			constraints := make([]ColumnConstraint, 0)
+
+			for _, cnode := range colDef.Constraints {
+				constraint := cnode.GetConstraint()
+				if constraint == nil {
+					continue
+				}
+
+				switch constraint.Contype {
+				case pg_query.ConstrType_CONSTR_NOTNULL:
+					isNullable = false
+					constraints = append(constraints, ColumnConstraint{Type: ConstraintNotNull, Definition: "NOT NULL", TableLevel: false})
+				case pg_query.ConstrType_CONSTR_DEFAULT:
+					defaultValue = "DEFAULT"
+					constraints = append(constraints, ColumnConstraint{Type: ConstraintDefault, Definition: "DEFAULT", TableLevel: false})
+				case pg_query.ConstrType_CONSTR_PRIMARY:
+					isNullable = false
+					constraints = append(constraints, ColumnConstraint{Type: ConstraintPrimaryKey, Definition: "PRIMARY KEY", TableLevel: false})
+				case pg_query.ConstrType_CONSTR_UNIQUE:
+					constraints = append(constraints, ColumnConstraint{Type: ConstraintUnique, Definition: "UNIQUE", TableLevel: false})
+				case pg_query.ConstrType_CONSTR_CHECK:
+					constraints = append(constraints, ColumnConstraint{Type: ConstraintCheck, Definition: "CHECK", TableLevel: false})
+				}
+			}
+
+			columns = append(columns, ColumnLifecycleState{
+				Name:         strings.ToLower(strings.TrimSpace(colDef.Colname)),
+				OriginalName: strings.ToLower(strings.TrimSpace(colDef.Colname)),
+				DataType:     dataType,
+				IsNullable:   isNullable,
+				DefaultValue: defaultValue,
+				Constraints:  constraints,
+			})
+		}
+
+		break
+	}
+
+	return columns
 }
 
 func (r *AdvancedColumnLifecycleRule) extractDefaultValue(columnDef string) string {
@@ -889,4 +1242,133 @@ func (r *AdvancedColumnLifecycleRule) extractTableName(sql string) string {
 
 func (r *AdvancedColumnLifecycleRule) estimateLinesSaved(statements []types.Statement) int {
 	return len(statements) * 3 // Rough estimate
+}
+
+// extractColumnEvolutions extracts column rename mappings from column lifecycle states
+func (r *AdvancedColumnLifecycleRule) extractColumnEvolutions(tableName string, columnStates map[string]*ColumnLifecycleState) map[string]*tracking.ColumnEvolutionInfo {
+	evolutions := make(map[string]*tracking.ColumnEvolutionInfo)
+
+	for _, col := range columnStates {
+		// Only track columns that were renamed or involved in DROP+ADD patterns
+		if col.Status == ColumnStatusRenamed || (col.OriginalName != col.Name) {
+			// Build rename chain from transformations
+			renameChain := []string{col.OriginalName}
+			for _, transform := range col.Transformations {
+				if transform.Operation == ColumnOpRename {
+					renameChain = append(renameChain, transform.NewValue)
+				}
+			}
+
+			// Store evolution info with all intermediate names as keys
+			for _, oldName := range renameChain[:len(renameChain)-1] {
+				key := fmt.Sprintf("%s.%s", strings.ToLower(tableName), strings.ToLower(oldName))
+				evolutions[key] = &tracking.ColumnEvolutionInfo{
+					TableName:    strings.ToLower(tableName),
+					OriginalName: col.OriginalName,
+					FinalName:    col.Name,
+					RenameChain:  renameChain,
+				}
+			}
+		}
+	}
+
+	return evolutions
+}
+
+// identifyOrphanedIndexes finds indexes that reference dropped columns
+// When columns are dropped, indexes referencing those columns become orphaned
+// and should be excluded from the consolidated output to prevent errors
+func (r *AdvancedColumnLifecycleRule) identifyOrphanedIndexes(
+	tableLifecycle *tracking.ObjectLifecycle,
+	columnStates map[string]*ColumnLifecycleState,
+	engine ConsolidationEngine,
+) []string {
+	if engine == nil {
+		return nil
+	}
+
+	tracker := engine.GetTracker()
+	if tracker == nil {
+		return nil
+	}
+
+	// Collect names of dropped columns
+	droppedColumns := make(map[string]bool)
+	for _, col := range columnStates {
+		if col.Status == ColumnStatusDropped || col.Status == ColumnStatusTransient {
+			// Store both original and current name (in case of renames before drop)
+			droppedColumns[strings.ToLower(col.OriginalName)] = true
+			droppedColumns[strings.ToLower(col.Name)] = true
+		}
+	}
+
+	if len(droppedColumns) == 0 {
+		return nil // No dropped columns, no orphaned indexes
+	}
+
+	// Find all indexes that reference this table
+	tableName := strings.ToLower(tableLifecycle.Name)
+	var orphanedIndexes []string
+
+	// Get all index lifecycles from tracker
+	allLifecycles := tracker.GetObjectsByCategory()
+	for _, categoryObjects := range allLifecycles {
+		for _, indexLifecycle := range categoryObjects {
+			if indexLifecycle.Type != types.TypeIndex {
+				continue
+			}
+
+			// Check if this index references our table
+			// Indexes store their table name in Dependencies
+			indexReferencesTable := false
+			for _, dep := range indexLifecycle.Dependencies {
+				if strings.ToLower(dep.DependsOn.Name) == tableName {
+					indexReferencesTable = true
+					break
+				}
+			}
+
+			if !indexReferencesTable {
+				continue
+			}
+
+			// Check if the index references any dropped columns
+			// Parse the index SQL to extract column names
+			finalState := indexLifecycle.GetFinalState()
+			if finalState == nil {
+				continue
+			}
+
+			indexSQL := strings.ToLower(finalState.SQL)
+			for droppedColumn := range droppedColumns {
+				if sqlMentionsIdentifier(indexSQL, droppedColumn) {
+					orphanedIndexes = append(orphanedIndexes, indexLifecycle.Name)
+					break
+				}
+			}
+		}
+	}
+
+	return orphanedIndexes
+}
+
+func sqlMentionsIdentifier(sql, identifier string) bool {
+	normalizedIdentifier := strings.ToLower(strings.TrimSpace(identifier))
+	if normalizedIdentifier == "" {
+		return false
+	}
+
+	tokens := strings.FieldsFunc(strings.ToLower(sql), func(r rune) bool {
+		isLowerAlpha := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		return !(isLowerAlpha || isDigit || r == '_' || r == '.')
+	})
+
+	for _, token := range tokens {
+		if token == normalizedIdentifier || strings.HasSuffix(token, "."+normalizedIdentifier) {
+			return true
+		}
+	}
+
+	return false
 }

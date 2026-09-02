@@ -69,7 +69,7 @@ CREATE TABLE posts (
 	}
 
 	// Check that we got actual SQL output
-	if result.SQL == "" {
+	if result.BaselineSQL == "" {
 		t.Error("Expected SQL output, got empty string")
 	}
 

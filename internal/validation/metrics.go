@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -22,13 +23,13 @@ type ValidationMetrics struct {
 	SlowestQueryDuration time.Duration `json:"slowest_query_duration_ms"`
 
 	// Count metrics
-	TotalValidations     int64 `json:"total_validations"`
+	TotalValidations      int64 `json:"total_validations"`
 	SuccessfulValidations int64 `json:"successful_validations"`
-	FailedValidations    int64 `json:"failed_validations"`
-	ObjectsValidated     int64 `json:"objects_validated"`
-	QueriesExecuted      int64 `json:"queries_executed"`
-	ErrorsFound          int64 `json:"errors_found"`
-	WarningsFound        int64 `json:"warnings_found"`
+	FailedValidations     int64 `json:"failed_validations"`
+	ObjectsValidated      int64 `json:"objects_validated"`
+	QueriesExecuted       int64 `json:"queries_executed"`
+	ErrorsFound           int64 `json:"errors_found"`
+	WarningsFound         int64 `json:"warnings_found"`
 
 	// Schema metrics
 	TablesValidated      int64 `json:"tables_validated"`
@@ -45,7 +46,7 @@ type ValidationMetrics struct {
 	DockerFailures       int64         `json:"docker_failures"`
 
 	// Error breakdown
-	ErrorsByCode map[string]int64 `json:"errors_by_code"`
+	ErrorsByCode     map[string]int64 `json:"errors_by_code"`
 	ErrorsBySeverity map[string]int64 `json:"errors_by_severity"`
 
 	// Warning breakdown
@@ -65,13 +66,13 @@ type ValidationMetrics struct {
 	FixesFailed    int64 `json:"fixes_failed"`
 
 	// Resource metrics
-	PeakMemoryUsage int64 `json:"peak_memory_bytes"`
+	PeakMemoryUsage int64         `json:"peak_memory_bytes"`
 	CPUTimeUsed     time.Duration `json:"cpu_time_ms"`
 
 	// Metadata
-	ValidationLevel string    `json:"validation_level"`
-	PostgreSQLVersion string  `json:"postgresql_version"`
-	LastUpdated     time.Time `json:"last_updated"`
+	ValidationLevel   string    `json:"validation_level"`
+	PostgreSQLVersion string    `json:"postgresql_version"`
+	LastUpdated       time.Time `json:"last_updated"`
 }
 
 // NewValidationMetrics creates a new validation metrics collector
@@ -263,43 +264,43 @@ func (m *ValidationMetrics) GetSnapshot() *ValidationMetrics {
 	defer m.mu.RUnlock()
 
 	snapshot := &ValidationMetrics{
-		TotalDuration:        m.TotalDuration,
-		ValidationStartTime:  m.ValidationStartTime,
-		ValidationEndTime:    m.ValidationEndTime,
-		AverageQueryDuration: m.AverageQueryDuration,
-		SlowestQueryDuration: m.SlowestQueryDuration,
-		TotalValidations:     m.TotalValidations,
-		SuccessfulValidations: m.SuccessfulValidations,
-		FailedValidations:    m.FailedValidations,
-		ObjectsValidated:     m.ObjectsValidated,
-		QueriesExecuted:      m.QueriesExecuted,
-		ErrorsFound:          m.ErrorsFound,
-		WarningsFound:        m.WarningsFound,
-		TablesValidated:      m.TablesValidated,
-		IndexesValidated:     m.IndexesValidated,
-		FunctionsValidated:   m.FunctionsValidated,
-		TriggersValidated:    m.TriggersValidated,
-		ConstraintsValidated: m.ConstraintsValidated,
-		ViewsValidated:       m.ViewsValidated,
-		ExtensionsDetected:   m.ExtensionsDetected,
-		DockerContainersSpun: m.DockerContainersSpun,
-		DockerValidationTime: m.DockerValidationTime,
-		DockerFailures:       m.DockerFailures,
-		ErrorsByCode:         copyInt64Map(m.ErrorsByCode),
-		ErrorsBySeverity:     copyInt64Map(m.ErrorsBySeverity),
-		WarningsByCode:       copyInt64Map(m.WarningsByCode),
-		ApproachUsage:        copyInt64Map(m.ApproachUsage),
+		TotalDuration:            m.TotalDuration,
+		ValidationStartTime:      m.ValidationStartTime,
+		ValidationEndTime:        m.ValidationEndTime,
+		AverageQueryDuration:     m.AverageQueryDuration,
+		SlowestQueryDuration:     m.SlowestQueryDuration,
+		TotalValidations:         m.TotalValidations,
+		SuccessfulValidations:    m.SuccessfulValidations,
+		FailedValidations:        m.FailedValidations,
+		ObjectsValidated:         m.ObjectsValidated,
+		QueriesExecuted:          m.QueriesExecuted,
+		ErrorsFound:              m.ErrorsFound,
+		WarningsFound:            m.WarningsFound,
+		TablesValidated:          m.TablesValidated,
+		IndexesValidated:         m.IndexesValidated,
+		FunctionsValidated:       m.FunctionsValidated,
+		TriggersValidated:        m.TriggersValidated,
+		ConstraintsValidated:     m.ConstraintsValidated,
+		ViewsValidated:           m.ViewsValidated,
+		ExtensionsDetected:       m.ExtensionsDetected,
+		DockerContainersSpun:     m.DockerContainersSpun,
+		DockerValidationTime:     m.DockerValidationTime,
+		DockerFailures:           m.DockerFailures,
+		ErrorsByCode:             copyInt64Map(m.ErrorsByCode),
+		ErrorsBySeverity:         copyInt64Map(m.ErrorsBySeverity),
+		WarningsByCode:           copyInt64Map(m.WarningsByCode),
+		ApproachUsage:            copyInt64Map(m.ApproachUsage),
 		ExtensionInstallAttempts: m.ExtensionInstallAttempts,
 		ExtensionInstallFailures: m.ExtensionInstallFailures,
 		ExtensionInstallTime:     m.ExtensionInstallTime,
-		FixesAttempted:       m.FixesAttempted,
-		FixesSucceeded:       m.FixesSucceeded,
-		FixesFailed:          m.FixesFailed,
-		PeakMemoryUsage:      m.PeakMemoryUsage,
-		CPUTimeUsed:          m.CPUTimeUsed,
-		ValidationLevel:      m.ValidationLevel,
-		PostgreSQLVersion:    m.PostgreSQLVersion,
-		LastUpdated:          m.LastUpdated,
+		FixesAttempted:           m.FixesAttempted,
+		FixesSucceeded:           m.FixesSucceeded,
+		FixesFailed:              m.FixesFailed,
+		PeakMemoryUsage:          m.PeakMemoryUsage,
+		CPUTimeUsed:              m.CPUTimeUsed,
+		ValidationLevel:          m.ValidationLevel,
+		PostgreSQLVersion:        m.PostgreSQLVersion,
+		LastUpdated:              m.LastUpdated,
 	}
 
 	return snapshot
@@ -311,85 +312,85 @@ func (m *ValidationMetrics) ExportJSON(w io.Writer) error {
 
 	// Convert durations to milliseconds for JSON
 	jsonMetrics := struct {
-		TotalDurationMS        int64            `json:"total_duration_ms"`
-		ValidationStartTime    string           `json:"validation_start_time"`
-		ValidationEndTime      string           `json:"validation_end_time"`
-		AverageQueryDurationMS int64            `json:"average_query_duration_ms"`
-		SlowestQueryDurationMS int64            `json:"slowest_query_duration_ms"`
-		TotalValidations       int64            `json:"total_validations"`
-		SuccessfulValidations  int64            `json:"successful_validations"`
-		FailedValidations      int64            `json:"failed_validations"`
-		SuccessRate            float64          `json:"success_rate_percent"`
-		ObjectsValidated       int64            `json:"objects_validated"`
-		QueriesExecuted        int64            `json:"queries_executed"`
-		ErrorsFound            int64            `json:"errors_found"`
-		WarningsFound          int64            `json:"warnings_found"`
-		TablesValidated        int64            `json:"tables_validated"`
-		IndexesValidated       int64            `json:"indexes_validated"`
-		FunctionsValidated     int64            `json:"functions_validated"`
-		TriggersValidated      int64            `json:"triggers_validated"`
-		ConstraintsValidated   int64            `json:"constraints_validated"`
-		ViewsValidated         int64            `json:"views_validated"`
-		ExtensionsDetected     int64            `json:"extensions_detected"`
-		DockerContainersSpun   int64            `json:"docker_containers_spun"`
-		DockerValidationTimeMS int64            `json:"docker_validation_time_ms"`
-		DockerFailures         int64            `json:"docker_failures"`
-		ErrorsByCode           map[string]int64 `json:"errors_by_code"`
-		ErrorsBySeverity       map[string]int64 `json:"errors_by_severity"`
-		WarningsByCode         map[string]int64 `json:"warnings_by_code"`
-		ApproachUsage          map[string]int64 `json:"approach_usage"`
-		ExtensionInstallAttempts int64         `json:"extension_install_attempts"`
-		ExtensionInstallFailures int64         `json:"extension_install_failures"`
-		ExtensionInstallTimeMS   int64         `json:"extension_install_time_ms"`
-		FixesAttempted         int64            `json:"fixes_attempted"`
-		FixesSucceeded         int64            `json:"fixes_succeeded"`
-		FixesFailed            int64            `json:"fixes_failed"`
-		FixSuccessRate         float64          `json:"fix_success_rate_percent"`
-		PeakMemoryBytes        int64            `json:"peak_memory_bytes"`
-		CPUTimeMS              int64            `json:"cpu_time_ms"`
-		ValidationLevel        string           `json:"validation_level"`
-		PostgreSQLVersion      string           `json:"postgresql_version"`
-		LastUpdated            string           `json:"last_updated"`
+		TotalDurationMS          int64            `json:"total_duration_ms"`
+		ValidationStartTime      string           `json:"validation_start_time"`
+		ValidationEndTime        string           `json:"validation_end_time"`
+		AverageQueryDurationMS   int64            `json:"average_query_duration_ms"`
+		SlowestQueryDurationMS   int64            `json:"slowest_query_duration_ms"`
+		TotalValidations         int64            `json:"total_validations"`
+		SuccessfulValidations    int64            `json:"successful_validations"`
+		FailedValidations        int64            `json:"failed_validations"`
+		SuccessRate              float64          `json:"success_rate_percent"`
+		ObjectsValidated         int64            `json:"objects_validated"`
+		QueriesExecuted          int64            `json:"queries_executed"`
+		ErrorsFound              int64            `json:"errors_found"`
+		WarningsFound            int64            `json:"warnings_found"`
+		TablesValidated          int64            `json:"tables_validated"`
+		IndexesValidated         int64            `json:"indexes_validated"`
+		FunctionsValidated       int64            `json:"functions_validated"`
+		TriggersValidated        int64            `json:"triggers_validated"`
+		ConstraintsValidated     int64            `json:"constraints_validated"`
+		ViewsValidated           int64            `json:"views_validated"`
+		ExtensionsDetected       int64            `json:"extensions_detected"`
+		DockerContainersSpun     int64            `json:"docker_containers_spun"`
+		DockerValidationTimeMS   int64            `json:"docker_validation_time_ms"`
+		DockerFailures           int64            `json:"docker_failures"`
+		ErrorsByCode             map[string]int64 `json:"errors_by_code"`
+		ErrorsBySeverity         map[string]int64 `json:"errors_by_severity"`
+		WarningsByCode           map[string]int64 `json:"warnings_by_code"`
+		ApproachUsage            map[string]int64 `json:"approach_usage"`
+		ExtensionInstallAttempts int64            `json:"extension_install_attempts"`
+		ExtensionInstallFailures int64            `json:"extension_install_failures"`
+		ExtensionInstallTimeMS   int64            `json:"extension_install_time_ms"`
+		FixesAttempted           int64            `json:"fixes_attempted"`
+		FixesSucceeded           int64            `json:"fixes_succeeded"`
+		FixesFailed              int64            `json:"fixes_failed"`
+		FixSuccessRate           float64          `json:"fix_success_rate_percent"`
+		PeakMemoryBytes          int64            `json:"peak_memory_bytes"`
+		CPUTimeMS                int64            `json:"cpu_time_ms"`
+		ValidationLevel          string           `json:"validation_level"`
+		PostgreSQLVersion        string           `json:"postgresql_version"`
+		LastUpdated              string           `json:"last_updated"`
 	}{
-		TotalDurationMS:        snapshot.TotalDuration.Milliseconds(),
-		ValidationStartTime:    snapshot.ValidationStartTime.Format(time.RFC3339),
-		ValidationEndTime:      snapshot.ValidationEndTime.Format(time.RFC3339),
-		AverageQueryDurationMS: snapshot.AverageQueryDuration.Milliseconds(),
-		SlowestQueryDurationMS: snapshot.SlowestQueryDuration.Milliseconds(),
-		TotalValidations:       snapshot.TotalValidations,
-		SuccessfulValidations:  snapshot.SuccessfulValidations,
-		FailedValidations:      snapshot.FailedValidations,
-		SuccessRate:            calculateSuccessRate(snapshot.SuccessfulValidations, snapshot.TotalValidations),
-		ObjectsValidated:       snapshot.ObjectsValidated,
-		QueriesExecuted:        snapshot.QueriesExecuted,
-		ErrorsFound:            snapshot.ErrorsFound,
-		WarningsFound:          snapshot.WarningsFound,
-		TablesValidated:        snapshot.TablesValidated,
-		IndexesValidated:       snapshot.IndexesValidated,
-		FunctionsValidated:     snapshot.FunctionsValidated,
-		TriggersValidated:      snapshot.TriggersValidated,
-		ConstraintsValidated:   snapshot.ConstraintsValidated,
-		ViewsValidated:         snapshot.ViewsValidated,
-		ExtensionsDetected:     snapshot.ExtensionsDetected,
-		DockerContainersSpun:   snapshot.DockerContainersSpun,
-		DockerValidationTimeMS: snapshot.DockerValidationTime.Milliseconds(),
-		DockerFailures:         snapshot.DockerFailures,
-		ErrorsByCode:           snapshot.ErrorsByCode,
-		ErrorsBySeverity:       snapshot.ErrorsBySeverity,
-		WarningsByCode:         snapshot.WarningsByCode,
-		ApproachUsage:          snapshot.ApproachUsage,
+		TotalDurationMS:          snapshot.TotalDuration.Milliseconds(),
+		ValidationStartTime:      snapshot.ValidationStartTime.Format(time.RFC3339),
+		ValidationEndTime:        snapshot.ValidationEndTime.Format(time.RFC3339),
+		AverageQueryDurationMS:   snapshot.AverageQueryDuration.Milliseconds(),
+		SlowestQueryDurationMS:   snapshot.SlowestQueryDuration.Milliseconds(),
+		TotalValidations:         snapshot.TotalValidations,
+		SuccessfulValidations:    snapshot.SuccessfulValidations,
+		FailedValidations:        snapshot.FailedValidations,
+		SuccessRate:              calculateSuccessRate(snapshot.SuccessfulValidations, snapshot.TotalValidations),
+		ObjectsValidated:         snapshot.ObjectsValidated,
+		QueriesExecuted:          snapshot.QueriesExecuted,
+		ErrorsFound:              snapshot.ErrorsFound,
+		WarningsFound:            snapshot.WarningsFound,
+		TablesValidated:          snapshot.TablesValidated,
+		IndexesValidated:         snapshot.IndexesValidated,
+		FunctionsValidated:       snapshot.FunctionsValidated,
+		TriggersValidated:        snapshot.TriggersValidated,
+		ConstraintsValidated:     snapshot.ConstraintsValidated,
+		ViewsValidated:           snapshot.ViewsValidated,
+		ExtensionsDetected:       snapshot.ExtensionsDetected,
+		DockerContainersSpun:     snapshot.DockerContainersSpun,
+		DockerValidationTimeMS:   snapshot.DockerValidationTime.Milliseconds(),
+		DockerFailures:           snapshot.DockerFailures,
+		ErrorsByCode:             snapshot.ErrorsByCode,
+		ErrorsBySeverity:         snapshot.ErrorsBySeverity,
+		WarningsByCode:           snapshot.WarningsByCode,
+		ApproachUsage:            snapshot.ApproachUsage,
 		ExtensionInstallAttempts: snapshot.ExtensionInstallAttempts,
 		ExtensionInstallFailures: snapshot.ExtensionInstallFailures,
 		ExtensionInstallTimeMS:   snapshot.ExtensionInstallTime.Milliseconds(),
-		FixesAttempted:         snapshot.FixesAttempted,
-		FixesSucceeded:         snapshot.FixesSucceeded,
-		FixesFailed:            snapshot.FixesFailed,
-		FixSuccessRate:         calculateSuccessRate(snapshot.FixesSucceeded, snapshot.FixesAttempted),
-		PeakMemoryBytes:        snapshot.PeakMemoryUsage,
-		CPUTimeMS:              snapshot.CPUTimeUsed.Milliseconds(),
-		ValidationLevel:        snapshot.ValidationLevel,
-		PostgreSQLVersion:      snapshot.PostgreSQLVersion,
-		LastUpdated:            snapshot.LastUpdated.Format(time.RFC3339),
+		FixesAttempted:           snapshot.FixesAttempted,
+		FixesSucceeded:           snapshot.FixesSucceeded,
+		FixesFailed:              snapshot.FixesFailed,
+		FixSuccessRate:           calculateSuccessRate(snapshot.FixesSucceeded, snapshot.FixesAttempted),
+		PeakMemoryBytes:          snapshot.PeakMemoryUsage,
+		CPUTimeMS:                snapshot.CPUTimeUsed.Milliseconds(),
+		ValidationLevel:          snapshot.ValidationLevel,
+		PostgreSQLVersion:        snapshot.PostgreSQLVersion,
+		LastUpdated:              snapshot.LastUpdated.Format(time.RFC3339),
 	}
 
 	encoder := json.NewEncoder(w)
@@ -404,7 +405,7 @@ func (m *ValidationMetrics) ExportPrometheus(w io.Writer) error {
 	var sb strings.Builder
 
 	// Helper to write metric
-	writeMetric := func(name, help, mtype string, value interface{}, labels ...string) {
+	writeMetric := func(name, help, mtype string, value any, labels ...string) {
 		sb.WriteString(fmt.Sprintf("# HELP %s %s\n", name, help))
 		sb.WriteString(fmt.Sprintf("# TYPE %s %s\n", name, mtype))
 
@@ -562,9 +563,7 @@ func (m *ValidationMetrics) Reset() {
 
 func copyInt64Map(src map[string]int64) map[string]int64 {
 	dst := make(map[string]int64, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
+	maps.Copy(dst, src)
 	return dst
 }
 

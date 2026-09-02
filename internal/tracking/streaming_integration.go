@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/performance"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/performance"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // StreamingTracker integrates UnifiedTracker with performance streaming capabilities
@@ -77,7 +77,7 @@ func (st *StreamingTracker) ProcessDirectory(dir string) error {
 	st.streamingProcessor.Start()
 
 	// Start our tracking workers
-	for i := 0; i < 2; i++ { // Use 2 workers for tracking
+	for i := range 2 { // Use 2 workers for tracking
 		st.wg.Add(1)
 		go st.trackingWorker(i)
 	}
@@ -91,7 +91,7 @@ func (st *StreamingTracker) ProcessDirectory(dir string) error {
 		st.cancel()
 		st.wg.Wait()
 		return errors.Wrap(err, errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation,
-			"streaming processor failed", map[string]interface{}{"directory": dir})
+			"streaming processor failed", map[string]any{"directory": dir})
 	}
 
 	// Process all migration results
@@ -244,7 +244,6 @@ func (st *StreamingTracker) Stop() error {
 type MemoryOptimizedTracker struct {
 	*StreamingTracker
 	memoryThreshold int64 // Memory threshold in bytes
-	currentMemory   int64 //nolint:unused // Reserved for future memory tracking
 }
 
 // NewMemoryOptimizedTracker creates a tracker optimized for low memory usage

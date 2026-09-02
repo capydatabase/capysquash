@@ -279,12 +279,12 @@ setup_docker_compose() {
 
     # Download docker-compose.yml
     log_substep "Downloading docker-compose.yml..."
-    curl -sSL "https://raw.githubusercontent.com/CAPYSQUASH/pgsquash/main/docker-compose.yml" \
+    curl -sSL "https://raw.githubusercontent.com/capysquash/pgsquash/main/docker-compose.yml" \
         -o "$CONFIG_DIR/docker-compose.yml"
 
     # Download .env.example and create .env
     log_substep "Setting up environment configuration..."
-    curl -sSL "https://raw.githubusercontent.com/CAPYSQUASH/pgsquash/main/.env.example" \
+    curl -sSL "https://raw.githubusercontent.com/capysquash/pgsquash/main/.env.example" \
         -o "$CONFIG_DIR/.env.example"
 
     if [[ ! -f "$CONFIG_DIR/.env" ]]; then
@@ -327,9 +327,11 @@ pull_docker_images() {
     # Pull base images
     local images=(
         "postgres:17"
+        "postgres:16"
         "postgres:15"
+        "postgres:18"
         "redis:7"
-        "ghcr.io/CAPYSQUASH/pgsquash:latest"
+        "ghcr.io/capysquash/pgsquash:latest"
     )
 
     for image in "${images[@]}"; do
@@ -471,7 +473,7 @@ generate_sample_data() {
     local sample_script="$DATA_DIR/create-samples.sh"
 
     # Download sample generator
-    curl -sSL "https://raw.githubusercontent.com/CAPYSQUASH/pgsquash/main/docker/init-scripts/create-sample-migrations.sh" \
+    curl -sSL "https://raw.githubusercontent.com/capysquash/pgsquash/main/docker/init-scripts/create-sample-migrations.sh" \
         -o "$sample_script"
     chmod +x "$sample_script"
 

@@ -2,27 +2,32 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/ai"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/config"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/parser"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/squasher"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/transformation"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/validation"
+	"github.com/capysquash/pgsquash-engine/internal/config"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
+	"github.com/capysquash/pgsquash-engine/internal/squasher"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/internal/transformation"
+	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/validation"
+	engineapi "github.com/capysquash/pgsquash-engine/pkg/engine"
+	harnesscontract "github.com/capysquash/pgsquash-engine/pkg/harness"
 )
 
 var (
@@ -50,21 +55,24 @@ var (
 	cycleDetectionDepth  int
 	showCycleDetails     bool
 
-	// AI fix options
-	maxFixAttempts int
-	autoApplyFixes bool
-
 	// Validation options
-	validationMode    string
-	workflowOutputDir string
-	noValidate        bool
-	failOnDiff        bool
-	openReport        bool
+	validationMode         string
+	workflowOutputDir      string
+	noValidate             bool
+	failOnDiff             bool
+	strictParse            bool
+	openReport             bool
+	customDockerImage      string
+	emitHarnessReport      bool
+	harnessReportPath      string
+	externalDSN            string
+	externalDSNEnv         string
+	snapshotOutput         string
+	againstSnapshot        string
+	externalJSON           bool
+	externalAllowedSchemas []string
 
-	// Transaction planning options
-	showPlan         bool
-	explainLocks     bool
-	splitBySchema    string
+	// Branch safety options
 	branchCheck      bool
 	iKnowWhatImDoing bool
 
@@ -72,8 +80,9 @@ var (
 	forceOverwrite bool
 
 	// Output options
-	quietMode bool
-	noEmoji   bool
+	quietMode  bool
+	noEmoji    bool
+	squashJSON bool
 
 	// TUI mode
 	tuiMode bool
@@ -82,13 +91,12 @@ var (
 var rootCmd = &cobra.Command{
 	Use:     "pgsquash",
 	Short:   "pgsquash-engine - Intelligent PostgreSQL migration consolidation",
-	Version: "0.9.5",
+	Version: "0.9.7",
 	Long: `pgsquash-engine intelligently consolidates PostgreSQL migration files into
 clean, production-ready SQL while preserving data integrity, respecting
 dependencies, and validating safety at every step.
 
-The pgsquash-engine is the core consolidation engine that powers
-CAPYSQUASH and provides parser-grade accuracy for migration optimization.`,
+The pgsquash-engine can be used directly or embedded through its public Go API.`,
 	// UX FIX: Silence duplicate error messages - errors are already logged in main()
 	SilenceErrors: true,
 	// UX FIX: Don't show usage on every error - only when explicitly requested with --help
@@ -123,44 +131,37 @@ migrations to ensure they produce identical results.`,
 	RunE: runValidate,
 }
 
+var validateExternalCmd = &cobra.Command{
+	Use:   "validate-external [migrations path]",
+	Short: "Apply migrations to an empty external database and capture or compare its catalog",
+	Long: `Apply migrations only after confirming that the caller-owned database is empty.
+
+Use --snapshot-output to capture the original catalog, then reset or replace the
+database and use --against-snapshot to validate a generated baseline. Connection
+details are never included in the snapshot or JSON result.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runValidateExternal,
+}
+
+var lintCmd = &cobra.Command{
+	Use:   "lint [migration files or directories...]",
+	Short: "Run static SQL lint rules on migrations",
+	Long: `Run static AST-based lint checks against migration SQL files.
+
+Examples:
+  pgsquash lint ./migrations
+  pgsquash lint ./migrations/*.sql --enable-rule CSQ.SAFETY.CONCURRENT_INDEX
+  pgsquash lint ./migrations --fix --write
+`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runLint,
+}
+
 var initConfigCmd = &cobra.Command{
 	Use:   "init-config",
 	Short: "Generate default configuration file",
 	Long:  `Create a default pgsquash.config.json file with all available options.`,
 	RunE:  runInitConfig,
-}
-
-var aiTestCmd = &cobra.Command{
-	Use:   "ai-test",
-	Short: "Test AI provider integrations",
-	Long: `Test the AI provider system including Claude, OpenAI, and other
-configured providers. Shows available capabilities and runs integration tests.`,
-	RunE: runAITest,
-}
-
-var aiDemoCmd = &cobra.Command{
-	Use:   "ai-demo",
-	Short: "Demonstrate AI analysis capabilities",
-	Long: `Run demonstration of AI analysis capabilities with sample PostgreSQL
-functions and schemas to showcase semantic analysis, dead code detection,
-and other AI-powered features.`,
-	RunE: runAIDemo,
-}
-
-var aiFixCmd = &cobra.Command{
-	Use:   "ai-fix [migration directory]",
-	Short: "AI-assisted migration fixing",
-	Long: `Use AI to automatically analyze and fix broken migrations.
-This command runs validation, analyzes errors, and uses AI to suggest and apply fixes
-in an interactive loop until migrations validate successfully.
-
-Requires: ANTHROPIC_API_KEY, OPENAI_API_KEY, or AZURE_OPENAI_ENDPOINT
-
-Example:
-  pgsquash ai-fix migrations/
-  pgsquash ai-fix migrations/ --max-attempts 10 --auto-apply`,
-	Args: cobra.ExactArgs(1),
-	RunE: runAIFix,
 }
 
 // Standardized workflow commands
@@ -212,7 +213,6 @@ Ideal for understanding migration complexity and planning consolidation strategy
 Features enabled:
 - Complete dependency graph analysis
 - Advanced DDL cycle detection with all algorithm types
-- AI-powered semantic analysis (if configured)
 - Authentication pattern detection
 - Dead code identification
 - Performance optimization suggestions
@@ -253,11 +253,13 @@ func init() {
 	squashCmd.Flags().BoolVar(&tuiMode, "tui", false,
 		"Launch interactive TUI for squashing")
 	squashCmd.Flags().StringVarP(&safetyLevel, "safety", "s", "",
-		"Safety level: conservative, standard, aggressive (overrides config)")
+		"Safety level: paranoid, conservative, standard, aggressive (overrides config)")
 	squashCmd.Flags().StringVarP(&outputDir, "output", "o", "",
 		"Output directory (overrides config)")
 	squashCmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"Show what would be done without writing files")
+	squashCmd.Flags().BoolVar(&squashJSON, "json", false,
+		"Emit machine-readable dry-run output as JSON (requires --dry-run)")
 	squashCmd.Flags().BoolVar(&explainMode, "explain", false,
 		"Show detailed consolidation plan with reasoning (implies --dry-run)")
 	squashCmd.Flags().BoolVar(&showProgress, "progress", true,
@@ -281,7 +283,7 @@ func init() {
 	squashCmd.Flags().BoolVar(&enableTransformation, "transform", true,
 		"Apply SQL transformations and modernization (default: enabled)")
 	squashCmd.Flags().StringVar(&backupPath, "backup-path", "",
-		"Custom backup file path (default: auto-generated)")
+		"Directory for pg_dump backups, created if missing (default: <output>/.backups; requires --backup)")
 	squashCmd.Flags().StringVar(&rollbackPath, "rollback-path", "rollbacks",
 		"Directory for rollback scripts (default: ./rollbacks)")
 
@@ -296,18 +298,18 @@ func init() {
 	// Validation flags
 	squashCmd.Flags().BoolVar(&noValidate, "no-validate", false,
 		"Skip automatic validation after squashing")
-	squashCmd.Flags().BoolVar(&failOnDiff, "fail-on-diff", false,
-		"Exit with error code 1 if schema differences are detected during validation")
+	squashCmd.Flags().BoolVar(&failOnDiff, "fail-on-diff", true,
+		"Exit non-zero when post-squash validation detects real schema differences (default true; pass --fail-on-diff=false to downgrade to a warning)")
+	squashCmd.Flags().BoolVar(&strictParse, "strict-parse", false,
+		"Fail if any migration file has partial parse errors")
 	squashCmd.Flags().BoolVar(&openReport, "open-report", false,
 		"Open validation report in $EDITOR after validation")
-
-	// Transaction planning and lock analysis flags
-	squashCmd.Flags().BoolVar(&showPlan, "plan", false,
-		"Show transaction batching plan without executing")
-	squashCmd.Flags().BoolVar(&explainLocks, "explain-locks", false,
-		"Show detailed lock-level analysis for all statements")
-	squashCmd.Flags().StringVar(&splitBySchema, "split-by", "",
-		"Split output by: schema, object, or none (default: none)")
+	squashCmd.Flags().StringVar(&customDockerImage, "docker-image", "",
+		"Custom Docker image with pre-installed extensions (e.g., 'myregistry/postgres-postgis:17')")
+	squashCmd.Flags().BoolVar(&emitHarnessReport, "emit-context", false,
+		"Emit deterministic AI harness context artifact after squash")
+	squashCmd.Flags().StringVar(&harnessReportPath, "context-output", "",
+		"Path to write deterministic context artifact (default: <output>/.capysquash.context.v1.json)")
 
 	// Branch safety flags
 	squashCmd.Flags().BoolVar(&branchCheck, "branch-check", false,
@@ -315,17 +317,23 @@ func init() {
 	squashCmd.Flags().BoolVar(&iKnowWhatImDoing, "i-know-what-im-doing", false,
 		"Override all safety warnings (use with caution)")
 
-	// AI fix command flags
-	aiFixCmd.Flags().IntVar(&maxFixAttempts, "max-attempts", 5,
-		"Maximum number of fix attempts (default: 5)")
-	aiFixCmd.Flags().BoolVar(&autoApplyFixes, "auto-apply", false,
-		"Automatically apply fixes without confirmation (default: false)")
-	aiFixCmd.Flags().BoolVar(&verbose, "verbose", false,
-		"Enable verbose output")
-
 	// Validate command flags
 	validateCmd.Flags().StringVar(&validationMode, "validation-mode", "",
 		"Validation approach: TWO_CONTAINERS, TWO_DATABASES, or SCHEMA_DIFF (default: from config or TWO_DATABASES)")
+	validateExternalCmd.Flags().StringVar(&externalDSN, "dsn", "",
+		"Connection URL for a caller-owned empty validation database")
+	validateExternalCmd.Flags().StringVar(&externalDSNEnv, "dsn-env", "",
+		"Read the validation database connection URL from this environment variable")
+	validateExternalCmd.Flags().StringVar(&snapshotOutput, "snapshot-output", "",
+		"Write the captured catalog snapshot to this file")
+	validateExternalCmd.Flags().StringVar(&againstSnapshot, "against-snapshot", "",
+		"Compare the captured catalog against this snapshot file")
+	validateExternalCmd.Flags().BoolVar(&externalJSON, "json", false,
+		"Emit the stable external-validation result as JSON")
+	validateExternalCmd.Flags().StringSliceVar(&externalAllowedSchemas, "allow-existing-schema", nil,
+		"Platform-owned schema allowed in the otherwise empty validation database (repeatable)")
+	squashCmd.Flags().StringVar(&validationMode, "validation-mode", "",
+		"Validation approach for post-squash validation: TWO_CONTAINERS, TWO_DATABASES, or SCHEMA_DIFF (default: from config)")
 
 	// Init-config command flags
 	initConfigCmd.Flags().BoolVarP(&forceOverwrite, "force", "f", false,
@@ -339,15 +347,24 @@ func init() {
 	analyzeDeepCmd.Flags().StringVarP(&workflowOutputDir, "output", "o", "",
 		"Output directory for analysis results (overrides config)")
 
-	// Add commands to root
-	rootCmd.AddCommand(analyzeCmd, squashCmd, validateCmd, initConfigCmd, aiTestCmd, aiDemoCmd, aiFixCmd, safeCmd, fastCmd, analyzeDeepCmd)
+	// Static validation flags
+	validateCmd.Flags().StringSlice("enable-rule", nil, "Enable specific static validation rules")
+	validateCmd.Flags().StringSlice("disable-rule", nil, "Disable specific static validation rules")
+	validateCmd.Flags().Bool("strict", false, "Treat all validation warnings as errors")
+	lintCmd.Flags().StringSlice("enable-rule", nil, "Enable specific static validation rules")
+	lintCmd.Flags().StringSlice("disable-rule", nil, "Disable specific static validation rules")
+	lintCmd.Flags().Bool("strict", false, "Treat all lint violations as errors")
+	lintCmd.Flags().Bool("fix", false, "Apply available autofixes in memory")
+	lintCmd.Flags().Bool("write", false, "Write autofix output back to files (requires --fix)")
+	lintCmd.Flags().Bool("json", false, "Emit lint output as JSON")
+	rootCmd.AddCommand(analyzeCmd, squashCmd, validateCmd, validateExternalCmd, lintCmd, initConfigCmd, safeCmd, fastCmd, analyzeDeepCmd)
 }
 
 func Execute() error {
 	// Configure global logging based on verbose flag
 	// This is called before any command runs via PersistentPreRun
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
-		if quietMode {
+		if quietMode || squashJSON || externalJSON {
 			// Quiet mode: suppress all non-error output
 			verbose = false
 			showProgress = false
@@ -375,15 +392,20 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 
 	startTime := time.Now()
 
-	// Load configuration
-	_, err := config.LoadConfig(configPath)
+	// Load configuration to honor performance settings (streaming threshold,
+	// show_progress) during analysis.
+	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
 			"Failed to load configuration",
 			errors.SeverityError,
 			errors.CategoryValidation,
-		).WithFile(configPath).WithInnerError(err).WithSuggestion("Check that pgsquash.config.json exists and is valid JSON")
+		).WithFile(configPath).WithInnerError(err).WithSuggestion("Run 'pgsquash init-config' to generate a valid configuration file")
+	}
+
+	if !cmd.Flags().Changed("progress") {
+		showProgress = cfg.Performance.ShowProgress
 	}
 
 	if verbose {
@@ -394,12 +416,16 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 	var migrations []*MigrationWithContent
 
 	// Use streaming for large datasets or when explicitly requested
-	if streaming || len(args) > 100 {
+	useStreaming, autoStreamReason := streaming, ""
+	if !useStreaming {
+		useStreaming, autoStreamReason = shouldAutoStream(args, cfg)
+	}
+	if useStreaming {
 		// Show streaming mode indicator
 		if streaming {
 			color.Cyan("🚀 Streaming mode: enabled (memory limit: %dMB)\n", memoryLimitMB)
 		} else {
-			color.Cyan("🚀 Auto-enabling streaming mode for %d files (threshold: 100)\n", len(args))
+			color.Cyan("🚀 Auto-enabling streaming mode: %s\n", autoStreamReason)
 		}
 		// Create memory-optimized tracker for large datasets
 		memTracker := tracking.NewMemoryOptimizedTracker(memoryLimitMB, 50)
@@ -480,6 +506,22 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 }
 
 func runSquash(cmd *cobra.Command, args []string) error {
+	if squashJSON && !dryRun {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"--json requires --dry-run",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
+	if squashJSON && explainMode {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"--json cannot be combined with --explain",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
 	// Check if TUI mode is requested
 	if tuiMode {
 		// Get migration directory from args
@@ -491,14 +533,42 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	}
 
 	startTime := time.Now()
+	validationStatus := "skipped"
+	validationModeUsed := ""
+	objectsConsolidated := 0
 
 	// If explain mode is enabled, imply dry-run
 	if explainMode {
 		dryRun = true
+		validationStatus = "dry_run"
+	}
+
+	// Enforce branch safety checks for non-dry-run squashing.
+	// Dry-run/explain modes do not mutate output files and skip branch gating.
+	if !dryRun {
+		branchSafety := NewBranchSafetyChecker()
+		safeToProceed, branchErr := branchSafety.CheckBranchSafety(branchCheck, iKnowWhatImDoing)
+		if branchErr != nil {
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"Branch safety check failed",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(branchErr).WithSuggestion("Use --i-know-what-im-doing only when you intentionally want to bypass branch safety prompts")
+		}
+
+		if !safeToProceed {
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"Squash cancelled due to branch safety policy",
+				errors.SeverityWarning,
+				errors.CategoryValidation,
+			)
+		}
 	}
 
 	// Load configuration
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
@@ -508,21 +578,59 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		).WithFile(configPath).WithInnerError(err).WithSuggestion("Run 'pgsquash init-config' to generate a valid configuration file")
 	}
 
-	// Override config with command line flags
-	if safetyLevel != "" {
-		cfg.SafetyLevel = safetyLevel
+	// Override config with command line flags.
+	// The --safety flag is validated here: an unknown value must be rejected,
+	// never silently accepted (which used to disable all consolidation rules).
+	if err := applySafetyOverride(cfg, safetyLevel); err != nil {
+		return err
 	}
 	if outputDir != "" {
 		cfg.Output.Directory = outputDir
 	} else if cfg.Output.Directory == "squashed" {
-		if !verbose {
+		if !verbose && !squashJSON {
 			color.Cyan("ℹ️  Output directory not specified, using default: ./squashed\n")
 		}
+	}
+
+	// CLI --validation-mode overrides the config validation mode.
+	if err := applyValidationModeOverride(cfg, validationMode); err != nil {
+		return err
+	}
+
+	// Config show_progress wins when --progress was not explicitly set.
+	if !cmd.Flags().Changed("progress") {
+		showProgress = cfg.Performance.ShowProgress
+	}
+
+	validationModeUsed = strings.ToUpper(strings.TrimSpace(cfg.Validation.Mode))
+	if validationModeUsed == "" {
+		validationModeUsed = "TWO_DATABASES"
 	}
 
 	// Auto-detect worker count if not specified
 	if workerCount == 0 {
 		workerCount = runtime.NumCPU()
+	}
+
+	// Dry-run must not write anything anywhere: disable every write-producing
+	// side feature (pg_dump backups and rollback plan files).
+	if dryRun {
+		if (enableBackup || enableRollback) && !squashJSON {
+			color.Yellow("ℹ️  --dry-run: skipping backup and rollback generation (no files are written)\n")
+		}
+		enableBackup = false
+		enableRollback = false
+	}
+
+	// --backup-path only has an effect together with --backup; a silently
+	// ignored flag is a footgun, so reject the inconsistent combination.
+	if backupPath != "" && !enableBackup && !dryRun {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"--backup-path requires --backup",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithSuggestion("Add --backup to enable backup generation, or drop --backup-path")
 	}
 
 	if verbose {
@@ -531,8 +639,45 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Output directory: %s\n", cfg.Output.Directory)
 	}
 
+	// Streaming is used when explicitly requested, or auto-enabled by file
+	// count / total input size (performance.streaming_threshold_mb).
+	useStreaming, autoStreamReason := streaming, ""
+	if !useStreaming {
+		useStreaming, autoStreamReason = shouldAutoStream(args, cfg)
+	}
+
+	// Streaming mode does not execute backup/rollback generation or paranoid
+	// database validation; silently dropping them is not acceptable.
+	if useStreaming && (enableBackup || enableRollback) {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"--backup and --rollback are not supported in streaming mode",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithSuggestion("Drop --streaming (and stay under the auto-streaming thresholds), or run without --backup/--rollback")
+	}
+
+	// Streaming also skips the SQL transformation phase. If the user asked for
+	// --transform explicitly, reject the combination; if transformation is
+	// merely the flag default, disable it and record a visible warning instead
+	// of silently shipping untransformed output.
+	var streamingWarnings []string
+	if useStreaming && enableTransformation {
+		if cmd.Flags().Changed("transform") {
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"--transform is not supported in streaming mode",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithSuggestion("Drop --streaming (and stay under the auto-streaming thresholds), or run without --transform")
+		}
+		enableTransformation = false
+		streamingWarnings = append(streamingWarnings,
+			"Streaming mode: SQL transformation (default --transform) skipped - not supported in streaming mode")
+	}
+
 	// Show streaming mode info whenever streaming is explicitly enabled
-	if streaming {
+	if streaming && !squashJSON {
 		color.Cyan("🚀 Streaming mode: enabled (memory limit: %dMB, batch size: %d, workers: %d)\n",
 			memoryLimitMB, batchSize, workerCount)
 	}
@@ -540,18 +685,39 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	var finalSQL string
 	var warnings []string
 	var migrationCount int
+	var authCompatibilitySQL string
+	var dataOperationsSQL string
+	var provenanceMap *squasher.SquashMap
+	var requiredExtensions []string
+	var harnessMigrations []engineapi.DeterministicHarnessMigration
 
 	// Use streaming engine for large datasets or when explicitly requested
-	if streaming || len(args) > 100 {
-		if !streaming {
-			color.Cyan("🚀 Auto-enabling streaming mode for %d files (threshold: 100)\n", len(args))
+	if useStreaming {
+		if !streaming && !squashJSON {
+			color.Cyan("🚀 Auto-enabling streaming mode: %s\n", autoStreamReason)
 			color.Cyan("   Streaming: batch=%d, workers=%d, memory=%dMB\n", batchSize, workerCount, memoryLimitMB)
+		}
+
+		migrations, err := loadMigrations(args, showProgress)
+		if err != nil {
+			return err
+		}
+		harnessMigrations = deterministicHarnessMigrations(migrations)
+
+		parsePolicyWarnings, err := enforcePartialParsePolicy(migrations, strictParse)
+		if err != nil {
+			return err
+		}
+
+		migrationMap := make(map[int]string)
+		for i, m := range migrations {
+			migrationMap[i] = m.Content
 		}
 
 		// Use streaming engine with optimized settings
 		if len(args) > 500 {
 			// For very large datasets, use high-performance settings
-			finalSQL, warnings, err = squasher.OptimizedSquashForLargeDatasets(cfg, nil, memoryLimitMB)
+			res, err := squasher.OptimizedSquashForLargeDatasets(cfg, migrationMap, memoryLimitMB)
 			if err != nil {
 				return errors.NewError(
 					errors.ErrorCodeConsolidationFailed,
@@ -560,11 +726,16 @@ func runSquash(cmd *cobra.Command, args []string) error {
 					errors.CategoryConsolidation,
 				).WithInnerError(err).WithAdditional("file_count", len(args)).WithSuggestion("Try reducing memory limit or batch size, or use standard mode for smaller datasets")
 			}
-			migrationCount = len(args)
+			finalSQL = res.BaselineSQL
+			warnings = append(append(res.Warnings, parsePolicyWarnings...), streamingWarnings...)
+			authCompatibilitySQL = res.AuthCompatibilitySQL
+			requiredExtensions = res.Extensions
+			migrationCount = len(migrations)
 		} else {
 			// Create engine with streaming configuration
 			engineConfig := squasher.EngineConfig{
 				Config:              cfg,
+				Version:             rootCmd.Version,
 				BatchSize:           batchSize,
 				WorkerCount:         workerCount,
 				MemoryLimitMB:       memoryLimitMB,
@@ -577,6 +748,7 @@ func runSquash(cmd *cobra.Command, args []string) error {
 				EnableTransformation: enableTransformation,
 				BackupConfig:         createBackupConfig(),
 				TransformationConfig: createTransformationConfig(),
+				BackupPath:           backupPath,
 
 				EnableCycleDetection: enableCycleDetection,
 				ShowCycleDetails:     showCycleDetails,
@@ -594,20 +766,18 @@ func runSquash(cmd *cobra.Command, args []string) error {
 				}
 			}
 
-			engine := squasher.NewEngine(engineConfig)
-
-			// Load migrations and convert to map
-			migrations, err := loadMigrations(args, showProgress)
+			engine, err := squasher.NewEngine(engineConfig)
 			if err != nil {
-				return err
+				return errors.NewError(
+					errors.ErrorCodeConsolidationFailed,
+					"failed to initialize squashing engine for streaming mode",
+					errors.SeverityError,
+					errors.CategoryConsolidation,
+				).WithInnerError(err)
 			}
+			defer engine.Close()
 
-			migrationMap := make(map[int]string)
-			for i, m := range migrations {
-				migrationMap[i] = m.Content
-			}
-
-			finalSQL, warnings, err = engine.Squash(migrationMap)
+			squashResult, err := engine.Squash(migrationMap)
 			if err != nil {
 				return errors.NewError(
 					errors.ErrorCodeConsolidationFailed,
@@ -617,7 +787,14 @@ func runSquash(cmd *cobra.Command, args []string) error {
 				).WithInnerError(err).WithAdditional("streaming", true).WithSuggestion("Try disabling streaming mode or check for syntax errors in migration files")
 			}
 
+			finalSQL = squashResult.BaselineSQL
+			warnings = append(append(squashResult.Warnings, parsePolicyWarnings...), streamingWarnings...)
+			// Capture auth compatibility SQL for validation
+			authCompatibilitySQL = squashResult.AuthCompatibilitySQL
+			requiredExtensions = squashResult.Extensions
+
 			migrationCount = len(migrations)
+			objectsConsolidated = int(engine.GetStats().ConsolidationsApplied)
 
 			// Print final progress line
 			if showProgress {
@@ -630,10 +807,17 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		harnessMigrations = deterministicHarnessMigrations(migrations)
+
+		parsePolicyWarnings, err := enforcePartialParsePolicy(migrations, strictParse)
+		if err != nil {
+			return err
+		}
 
 		// Create engine configuration for non-streaming mode
 		engineConfig := squasher.EngineConfig{
 			Config:              cfg,
+			Version:             rootCmd.Version,
 			EnableStreaming:     false,
 			EnableProgressTrack: showProgress,
 
@@ -644,13 +828,22 @@ func runSquash(cmd *cobra.Command, args []string) error {
 			BackupConfig:         createBackupConfig(),
 			TransformationConfig: createTransformationConfig(),
 			RollbackPath:         rollbackPath,
+			BackupPath:           backupPath,
 
 			EnableCycleDetection: enableCycleDetection,
 			ShowCycleDetails:     showCycleDetails,
 			CycleDetectionDepth:  cycleDetectionDepth,
 		}
 
-		engine := squasher.NewEngine(engineConfig)
+		engine, err := squasher.NewEngine(engineConfig)
+		if err != nil {
+			return errors.NewError(
+				errors.ErrorCodeConsolidationFailed,
+				"failed to initialize squashing engine",
+				errors.SeverityError,
+				errors.CategoryConsolidation,
+			).WithInnerError(err)
+		}
 		defer engine.Close()
 
 		if showProgress {
@@ -674,57 +867,17 @@ func runSquash(cmd *cobra.Command, args []string) error {
 			).WithInnerError(err).WithAdditional("migration_count", len(migrations)).WithSuggestion("Review migration files for syntax errors or complex dependencies")
 		}
 
-		// Detect extensions for provenance tracking
-		extDetector := squasher.NewExtensionDetector()
-		analysis := extDetector.AnalyzeMigrations(migrationMap)
-
 		finalSQL = squashResult.BaselineSQL
-		warnings = squashResult.Warnings
+		warnings = append(squashResult.Warnings, parsePolicyWarnings...)
+		authCompatibilitySQL = squashResult.AuthCompatibilitySQL
 		migrationCount = len(migrations)
+		objectsConsolidated = int(engine.GetStats().ConsolidationsApplied)
+		dataOperationsSQL = squashResult.DataOperationsSQL
+		provenanceMap = squashResult.ProvenanceMap
+		requiredExtensions = squashResult.Extensions
 
-		// Create output directory before writing files
-		if err := os.MkdirAll(cfg.Output.Directory, 0755); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeValidationFailed,
-				fmt.Sprintf("Failed to create output directory '%s'", cfg.Output.Directory),
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithFile(cfg.Output.Directory).WithInnerError(err).WithSuggestion("Check directory permissions and ensure parent directory exists")
-		}
-
-		// Write data operations file if present
-		if squashResult.DataOperationsSQL != "" {
-			dataPath := filepath.Join(cfg.Output.Directory, "010_data.sql")
-			if err := os.WriteFile(dataPath, []byte(squashResult.DataOperationsSQL), 0644); err != nil {
-				return errors.NewError(
-					errors.ErrorCodeSQLGenerationFailed,
-					fmt.Sprintf("Failed to write data operations file '%s'", dataPath),
-					errors.SeverityError,
-					errors.CategoryConsolidation,
-				).WithFile(dataPath).WithInnerError(err).WithSuggestion("Ensure sufficient disk space and write permissions")
-			}
-			fmt.Println(color.GreenString("✓ Data operations written to: %s", dataPath))
-		}
-
-		// Write provenance map
-		if squashResult.ProvenanceMap != nil {
-			provenance := squasher.NewProvenanceTracker(
-				"0.9.5",
-				cfg.SafetyLevel,
-				cfg.PostgreSQLFeatures.TargetVersion,
-				analysis.RequiredExtensions,
-			)
-			provenance.GetSquashMap().Inputs = squashResult.ProvenanceMap.Inputs
-			provenance.GetSquashMap().Outputs = squashResult.ProvenanceMap.Outputs
-			provenance.GetSquashMap().Warnings = squashResult.ProvenanceMap.Warnings
-			provenance.GetSquashMap().ContentHash = squashResult.ProvenanceMap.ContentHash
-
-			if err := provenance.WriteSquashMap(cfg.Output.Directory); err != nil {
-				fmt.Println(color.YellowString("⚠️  Warning: Could not write .squashmap.json: %v", err))
-			} else {
-				fmt.Println(color.GreenString("✓ Provenance map written to: %s", filepath.Join(cfg.Output.Directory, ".squashmap.json")))
-			}
-		}
+		// NOTE: nothing is written to disk here. All output files are staged
+		// after the dry-run guard and promoted only after validation (F-05/F-06).
 	}
 
 	// Handle explain mode - show detailed consolidation plan
@@ -735,11 +888,23 @@ func runSquash(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
+		if _, err := enforcePartialParsePolicy(migrations, strictParse); err != nil {
+			return err
+		}
+
 		engineConfig := squasher.EngineConfig{
 			Config:          cfg,
 			EnableStreaming: false,
 		}
-		engine := squasher.NewEngine(engineConfig)
+		engine, err := squasher.NewEngine(engineConfig)
+		if err != nil {
+			return errors.NewError(
+				errors.ErrorCodeConsolidationFailed,
+				"failed to initialize squashing engine for explain mode",
+				errors.SeverityError,
+				errors.CategoryConsolidation,
+			).WithInnerError(err)
+		}
 		defer engine.Close()
 
 		// Convert to migration map
@@ -766,6 +931,61 @@ func runSquash(cmd *cobra.Command, args []string) error {
 
 	// Regular dry-run mode (without detailed explanation)
 	if dryRun {
+		if squashJSON {
+			result := &engineapi.SquashResult{
+				BaselineSQL:         finalSQL,
+				DataOperationsSQL:   dataOperationsSQL,
+				Warnings:            warnings,
+				FilesProcessed:      migrationCount,
+				ObjectsConsolidated: objectsConsolidated,
+				ProcessingTime:      time.Since(startTime).String(),
+				Extensions:          requiredExtensions,
+				ProvenanceInfo: &engineapi.ProvenanceInfo{
+					Version:     rootCmd.Version,
+					SafetyLevel: string(cfg.SafetyLevel),
+				},
+			}
+			report, err := engineapi.BuildDeterministicHarnessReport(result, engineapi.DeterministicHarnessReportOptions{
+				OutputSQLPath:          "generated_schema.sql",
+				EngineVersion:          rootCmd.Version,
+				OriginalMigrationFiles: migrationCount,
+				ValidationStatus:       "engine_basic_passed",
+				ValidationMode:         "engine_basic",
+				AnalysisWarnings:       warnings,
+			})
+			if err != nil {
+				return err
+			}
+			contextArtifact, err := engineapi.BuildDeterministicHarnessContext(result, engineapi.DeterministicHarnessContextOptions{
+				OutputSQLPath:          "generated_schema.sql",
+				EngineVersion:          rootCmd.Version,
+				OriginalMigrationFiles: migrationCount,
+				ValidationStatus:       report.Validation.Status,
+				ValidationMode:         report.Validation.Mode,
+				AnalysisWarnings:       warnings,
+				OriginalMigrations:     harnessMigrations,
+			})
+			if err != nil {
+				return err
+			}
+			artifact, err := engineapi.BuildDeterministicHarnessArtifact(result, report)
+			if err == nil {
+				_, err = engineapi.ValidateDeterministicHarnessArtifact(cmd.Context(), artifact, contextArtifact)
+			}
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"auth_compatibility_sql": authCompatibilitySQL,
+				"baseline_sql":           finalSQL,
+				"data_operations_sql":    dataOperationsSQL,
+				"deterministic_artifact": artifact,
+				"deterministic_report":   report,
+				"harness_context":        contextArtifact,
+				"safety_level":           string(cfg.SafetyLevel),
+				"warnings":               warnings,
+			})
+		}
 		fmt.Println("\n" + color.BlueString("=== Dry Run: Final SQL Output ==="))
 		fmt.Println(finalSQL)
 		if len(warnings) > 0 {
@@ -778,57 +998,41 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Write output - create directory first
-	if err := os.MkdirAll(cfg.Output.Directory, 0755); err != nil {
-		return errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("Failed to create output directory '%s'", cfg.Output.Directory),
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithFile(cfg.Output.Directory).WithInnerError(err).WithSuggestion("Check directory permissions and ensure parent directory exists")
+	// Guard: refuse to write output into the directory that contains the
+	// input migrations. Doing so would let a subsequent run consume its own
+	// output and can destroy the originals.
+	if err := ensureOutputNotInputDirectory(cfg.Output.Directory, args); err != nil {
+		return err
 	}
 
-	// Verify directory was created
-	if _, err := os.Stat(cfg.Output.Directory); os.IsNotExist(err) {
+	if strings.TrimSpace(finalSQL) == "" {
 		return errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("Output directory '%s' does not exist after creation attempt", cfg.Output.Directory),
-			errors.SeverityCritical,
-			errors.CategoryValidation,
-		).WithFile(cfg.Output.Directory).WithSuggestion("Check filesystem permissions and available disk space")
+			errors.ErrorCodeSQLGenerationFailed,
+			"generated baseline SQL is empty",
+			errors.SeverityError,
+			errors.CategoryConsolidation,
+		).WithSuggestion("This may indicate all migrations were filtered out - check safety level and input files")
 	}
+
+	// Stage every output file (baseline, data operations, provenance map) in a
+	// temporary directory next to the output directory. The staged files are
+	// promoted into place only after validation; a failed validation removes
+	// the staging directory and leaves the output directory untouched.
+	stagingDir, cleanupStaging, err := stageSquashOutput(cfg, finalSQL, dataOperationsSQL, provenanceMap, requiredExtensions)
+	if err != nil {
+		return err
+	}
+	promoted := false
+	defer func() {
+		if !promoted {
+			cleanupStaging()
+		}
+	}()
 
 	outputPath := filepath.Join(cfg.Output.Directory, "000_baseline.sql")
-	if err := os.WriteFile(outputPath, []byte(finalSQL), 0644); err != nil {
-		return errors.NewError(
-			errors.ErrorCodeSQLGenerationFailed,
-			fmt.Sprintf("Failed to write output file '%s'", outputPath),
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithFile(outputPath).WithInnerError(err).WithSuggestion("Ensure sufficient disk space and write permissions")
-	}
 
-	// Verify file was written
-	if info, err := os.Stat(outputPath); err != nil {
-		return errors.NewError(
-			errors.ErrorCodeSQLGenerationFailed,
-			fmt.Sprintf("Output file '%s' was not created", outputPath),
-			errors.SeverityCritical,
-			errors.CategoryConsolidation,
-		).WithFile(outputPath).WithInnerError(err).WithSuggestion("Check filesystem state and available inodes")
-	} else if info.Size() == 0 {
-		return errors.NewError(
-			errors.ErrorCodeSQLGenerationFailed,
-			fmt.Sprintf("Output file '%s' is empty (0 bytes)", outputPath),
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithFile(outputPath).WithSuggestion("This may indicate all migrations were filtered out - check safety level and input files")
-	}
-
-	// Print success report
-	printSquashSummary(migrationCount, len(strings.Split(finalSQL, "\n")), time.Since(startTime), warnings, outputPath)
-
-	// Run automatic validation unless --no-validate is specified
+	// Run automatic validation against the STAGED output unless --no-validate
+	// is specified. Nothing has been written to the output directory yet.
 	if !noValidate {
 		fmt.Println("\n" + color.CyanString("🔍 Running automatic validation..."))
 
@@ -850,72 +1054,139 @@ func runSquash(cmd *cobra.Command, args []string) error {
 			fmt.Println(color.YellowString("⚠️  Could not determine original migrations path, skipping validation"))
 			fmt.Println(color.YellowString("    Run 'pgsquash validate <original> <squashed>' manually if needed"))
 		} else {
-			// Run validation
-			valResult, valErr := runValidationCheck(cfg, originalPath, cfg.Output.Directory)
+			valResult, valErr := runValidationCheck(cfg, originalPath, stagingDir, authCompatibilitySQL)
 
-			if valErr != nil {
-				fmt.Println(color.RedString("❌ Validation failed: %v", valErr))
-				if failOnDiff {
-					return errors.NewError(
-						errors.ErrorCodeValidationFailed,
-						"Schema validation detected differences",
-						errors.SeverityError,
-						errors.CategoryValidation,
-					).WithInnerError(valErr).WithSuggestion("Review validation report for details")
-				}
-				fmt.Println(color.YellowString("⚠️  Warning: Validation failed but continuing (use --fail-on-diff to exit on validation errors)"))
-			} else if valResult != nil && !valResult.Success {
-				fmt.Println(color.RedString("❌ Schema differences detected!"))
-				fmt.Println(valResult.DockerValidation.Differences)
-
-				if openReport {
-					reportPath := filepath.Join(cfg.Output.Directory, "validation-report.md")
-					if err := os.WriteFile(reportPath, []byte(valResult.DockerValidation.Differences), 0644); err == nil {
-						fmt.Println(color.CyanString("📝 Validation report saved to: %s", reportPath))
-						openInEditor(reportPath)
-					}
-				}
-
-				if failOnDiff {
-					return errors.NewError(
-						errors.ErrorCodeValidationFailed,
-						"Schema differences detected between original and squashed migrations",
-						errors.SeverityError,
-						errors.CategoryValidation,
-					).WithSuggestion("Review the differences above and ensure squashing is correct")
-				}
-			} else {
-				fmt.Println(color.GreenString("✅ Validation passed - schemas are identical"))
+			status, outcomeErr := reportSquashValidationOutcome(valResult, valErr)
+			validationStatus = status
+			if outcomeErr != nil {
+				// Staged output is discarded by the deferred cleanup; the
+				// output directory stays untouched.
+				return outcomeErr
 			}
+		}
+	}
+
+	// Promote staged output files into the output directory.
+	if err := promoteStagedOutput(stagingDir, cfg.Output.Directory); err != nil {
+		return err
+	}
+	promoted = true
+
+	if dataOperationsSQL != "" {
+		fmt.Println(color.GreenString("✓ Data operations written to: %s", filepath.Join(cfg.Output.Directory, "010_data.sql")))
+	}
+	if provenanceMap != nil {
+		fmt.Println(color.GreenString("✓ Provenance map written to: %s", filepath.Join(cfg.Output.Directory, ".squashmap.json")))
+	}
+
+	// Print success report
+	printSquashSummary(migrationCount, len(strings.Split(finalSQL, "\n")), time.Since(startTime), warnings, outputPath)
+
+	if emitHarnessReport {
+		if dryRun {
+			fmt.Println(color.YellowString("⚠️  Skipping context emission in --dry-run mode"))
+		} else {
+			reportOutputPath := strings.TrimSpace(harnessReportPath)
+			if reportOutputPath == "" {
+				reportOutputPath = filepath.Join(cfg.Output.Directory, ".capysquash.context.v1.json")
+			}
+
+			contextArtifact, reportErr := engineapi.BuildDeterministicHarnessContext(&engineapi.SquashResult{
+				BaselineSQL:         finalSQL,
+				DataOperationsSQL:   "",
+				Warnings:            warnings,
+				FilesProcessed:      migrationCount,
+				ObjectsConsolidated: objectsConsolidated,
+				ProcessingTime:      time.Since(startTime).String(),
+				ProvenanceInfo: &engineapi.ProvenanceInfo{
+					Version:     rootCmd.Version,
+					SafetyLevel: string(cfg.SafetyLevel),
+				},
+			}, engineapi.DeterministicHarnessContextOptions{
+				OutputSQLPath:          outputPath,
+				EngineVersion:          rootCmd.Version,
+				OriginalMigrationFiles: migrationCount,
+				ValidationStatus:       validationStatus,
+				ValidationMode:         validationModeUsed,
+				AnalysisWarnings:       warnings,
+			})
+			if reportErr != nil {
+				return errors.NewError(
+					errors.ErrorCodeSQLGenerationFailed,
+					"Failed to build deterministic context artifact",
+					errors.SeverityError,
+					errors.CategoryConsolidation,
+				).WithInnerError(reportErr)
+			}
+
+			if reportErr := harnesscontract.WriteHarnessContextV1(reportOutputPath, contextArtifact); reportErr != nil {
+				return errors.NewError(
+					errors.ErrorCodeSQLGenerationFailed,
+					"Failed to write deterministic context artifact",
+					errors.SeverityError,
+					errors.CategoryConsolidation,
+				).WithFile(reportOutputPath).WithInnerError(reportErr)
+			}
+
+			fmt.Println(color.GreenString("✓ Deterministic context artifact written to: %s", reportOutputPath))
 		}
 	}
 
 	return nil
 }
 
+func deterministicHarnessMigrations(migrations []*MigrationWithContent) []engineapi.DeterministicHarnessMigration {
+	result := make([]engineapi.DeterministicHarnessMigration, 0, len(migrations))
+	for index, migration := range migrations {
+		migrationID := filepath.Base(migration.FullPath)
+		if migrationID == "." || migrationID == "" {
+			migrationID = migration.Filename
+		}
+		result = append(result, engineapi.DeterministicHarnessMigration{
+			MigrationID: migrationID,
+			Sequence:    index + 1,
+			SQL:         migration.Content,
+		})
+	}
+	return result
+}
+
 // runValidationCheck performs validation and returns the result
-func runValidationCheck(cfg *config.Config, originalPath, squashedPath string) (*validation.ValidationResult, error) {
+func runValidationCheck(cfg *config.Config, originalPath, squashedPath, authCompatibilitySQL string) (*validation.ValidationResult, error) {
 	// Create validator with config
+	postgresVersion := "17" // Default to 17 if not specified
+	if cfg.Validation.DockerImage != "" {
+		// Parse version from docker image (e.g., "postgres:17" -> "17")
+		parts := strings.Split(cfg.Validation.DockerImage, ":")
+		if len(parts) == 2 {
+			postgresVersion = parts[1]
+		}
+	}
+
+	// Honor the config validation section instead of hardcoding behavior.
 	valConfig := &validation.ValidationConfig{
 		Level:                    validation.ValidationLevelStandard,
 		ValidateExpressions:      true,
 		ValidateConstraints:      true,
 		ValidateDependencies:     true,
 		DockerApproach:           validation.ApproachTwoDatabases,
-		PostgreSQLVersion:        "15",
-		EnableExtensionDetection: true,
-		AutoInstallExtensions:    true,
-		Verbose:                  verbose,
+		PostgreSQLVersion:        postgresVersion,
+		CustomDockerImage:        customDockerImage,
+		EnableExtensionDetection: cfg.Validation.EnableExtensionDetection,
+		AutoInstallExtensions:    cfg.Validation.AutoInstallExtensions,
+		EnableSQLFixes:           cfg.Validation.EnableSQLFixes,
+		EnablePreprocessing:      cfg.Validation.EnablePreprocessing,
+		Verbose:                  verbose || cfg.Validation.Verbose,
+		AuthCompatibilitySQL:     authCompatibilitySQL,
 	}
 
-	if cfg.Validation.Mode != "" || cfg.Validation.DockerImage != "" {
-		if cfg.Validation.DockerImage != "" {
-			// The validation package doesn't have DockerImage field, so we use the PostgreSQL version
-			// Docker image is handled by the validation package internally
-		}
-		if cfg.Validation.Mode != "" {
-			valConfig.DockerApproach = validation.ValidationApproach(cfg.Validation.Mode)
-		}
+	if cfg.Validation.Mode != "" {
+		valConfig.DockerApproach = validation.ValidationApproach(strings.ToUpper(strings.TrimSpace(cfg.Validation.Mode)))
+	}
+
+	// Apply container ready timeout from config (convert int seconds to time.Duration)
+	if cfg.Validation.ContainerReadyTimeout > 0 {
+		valConfig.ContainerReadyTimeout = time.Duration(cfg.Validation.ContainerReadyTimeout) * time.Second
 	}
 
 	validator := validation.NewSchemaValidator(valConfig, nil, nil)
@@ -925,6 +1196,345 @@ func runValidationCheck(cfg *config.Config, originalPath, squashedPath string) (
 	result, err := validator.ValidateWithDocker(ctx, originalPath, squashedPath)
 
 	return result, err
+}
+
+// applySafetyOverride validates and applies a --safety flag override.
+// An unknown value is rejected instead of silently disabling consolidation.
+// Parsing goes through the public API's case/whitespace-normalizing parser so
+// CLI semantics never diverge from library consumers.
+func applySafetyOverride(cfg *config.Config, level string) error {
+	if level == "" {
+		return nil
+	}
+
+	parsed, err := engineapi.ParseSafetyLevel(level)
+	if err != nil {
+		return err
+	}
+	cfg.SafetyLevel = string(parsed)
+	return nil
+}
+
+// applyValidationModeOverride validates and applies a --validation-mode flag override.
+func applyValidationModeOverride(cfg *config.Config, mode string) error {
+	if mode == "" {
+		return nil
+	}
+
+	normalized := strings.ToUpper(strings.TrimSpace(mode))
+	switch normalized {
+	case "TWO_CONTAINERS", "TWO_DATABASES", "SCHEMA_DIFF":
+		cfg.Validation.Mode = normalized
+		return nil
+	default:
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			fmt.Sprintf("invalid validation mode '%s'", mode),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithSuggestion("Use one of: TWO_CONTAINERS, TWO_DATABASES, SCHEMA_DIFF")
+	}
+}
+
+// shouldAutoStream reports whether streaming mode should be auto-enabled based
+// on file count (>100 files) or total input size exceeding
+// performance.streaming_threshold_mb. The reason string describes the trigger.
+func shouldAutoStream(files []string, cfg *config.Config) (bool, string) {
+	if len(files) > 100 {
+		return true, fmt.Sprintf("%d files (threshold: 100 files)", len(files))
+	}
+
+	thresholdMB := cfg.Performance.StreamingThresholdMB
+	if thresholdMB <= 0 {
+		return false, ""
+	}
+
+	var totalBytes int64
+	for _, file := range files {
+		if info, err := os.Stat(file); err == nil && !info.IsDir() {
+			totalBytes += info.Size()
+		}
+	}
+
+	thresholdBytes := int64(thresholdMB) * 1024 * 1024
+	if totalBytes > thresholdBytes {
+		return true, fmt.Sprintf("%.1fMB total input (threshold: %dMB from performance.streaming_threshold_mb)",
+			float64(totalBytes)/(1024*1024), thresholdMB)
+	}
+
+	return false, ""
+}
+
+// ensureOutputNotInputDirectory rejects configurations where the output
+// directory is the same directory that holds the input migration files.
+func ensureOutputNotInputDirectory(outputDir string, inputs []string) error {
+	absOut, err := filepath.Abs(outputDir)
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			fmt.Sprintf("failed to resolve output directory '%s'", outputDir),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+
+	for _, input := range inputs {
+		absIn, err := filepath.Abs(input)
+		if err != nil {
+			continue
+		}
+
+		inputDir := absIn
+		if info, statErr := os.Stat(absIn); statErr == nil && !info.IsDir() {
+			inputDir = filepath.Dir(absIn)
+		} else if statErr == nil && info.IsDir() {
+			inputDir = absIn
+		} else {
+			inputDir = filepath.Dir(absIn)
+		}
+
+		if inputDir == absOut {
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("output directory '%s' is the same as the input migrations directory", outputDir),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithSuggestion("Choose a different --output directory so the original migrations are never overwritten")
+		}
+	}
+
+	return nil
+}
+
+// stageSquashOutput writes all squash output files (000_baseline.sql,
+// 010_data.sql, .squashmap.json) into a temporary staging directory created
+// next to the output directory. It returns the staging path and a cleanup
+// function that removes it.
+func stageSquashOutput(cfg *config.Config, baselineSQL, dataOperationsSQL string, provenanceMap *squasher.SquashMap, extensions []string) (string, func(), error) {
+	parent := filepath.Dir(filepath.Clean(cfg.Output.Directory))
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return "", nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			fmt.Sprintf("Failed to create parent directory for output '%s'", cfg.Output.Directory),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err).WithSuggestion("Check directory permissions and ensure parent directory exists")
+	}
+
+	stagingDir, err := os.MkdirTemp(parent, ".pgsquash-staging-")
+	if err != nil {
+		return "", nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"Failed to create staging directory for squash output",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err).WithSuggestion("Check write permissions next to the output directory")
+	}
+
+	cleanup := func() {
+		if err := os.RemoveAll(stagingDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove staging directory %s: %v\n", stagingDir, err)
+		}
+	}
+
+	baselinePath := filepath.Join(stagingDir, "000_baseline.sql")
+	if err := os.WriteFile(baselinePath, []byte(baselineSQL), 0644); err != nil {
+		cleanup()
+		return "", nil, errors.NewError(
+			errors.ErrorCodeSQLGenerationFailed,
+			fmt.Sprintf("Failed to write staged output file '%s'", baselinePath),
+			errors.SeverityError,
+			errors.CategoryConsolidation,
+		).WithFile(baselinePath).WithInnerError(err).WithSuggestion("Ensure sufficient disk space and write permissions")
+	}
+
+	if dataOperationsSQL != "" {
+		dataPath := filepath.Join(stagingDir, "010_data.sql")
+		if err := os.WriteFile(dataPath, []byte(dataOperationsSQL), 0644); err != nil {
+			cleanup()
+			return "", nil, errors.NewError(
+				errors.ErrorCodeSQLGenerationFailed,
+				fmt.Sprintf("Failed to write staged data operations file '%s'", dataPath),
+				errors.SeverityError,
+				errors.CategoryConsolidation,
+			).WithFile(dataPath).WithInnerError(err).WithSuggestion("Ensure sufficient disk space and write permissions")
+		}
+	}
+
+	if provenanceMap != nil {
+		provenance := squasher.NewProvenanceTracker(
+			rootCmd.Version,
+			cfg.SafetyLevel,
+			cfg.PostgreSQLFeatures.TargetVersion,
+			extensions,
+		)
+		provenance.GetSquashMap().Inputs = provenanceMap.Inputs
+		provenance.GetSquashMap().Outputs = provenanceMap.Outputs
+		provenance.GetSquashMap().Warnings = provenanceMap.Warnings
+		provenance.GetSquashMap().ContentHash = provenanceMap.ContentHash
+
+		// The squashmap is the provenance contract for the squashed output; a
+		// baseline without it is incomplete, so a write failure fails the run.
+		if err := provenance.WriteSquashMap(stagingDir); err != nil {
+			cleanup()
+			return "", nil, errors.NewError(
+				errors.ErrorCodeSQLGenerationFailed,
+				"Failed to write staged .squashmap.json provenance file",
+				errors.SeverityError,
+				errors.CategoryConsolidation,
+			).WithFile(filepath.Join(stagingDir, ".squashmap.json")).WithInnerError(err).WithSuggestion("Ensure sufficient disk space and write permissions")
+		}
+	}
+
+	return stagingDir, cleanup, nil
+}
+
+// promoteStagedOutput moves staged output files into the output directory and
+// removes the (now empty) staging directory.
+func promoteStagedOutput(stagingDir, outputDir string) error {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			fmt.Sprintf("Failed to create output directory '%s'", outputDir),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithFile(outputDir).WithInnerError(err).WithSuggestion("Check directory permissions and ensure parent directory exists")
+	}
+
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			fmt.Sprintf("Failed to read staging directory '%s'", stagingDir),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+
+	for _, entry := range entries {
+		src := filepath.Join(stagingDir, entry.Name())
+		dst := filepath.Join(outputDir, entry.Name())
+		if err := os.Rename(src, dst); err != nil {
+			return errors.NewError(
+				errors.ErrorCodeSQLGenerationFailed,
+				fmt.Sprintf("Failed to move staged file '%s' into output directory", entry.Name()),
+				errors.SeverityError,
+				errors.CategoryConsolidation,
+			).WithFile(dst).WithInnerError(err).WithSuggestion("Ensure the output directory is writable")
+		}
+	}
+
+	if err := os.Remove(stagingDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to remove staging directory %s: %v\n", stagingDir, err)
+	}
+
+	return nil
+}
+
+// reportSquashValidationOutcome interprets the post-squash validation result,
+// prints a truthful report, and decides whether the squash must fail.
+//
+// Status values:
+//   - "passed":     a real comparison ran (both migration sets applied) and matched
+//   - "failed":     a real comparison found differences, or validation errored
+//   - "unverified": the original migrations failed to apply, so schema
+//     equivalence is unproven (never reported as passed)
+func reportSquashValidationOutcome(valResult *validation.ValidationResult, valErr error) (string, error) {
+	if valErr != nil {
+		fmt.Println(color.RedString("❌ Validation failed: %v", valErr))
+
+		// If it's a structured error with an inner error, print that too
+		if structErr, ok := valErr.(*errors.StructuredError); ok && structErr.InnerError != nil {
+			fmt.Println(color.RedString("   Inner error: %v", structErr.InnerError))
+
+			if innerStruct, ok := structErr.InnerError.(*errors.StructuredError); ok && innerStruct.InnerError != nil {
+				fmt.Println(color.RedString("   PostgreSQL error: %v", innerStruct.InnerError))
+			}
+		}
+
+		if failOnDiff {
+			return "failed", errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"Post-squash validation failed",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(valErr).WithSuggestion("Fix the validation environment (e.g. Docker) or rerun with --no-validate / --fail-on-diff=false")
+		}
+		fmt.Println(color.YellowString("⚠️  Warning: Validation failed but continuing (--fail-on-diff=false)"))
+		return "failed", nil
+	}
+
+	if valResult == nil {
+		// No error but also no result: validation never produced evidence.
+		// Fail closed like the workflow path - never report "passed" without
+		// a real comparison result backing it.
+		fmt.Println(color.RedString("❌ Validation returned no result - schema equivalence is unverified"))
+		if failOnDiff {
+			return "unverified", errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"Post-squash validation returned no result",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithSuggestion("Fix the validation environment (e.g. Docker) or rerun with --no-validate / --fail-on-diff=false")
+		}
+		fmt.Println(color.YellowString("⚠️  Warning: continuing without validation evidence (--fail-on-diff=false)"))
+		return "unverified", nil
+	}
+
+	if valResult.Success {
+		fmt.Println(color.GreenString("✅ Validation passed - schemas are identical"))
+		return "passed", nil
+	}
+
+	docker := valResult.DockerValidation
+
+	if docker != nil && docker.OriginalApplyFailed {
+		// Distinct outcome: the original migrations could not be applied, so
+		// no real comparison ran. Equivalence is unproven - never "passed".
+		fmt.Println(color.YellowString("⚠️  Original migrations failed to apply - schema equivalence is UNPROVEN"))
+		if docker.OriginalMigrationsError != "" {
+			fmt.Println(color.YellowString("    Error: %s", docker.OriginalMigrationsError))
+		}
+		fmt.Println(color.GreenString("✓ Squashed migrations applied successfully"))
+		if docker.Differences != "" {
+			fmt.Println(color.CyanString("ℹ️  Differences against the partially-applied original schema:"))
+			lines := strings.Split(docker.Differences, "\n")
+			maxLines := 25
+			for i, line := range lines {
+				if i >= maxLines {
+					fmt.Println(color.CyanString("    ... (%d more differences not shown)", len(lines)-maxLines))
+					break
+				}
+				fmt.Println(color.CyanString("    %s", line))
+			}
+		}
+		return "unverified", nil
+	}
+
+	// A real comparison ran and found differences.
+	fmt.Println(color.RedString("❌ Schema differences detected!"))
+	if docker != nil && docker.Differences != "" {
+		fmt.Println(docker.Differences)
+
+		if openReport {
+			reportPath := "pgsquash-validation-report.md"
+			if err := os.WriteFile(reportPath, []byte(docker.Differences), 0644); err == nil {
+				fmt.Println(color.CyanString("📝 Validation report saved to: %s", reportPath))
+				openInEditor(reportPath)
+			}
+		}
+	}
+
+	if failOnDiff {
+		return "failed", errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"Schema differences detected between original and squashed migrations",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithSuggestion("Review the differences above and ensure squashing is correct")
+	}
+	fmt.Println(color.YellowString("⚠️  Warning: Schema differences detected but continuing (--fail-on-diff=false)"))
+	return "failed", nil
 }
 
 // openInEditor opens a file in the user's preferred editor
@@ -952,8 +1562,8 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Original: %s\n", originalDir)
 	fmt.Printf("Squashed: %s\n", squashedDir)
 
-	// Load config to get validation settings
-	cfg, err := config.LoadConfig(configPath)
+	// Load config for validation settings (runValidate is a separate function from runSquash)
+	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
@@ -985,6 +1595,16 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		// Create validation config with Docker support
 		valConfig := validation.DefaultValidationConfig()
 
+		postgresVersion := "17" // Default to 17 if not specified
+		if cfg.Validation.DockerImage != "" {
+			// Parse version from docker image (e.g., "postgres:17" -> "17")
+			parts := strings.Split(cfg.Validation.DockerImage, ":")
+			if len(parts) == 2 {
+				postgresVersion = parts[1]
+			}
+		}
+		valConfig.PostgreSQLVersion = postgresVersion
+
 		// Use validation mode from flag, config, or default
 		mode := cfg.Validation.Mode
 		if validationMode != "" {
@@ -1004,16 +1624,32 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		}
 
 		valConfig.EnableExtensionDetection = cfg.Validation.EnableExtensionDetection
+		valConfig.AutoInstallExtensions = cfg.Validation.AutoInstallExtensions
 		valConfig.EnableSQLFixes = cfg.Validation.EnableSQLFixes
 		valConfig.Verbose = cfg.Validation.Verbose
 		valConfig.AuthCompatibilitySQL = extAnalysis.AuthCompatibilitySQL // Inject auth compatibility
+
+		// Use custom Docker image if specified (CLI flag takes precedence)
+		if customDockerImage != "" {
+			valConfig.CustomDockerImage = customDockerImage
+			color.Cyan("🐳 Using custom Docker image for validation: %s\n", customDockerImage)
+		}
+
+		// Apply container ready timeout from config (convert int seconds to time.Duration)
+		if cfg.Validation.ContainerReadyTimeout > 0 {
+			valConfig.ContainerReadyTimeout = time.Duration(cfg.Validation.ContainerReadyTimeout) * time.Second
+		}
 
 		if mode != "" {
 			color.Cyan("🔍 Using validation mode: %s\n", strings.ToUpper(mode))
 		}
 
 		validator := validation.NewSchemaValidator(valConfig, nil, nil)
-		defer func() { _ = validator.Close() }()
+		defer func() {
+			if err := validator.Close(); err != nil {
+				utils.GetDefaultLogger().Warn("Failed to close validator: %v", err)
+			}
+		}()
 
 		result, err := validator.ValidateWithDocker(cmd.Context(), originalDir, squashedDir)
 		if err != nil {
@@ -1023,6 +1659,45 @@ func runValidate(cmd *cobra.Command, args []string) error {
 				errors.SeverityError,
 				errors.CategoryValidation,
 			).WithFile(originalDir).WithAdditional("squashed_dir", squashedDir).WithInnerError(err).WithSuggestion("Ensure Docker is running and accessible, or try a different validation mode")
+		}
+
+		// Run Static Validation (Post-Flight)
+		staticConfig, err := buildStaticValidationConfig(cmd, cfg)
+		if err != nil {
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"Invalid static validation rule configuration",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(err)
+		}
+
+		// Instantiate Static Validator
+		staticValidator := validation.NewStaticValidator(staticConfig)
+
+		// Validate structure of squashed migrations
+		// (We validate the *result*, so we read the squashed SQL)
+		squashedSQL, err := readDirToSQL(squashedDir)
+		if err == nil {
+			violations, err := staticValidator.Check(squashedSQL)
+			if err != nil {
+				color.Red("❌ Static validation execution failed: %v", err)
+			} else if len(violations) > 0 {
+				color.Yellow("\nStatic Analysis Findings:")
+				for _, v := range violations {
+					symbol := "⚠️"
+					if v.Category == validation.CategoryBreaking || staticConfig.TreatWarningsAsErrors {
+						symbol = "❌"
+					}
+					fmt.Printf("  %s [%s] %s: %s\n", symbol, v.Category, v.Code, v.Message)
+				}
+				if staticConfig.TreatWarningsAsErrors {
+					// We should fail the command if there are errors
+					// But we also want to report Docker validation status.
+					// Let's combine success flags.
+					result.Success = false // Mark overall result as failed
+				}
+			}
 		}
 
 		if result.Success {
@@ -1046,6 +1721,15 @@ func runValidate(cmd *cobra.Command, args []string) error {
 					fmt.Printf("  - %s: %s\n", err.Code, err.Message)
 				}
 			}
+			// Fail closed: a validation gate that always exits 0 is not a gate.
+			// Returning an error makes `pgsquash validate` exit non-zero so CI can
+			// rely on it to block non-equivalent squashed migrations.
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"schema validation failed: original and squashed schemas are not equivalent",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			)
 		}
 
 		return nil
@@ -1060,8 +1744,573 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	).WithFile(originalDir).WithSuggestion("Ensure directory exists and contains .sql files")
 }
 
+const externalValidationContractVersion = "pgsquash.external-validation.v1"
+
+type externalValidationResult struct {
+	ContractVersion   string   `json:"contract_version"`
+	Success           bool     `json:"success"`
+	Phase             string   `json:"phase"`
+	ComparisonValid   bool     `json:"comparison_valid"`
+	HasDifferences    bool     `json:"has_differences"`
+	Differences       []string `json:"differences"`
+	SnapshotContract  string   `json:"snapshot_contract"`
+	PostgreSQLVersion string   `json:"postgresql_version,omitempty"`
+	DurationMS        int64    `json:"duration_ms"`
+	Error             string   `json:"error,omitempty"`
+}
+
+func runValidateExternal(cmd *cobra.Command, args []string) error {
+	started := time.Now()
+	result := externalValidationResult{
+		ContractVersion:  externalValidationContractVersion,
+		Differences:      make([]string, 0),
+		SnapshotContract: validation.CatalogSnapshotContractVersion,
+	}
+
+	fail := func(err error) error {
+		result.DurationMS = time.Since(started).Milliseconds()
+		result.Error = err.Error()
+		if externalJSON {
+			_ = json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+		}
+		return err
+	}
+
+	dsn, err := resolveExternalValidationDSN()
+	if err != nil {
+		return fail(err)
+	}
+	if (snapshotOutput == "") == (againstSnapshot == "") {
+		return fail(errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"exactly one of --snapshot-output or --against-snapshot is required",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		))
+	}
+
+	result.Phase = "snapshot"
+	if againstSnapshot != "" {
+		result.Phase = "compare"
+	}
+
+	cfg, err := config.LoadConfig(resolveConfigPath())
+	if err != nil {
+		return fail(errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"failed to load validation configuration",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err))
+	}
+
+	valConfig := validation.DefaultValidationConfig()
+	valConfig.EnablePreprocessing = cfg.Validation.EnablePreprocessing
+	valConfig.EnableSQLFixes = false
+	valConfig.Verbose = verbose && !quietMode && !externalJSON
+	valConfig.AuthCompatibilitySQL = detectAuthCompatibilitySQL(args[0])
+
+	validator := validation.NewSchemaValidator(valConfig, nil, nil)
+	defer validator.Close()
+
+	snapshot, err := validator.ApplyAndSnapshot(cmd.Context(), args[0], dsn, validation.ExternalValidationOptions{
+		AllowedSchemas: externalAllowedSchemas,
+	})
+	if err != nil {
+		return fail(errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"external database validation failed",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithFile(args[0]).WithInnerError(err))
+	}
+	result.PostgreSQLVersion = snapshot.PostgreSQLVersion
+
+	if snapshotOutput != "" {
+		if err := writeCatalogSnapshot(snapshotOutput, snapshot); err != nil {
+			return fail(err)
+		}
+		result.Success = true
+		result.DurationMS = time.Since(started).Milliseconds()
+		return writeExternalValidationResult(cmd, result)
+	}
+
+	original, err := readCatalogSnapshot(againstSnapshot)
+	if err != nil {
+		return fail(err)
+	}
+	diff, err := validation.CompareCatalogSnapshots(original, snapshot)
+	if err != nil {
+		return fail(err)
+	}
+	result.ComparisonValid = true
+	result.HasDifferences = diff.HasDifferences
+	result.Differences = append(result.Differences, diff.Differences...)
+	result.Success = !diff.HasDifferences
+	result.DurationMS = time.Since(started).Milliseconds()
+	if err := writeExternalValidationResult(cmd, result); err != nil {
+		return err
+	}
+	if diff.HasDifferences {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"external validation found schema differences",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
+	return nil
+}
+
+func resolveExternalValidationDSN() (string, error) {
+	if strings.TrimSpace(externalDSN) != "" && strings.TrimSpace(externalDSNEnv) != "" {
+		return "", errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"--dsn and --dsn-env cannot be used together",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
+	if name := strings.TrimSpace(externalDSNEnv); name != "" {
+		value := strings.TrimSpace(os.Getenv(name))
+		if value == "" {
+			return "", errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("environment variable %s is empty", name),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			)
+		}
+		return value, nil
+	}
+	if value := strings.TrimSpace(externalDSN); value != "" {
+		return value, nil
+	}
+	return "", errors.NewError(
+		errors.ErrorCodeValidationFailed,
+		"one of --dsn or --dsn-env is required",
+		errors.SeverityError,
+		errors.CategoryValidation,
+	)
+}
+
+func detectAuthCompatibilitySQL(migrationPath string) string {
+	paths := make([]string, 0)
+	info, err := os.Stat(migrationPath)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		_ = filepath.WalkDir(migrationPath, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".sql") {
+				paths = append(paths, path)
+			}
+			return nil
+		})
+	} else {
+		paths = append(paths, migrationPath)
+	}
+
+	contents := make(map[int]string, len(paths))
+	for i, path := range paths {
+		content, readErr := os.ReadFile(path)
+		if readErr == nil {
+			contents[i] = string(content)
+		}
+	}
+	analysis := squasher.NewExtensionDetector().AnalyzeMigrations(contents)
+	return analysis.AuthCompatibilitySQL
+}
+
+func writeCatalogSnapshot(path string, snapshot *validation.CatalogSnapshot) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return fmt.Errorf("create catalog snapshot directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(directory, ".pgsquash-snapshot-*.json")
+	if err != nil {
+		return fmt.Errorf("create catalog snapshot: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+
+	encoder := json.NewEncoder(temporary)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(snapshot); err != nil {
+		temporary.Close()
+		return fmt.Errorf("encode catalog snapshot: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close catalog snapshot: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("publish catalog snapshot: %w", err)
+	}
+	return nil
+}
+
+func readCatalogSnapshot(path string) (*validation.CatalogSnapshot, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read catalog snapshot: %w", err)
+	}
+	var snapshot validation.CatalogSnapshot
+	if err := json.Unmarshal(content, &snapshot); err != nil {
+		return nil, fmt.Errorf("decode catalog snapshot: %w", err)
+	}
+	return &snapshot, nil
+}
+
+func writeExternalValidationResult(cmd *cobra.Command, result externalValidationResult) error {
+	if externalJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+	}
+	if result.Phase == "snapshot" {
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "Captured catalog snapshot (%s)\n", result.PostgreSQLVersion)
+		return err
+	}
+	if result.Success {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "Schemas are equivalent")
+		return err
+	}
+	_, err := fmt.Fprintln(cmd.OutOrStdout(), "Schemas differ")
+	return err
+}
+
+func runLint(cmd *cobra.Command, args []string) error {
+	files, err := collectSQLFilesFromArgs(args)
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"Failed to collect SQL files for linting",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+
+	if len(files) == 0 {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"No SQL files found for linting",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithSuggestion("Provide at least one SQL file or a directory containing SQL files")
+	}
+
+	cfg, err := config.LoadConfig(resolveConfigPath())
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"Failed to load configuration",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithFile(configPath).WithInnerError(err)
+	}
+
+	staticConfig, err := buildStaticValidationConfig(cmd, cfg)
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"Invalid static validation rule configuration",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+
+	applyFixes, _ := cmd.Flags().GetBool("fix")
+	writeFixes, _ := cmd.Flags().GetBool("write")
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+
+	if writeFixes && !applyFixes {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"--write requires --fix",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
+
+	validator := validation.NewStaticValidator(staticConfig)
+
+	type fileViolation struct {
+		File string `json:"file"`
+		validation.Violation
+	}
+
+	type lintSummary struct {
+		FilesScanned int `json:"files_scanned"`
+		Violations   int `json:"violations"`
+		Safety       int `json:"safety"`
+		Breaking     int `json:"breaking"`
+		Hygiene      int `json:"hygiene"`
+		UnusedIgnore int `json:"unused_ignore_directives"`
+		FixedFiles   int `json:"fixed_files"`
+	}
+
+	violations := make([]fileViolation, 0)
+	summary := lintSummary{FilesScanned: len(files)}
+	backupFiles := make([]string, 0)
+
+	for _, file := range files {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("Failed to read SQL file '%s'", file),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithFile(file).WithInnerError(err)
+		}
+
+		fileViolations, err := validator.Check(string(content))
+		if err != nil {
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("Lint failed for '%s'", file),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithFile(file).WithInnerError(err)
+		}
+
+		if applyFixes {
+			fixed, fixErr := validator.ApplyFixes(string(content), fileViolations)
+			if fixErr != nil {
+				return errors.NewError(
+					errors.ErrorCodeValidationFailed,
+					fmt.Sprintf("Failed to apply fixes for '%s'", file),
+					errors.SeverityError,
+					errors.CategoryValidation,
+				).WithFile(file).WithInnerError(fixErr)
+			}
+
+			if writeFixes && fixed != string(content) {
+				// Never rewrite an original in place without a recovery copy:
+				// write a sibling backup first (collision-safe), then rewrite.
+				backupFile, backupErr := writeLintBackup(file, content)
+				if backupErr != nil {
+					return errors.NewError(
+						errors.ErrorCodeValidationFailed,
+						fmt.Sprintf("Failed to back up '%s' before writing fixes", file),
+						errors.SeverityError,
+						errors.CategoryValidation,
+					).WithFile(file).WithInnerError(backupErr).WithSuggestion("Ensure the directory is writable, or run --fix without --write to preview fixes")
+				}
+				if err := os.WriteFile(file, []byte(fixed), 0644); err != nil {
+					return errors.NewError(
+						errors.ErrorCodeValidationFailed,
+						fmt.Sprintf("Failed to write fixes for '%s' (original preserved at '%s')", file, backupFile),
+						errors.SeverityError,
+						errors.CategoryValidation,
+					).WithFile(file).WithInnerError(err)
+				}
+				summary.FixedFiles++
+				backupFiles = append(backupFiles, backupFile)
+			}
+		}
+
+		for _, violation := range fileViolations {
+			violations = append(violations, fileViolation{File: file, Violation: violation})
+			summary.Violations++
+			if violation.Code == validation.RuleCodeMetaUnusedIgnoreDirective {
+				summary.UnusedIgnore++
+			}
+			switch violation.Category {
+			case validation.CategorySafety:
+				summary.Safety++
+			case validation.CategoryBreaking:
+				summary.Breaking++
+			case validation.CategoryHygiene:
+				summary.Hygiene++
+			}
+		}
+	}
+
+	if jsonOutput {
+		payload := map[string]any{
+			"summary":    summary,
+			"violations": violations,
+		}
+		if len(backupFiles) > 0 {
+			payload["backups"] = backupFiles
+		}
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(payload); err != nil {
+			return err
+		}
+	} else {
+		if summary.Violations == 0 {
+			fmt.Printf("☑ Lint passed: %d file(s) scanned, no violations found.\n", summary.FilesScanned)
+		} else {
+			fmt.Printf("Lint summary: %d file(s), %d violation(s) [safety=%d, breaking=%d, hygiene=%d, unused_ignores=%d]\n",
+				summary.FilesScanned,
+				summary.Violations,
+				summary.Safety,
+				summary.Breaking,
+				summary.Hygiene,
+				summary.UnusedIgnore,
+			)
+
+			for _, violation := range violations {
+				fmt.Printf("- %s:%d [%s] %s: %s\n",
+					violation.File,
+					violation.Line,
+					violation.Category,
+					violation.Code,
+					violation.Message,
+				)
+			}
+
+			if applyFixes && writeFixes && summary.FixedFiles > 0 {
+				fmt.Printf("Applied and wrote autofixes to %d file(s).\n", summary.FixedFiles)
+				for _, backupFile := range backupFiles {
+					fmt.Printf("Original backed up to: %s\n", backupFile)
+				}
+			}
+		}
+	}
+
+	strict, _ := cmd.Flags().GetBool("strict")
+	shouldFail := strict
+	if !strict {
+		shouldFail = summary.Breaking > 0 || summary.Safety > 0
+	}
+
+	if shouldFail && summary.Violations > 0 {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			fmt.Sprintf("lint failed with %d violation(s)", summary.Violations),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
+
+	return nil
+}
+
+// writeLintBackup writes a sibling backup of a file's original content before
+// an autofix rewrite. It uses <file>.bak, falling back to <file>.bak.1,
+// <file>.bak.2, ... on collision so earlier backups are never overwritten.
+func writeLintBackup(file string, content []byte) (string, error) {
+	candidate := file + ".bak"
+	for i := 1; ; i++ {
+		_, err := os.Stat(candidate)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		candidate = fmt.Sprintf("%s.bak.%d", file, i)
+	}
+	if err := os.WriteFile(candidate, content, 0644); err != nil {
+		return "", err
+	}
+	return candidate, nil
+}
+
+func buildStaticValidationConfig(cmd *cobra.Command, cfg *config.Config) (*config.StaticValidatorConfig, error) {
+	staticConfig := &config.StaticValidatorConfig{
+		EnabledRules:          append([]string(nil), cfg.StaticValidation.EnabledRules...),
+		RuleOptions:           map[string]map[string]any{},
+		TreatWarningsAsErrors: cfg.StaticValidation.TreatWarningsAsErrors,
+	}
+
+	for code, options := range cfg.StaticValidation.RuleOptions {
+		optionCopy := make(map[string]any, len(options))
+		maps.Copy(optionCopy, options)
+		staticConfig.RuleOptions[code] = optionCopy
+	}
+
+	enableRules, _ := cmd.Flags().GetStringSlice("enable-rule")
+	disableRules, _ := cmd.Flags().GetStringSlice("disable-rule")
+	strict, _ := cmd.Flags().GetBool("strict")
+
+	resolvedRules, err := validation.ResolveEnabledRules(staticConfig.EnabledRules, enableRules, disableRules)
+	if err != nil {
+		return nil, err
+	}
+	staticConfig.EnabledRules = resolvedRules
+
+	if strict {
+		staticConfig.TreatWarningsAsErrors = true
+	}
+
+	return staticConfig, nil
+}
+
+func collectSQLFilesFromArgs(args []string) ([]string, error) {
+	seen := make(map[string]struct{})
+	files := make([]string, 0)
+
+	appendFile := func(path string) {
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		files = append(files, path)
+	}
+
+	visitPath := func(target string) error {
+		info, err := os.Stat(target)
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() {
+			if strings.EqualFold(filepath.Ext(target), ".sql") {
+				appendFile(target)
+			}
+			return nil
+		}
+
+		return filepath.WalkDir(target, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if strings.EqualFold(filepath.Ext(path), ".sql") {
+				appendFile(path)
+			}
+			return nil
+		})
+	}
+
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if trimmed == "" {
+			continue
+		}
+
+		if strings.ContainsAny(trimmed, "*?[]") {
+			matches, err := filepath.Glob(trimmed)
+			if err != nil {
+				return nil, err
+			}
+			for _, match := range matches {
+				if err := visitPath(match); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+
+		if err := visitPath(trimmed); err != nil {
+			return nil, err
+		}
+	}
+
+	sort.Strings(files)
+	return files, nil
+}
+
 func runInitConfig(cmd *cobra.Command, args []string) error {
-	configFile := "pgsquash.config.json"
+	configFile := brandDefaultConfigName()
 	if configPath != "" {
 		configFile = configPath
 	}
@@ -1117,183 +2366,6 @@ func runInitConfig(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runAITest(cmd *cobra.Command, args []string) error {
-	color.Cyan("🤖 Testing AI Provider Integrations\n")
-
-	// Run the integration test
-	ai.RunAIIntegrationTest()
-
-	return nil
-}
-
-func runAIDemo(cmd *cobra.Command, args []string) error {
-	color.Cyan("🎯 Demonstrating AI Capabilities\n")
-
-	// Run the AI demonstration
-	if err := ai.DemoAICapabilities(); err != nil {
-		color.Red("☒ AI demonstration failed: %v\n", err)
-		return err
-	}
-
-	color.Green("✨ AI demonstration completed successfully!\n")
-	return nil
-}
-
-func runAIFix(cmd *cobra.Command, args []string) error {
-	migrationPath := args[0]
-
-	color.Cyan("🤖 AI-Assisted Migration Fixing\n")
-	color.Cyan("   Migration path: %s\n", migrationPath)
-	color.Cyan("   Max attempts: %d\n", maxFixAttempts)
-	color.Cyan("   Auto-apply: %v\n\n", autoApplyFixes)
-
-	// Create provider manager with default config
-	providerManager, err := ai.NewProviderManager(nil)
-	if err != nil {
-		color.Red("☒ Failed to initialize AI providers: %v\n", err)
-		color.Yellow("\nℹ️  AI fixing requires API keys. Set one of:\n")
-		color.Yellow("   ► ANTHROPIC_API_KEY for Claude\n")
-		color.Yellow("   ► OPENAI_API_KEY for OpenAI\n")
-		color.Yellow("   ► AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT for Azure\n")
-		return err
-	}
-
-	// Get default provider
-	provider, err := providerManager.GetDefaultProvider()
-	if err != nil {
-		color.Red("☒ No AI provider available: %v\n", err)
-		return err
-	}
-
-	// Create migration fixer with validation function
-	fixer := ai.NewMigrationFixer(provider, maxFixAttempts, verbose)
-
-	// Create validation function that uses Docker validation
-	validationFunc := func(ctx context.Context, path string) error {
-		// Load configuration
-		_, err := config.LoadConfig(configPath)
-		if err != nil {
-			return errors.NewError(
-				errors.ErrorCodeValidationFailed,
-				"Failed to load configuration for AI fix validation",
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithFile(configPath).WithInnerError(err)
-		}
-
-		// Create temporary output directory for validation
-		tmpOutput := filepath.Join(os.TempDir(), fmt.Sprintf("pgsquash_validate_%d", time.Now().Unix()))
-		if err := os.MkdirAll(tmpOutput, 0755); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeValidationFailed,
-				"Failed to create temporary output directory for validation",
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithFile(tmpOutput).WithInnerError(err).WithSuggestion("Check temp directory permissions")
-		}
-		defer func() {
-			if err := os.RemoveAll(tmpOutput); err != nil {
-				// Log but don't fail on cleanup error
-				_ = err
-			}
-		}()
-
-		// Load and process migrations
-		migrations, err := filepath.Glob(filepath.Join(path, "*.sql"))
-		if err != nil || len(migrations) == 0 {
-			return errors.NewError(
-				errors.ErrorCodeValidationFailed,
-				fmt.Sprintf("No SQL files found in %s", path),
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithFile(path).WithSuggestion("Ensure the directory contains .sql migration files")
-		}
-
-		// Create validation config
-		valConfig := validation.DefaultValidationConfig()
-		valConfig.DockerApproach = validation.ApproachSchemaDiff // Fast validation for fixing
-		valConfig.EnableExtensionDetection = true
-		valConfig.EnableSQLFixes = false // Don't auto-fix during validation
-		valConfig.Verbose = false        // Quiet during fixing loop
-
-		validator := validation.NewSchemaValidator(valConfig, nil, nil)
-		defer func() {
-			if err := validator.Close(); err != nil {
-				// Log but don't fail on cleanup error
-				_ = err
-			}
-		}()
-
-		// Validate migrations
-		result, err := validator.ValidateWithDocker(ctx, path, path)
-		if err != nil {
-			return err
-		}
-
-		if !result.Success || len(result.Errors) > 0 {
-			// Return first error
-			if len(result.Errors) > 0 {
-				return errors.NewError(
-					errors.ErrorCodeValidationFailed,
-					fmt.Sprintf("%s: %s", result.Errors[0].Code, result.Errors[0].Message),
-					errors.SeverityError,
-					errors.CategoryValidation,
-				).WithFile(path)
-			}
-			return errors.NewError(
-				errors.ErrorCodeValidationFailed,
-				"Validation failed",
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithFile(path)
-		}
-
-		return nil
-	}
-
-	// Attach validation function to fixer
-	fixer.WithValidation(validationFunc)
-
-	// Run initial validation
-	color.Cyan("🔍 Running initial validation...\n")
-	ctx := context.Background()
-	initialError := validationFunc(ctx, migrationPath)
-
-	if initialError == nil {
-		color.Green("☑ Migrations are already valid! No fixes needed.\n")
-		return nil
-	}
-
-	color.Yellow("⚠️  Validation failed: %v\n", initialError)
-	color.Cyan("   Starting AI-powered fixing...\n\n")
-
-	// Run the fixer with automatic validation re-runs
-	result, err := fixer.FixMigrationsUntilValid(ctx, migrationPath, initialError)
-	if err != nil {
-		color.Red("☒ AI fixing failed: %v\n", err)
-		return err
-	}
-
-	// Display results
-	color.Cyan("\n📊 Fix Results:\n")
-	color.Cyan("   Total attempts: %d\n", len(result.Attempts))
-	color.Cyan("   Successful fixes: %d\n", result.TotalFixes)
-	color.Cyan("   Files modified: %d\n\n", len(result.FilesModified))
-
-	if result.Success {
-		color.Green("☑ Migrations fixed successfully!\n")
-		color.Green("\nℹ️  Modified files:\n")
-		for _, file := range result.FilesModified {
-			color.Green("   ► %s (backup created)\n", file)
-		}
-	} else {
-		color.Red("☒ Could not fix all migration errors\n")
-		color.Red("   Last error: %s\n", result.FinalError)
-	}
-
-	return nil
-}
-
 // Standardized workflow functions
 func runSafeWorkflow(cmd *cobra.Command, args []string) error {
 	color.Cyan("🛡️  SAFE Workflow: Production-Ready Migration Squashing\n")
@@ -1305,7 +2377,7 @@ func runSafeWorkflow(cmd *cobra.Command, args []string) error {
 	enableTransformation = false // Conservative approach
 
 	// Load configuration
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
 		color.Red("☒ Failed to load configuration: %v\n", err)
 		return err
@@ -1326,11 +2398,11 @@ func runSafeWorkflow(cmd *cobra.Command, args []string) error {
 	color.Yellow("   ► Output Directory: %s\n", cfg.Output.Directory)
 	color.Yellow("   ► Backup: %v (pre-squash safety)\n", enableBackup)
 	color.Yellow("   ► Rollback: %v (recovery planning)\n", enableRollback)
-	color.Yellow("   ► Auto SQL Fix: disabled (manual review required)\n")
+	color.Yellow("   ► Auto SQL Fix: %s (from validation.enable_sql_fixes)\n", sqlFixStatus(cfg))
 	fmt.Println()
 
 	// Execute squash with AI-enhanced validation
-	return executeSquashWithAIValidation(args, cfg, "TWO_CONTAINERS")
+	return executeSquashWithValidation(args, cfg, "TWO_CONTAINERS")
 }
 
 func runFastWorkflow(cmd *cobra.Command, args []string) error {
@@ -1341,11 +2413,10 @@ func runFastWorkflow(cmd *cobra.Command, args []string) error {
 	enableBackup = false
 	enableRollback = false
 	enableTransformation = true
-	streaming = true // Enable for performance
 	enableCycleDetection = true
 
 	// Load configuration
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
 		color.Red("☒ Failed to load configuration: %v\n", err)
 		return err
@@ -1365,14 +2436,14 @@ func runFastWorkflow(cmd *cobra.Command, args []string) error {
 	color.Yellow("   ► Safety Level: %s (balanced optimization)\n", cfg.SafetyLevel)
 	color.Yellow("   ► Docker Validation: SCHEMA_DIFF (fastest approach)\n")
 	color.Yellow("   ► Output Directory: %s\n", cfg.Output.Directory)
-	color.Yellow("   ► Streaming: %v (memory efficient)\n", streaming)
+	color.Yellow("   ► Validation: SCHEMA_DIFF single-database snapshots (fastest)\n")
 	color.Yellow("   ► DDL Cycle Detection: %v (resolves conflicts)\n", enableCycleDetection)
 	color.Yellow("   ► SQL Transformation: %v (modern syntax)\n", enableTransformation)
-	color.Yellow("   ► Auto SQL Fix: enabled (automatic corrections)\n")
+	color.Yellow("   ► Auto SQL Fix: %s (from validation.enable_sql_fixes)\n", sqlFixStatus(cfg))
 	fmt.Println()
 
 	// Execute squash with AI-enhanced fast processing
-	return executeSquashWithAIOptimization(args, cfg, "SCHEMA_DIFF")
+	return executeSquashWithValidation(args, cfg, "SCHEMA_DIFF")
 }
 
 func runAnalyzeWorkflow(cmd *cobra.Command, args []string) error {
@@ -1384,7 +2455,7 @@ func runAnalyzeWorkflow(cmd *cobra.Command, args []string) error {
 	showCycleDetails = true
 
 	// Load configuration
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
 		color.Red("☒ Failed to load configuration: %v\n", err)
 		return err
@@ -1396,495 +2467,24 @@ func runAnalyzeWorkflow(cmd *cobra.Command, args []string) error {
 	color.Yellow("📋 ANALYZE Workflow Configuration:\n")
 	color.Yellow("   ► DDL Cycle Detection: %v (all algorithm types)\n", enableCycleDetection)
 	color.Yellow("   ► Analysis Depth: %d levels\n", cycleDetectionDepth)
-	color.Yellow("   ► AI Analysis: enabled if configured (semantic insights)\n")
+	color.Yellow("   ► Deterministic Analysis: enabled (parser + dependency tracker)\n")
 	color.Yellow("   ► Detailed Reporting: %v (comprehensive findings)\n", showCycleDetails)
 	color.Yellow("   ► Mode: Analysis only (no file modifications)\n")
 	fmt.Println()
 
-	// Execute AI-powered comprehensive analysis
-	return executeAIComprehensiveAnalysis(args, cfg)
-}
-
-// AI-Enhanced Helper Functions
-
-func executeSquashWithAIValidation(args []string, cfg *config.Config, validationApproach string) error {
-	startTime := time.Now()
-
-	// Load migrations
-	migrations, err := loadMigrations(args, cfg.Performance.ShowProgress)
-	if err != nil {
-		return errors.NewError(
-			errors.ErrorCodeSyntaxError,
-			"Failed to load migration files for SAFE workflow",
-			errors.SeverityError,
-			errors.CategoryParsing,
-		).WithInnerError(err).WithSuggestion("Check migration file syntax and permissions")
-	}
-
-	// Initialize AI analyzer
-	analyzer, aiErr := ai.NewAnalyzer()
-	if aiErr != nil {
-		color.Yellow("⚠️  AI analyzer unavailable: %v\n", aiErr)
-		color.Yellow("   Proceeding without AI enhancements\n")
-		// Fall back to regular validation
-		return executeSquashWithValidation(args, cfg, validationApproach)
-	}
-
-	color.Cyan("🧠 AI-Enhanced SAFE Processing\n")
-
-	// AI Pre-squash Analysis
-	combinedSQL := ""
-	for _, mig := range migrations {
-		combinedSQL += mig.Content + "\n"
-	}
-
-	// 1. Detect authentication patterns for extra safety
-	authPatternsResp, err := analyzer.DetectAuthPatterns(context.Background(), combinedSQL)
-	if err == nil && len(authPatternsResp.Patterns) > 0 {
-		color.Yellow("🔐 AI detected authentication patterns:\n")
-		for _, pattern := range authPatternsResp.Patterns {
-			color.Yellow("   ► %s\n", pattern)
-		}
-		color.Yellow("   Extra validation recommended for auth-related changes\n")
-	}
-
-	// Create squasher engine
-	engineConfig := squasher.EngineConfig{
-		Config:               cfg,
-		EnableStreaming:      false,
-		EnableTransformation: true,
-	}
-	engine := squasher.NewEngine(engineConfig)
-
-	// Convert migrations to format expected by engine
-	migrationMap := make(map[int]string)
-	for i, mig := range migrations {
-		migrationMap[i+1] = mig.Content
-	}
-
-	// Execute squashing
-	finalSQL, warnings, err := engine.Squash(migrationMap)
-	if err != nil {
-		return errors.NewError(
-			errors.ErrorCodeConsolidationFailed,
-			"Failed to squash migrations in AI-enhanced SAFE workflow",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err).WithSuggestion("Review migration syntax and dependencies")
-	}
-
-	// AI Post-squash Safety Analysis (NON-BLOCKING - warnings only)
-	// Docker validation is the source of truth. AI provides additional insights but doesn't block deployment.
-	color.Cyan("🔍 AI Safety Validation...\n")
-
-	aiWarningCount := 0
-
-	// 2. Schema consistency validation (warnings only)
-	consistencyResp, err := analyzer.ValidateSchemaConsistency(context.Background(), combinedSQL, finalSQL)
-	if err == nil && len(consistencyResp.Differences) > 0 {
-		color.Yellow("⚠️  AI detected %d potential schema inconsistencies (review recommended):\n", len(consistencyResp.Differences))
-		for i, issue := range consistencyResp.Differences {
-			if i < 3 { // Show first 3 to avoid overwhelming output
-				color.Yellow("   ► %s\n", issue)
-			}
-		}
-		if len(consistencyResp.Differences) > 3 {
-			color.Yellow("   ... and %d more issues\n", len(consistencyResp.Differences)-3)
-		}
-		color.Yellow("   Note: These are AI suggestions - Docker validation is authoritative\n")
-		aiWarningCount += len(consistencyResp.Differences)
-	}
-
-	// 3. Conservative dead code detection (warnings only in SAFE mode)
-	functions := extractFunctionsFromSQL(finalSQL)
-	deadCodeCount := 0
-	for _, function := range functions {
-		isDead, _, err := analyzer.IsDeadCode(context.Background(), finalSQL, function)
-		if err == nil && isDead {
-			deadCodeCount++
-		}
-	}
-	if deadCodeCount > 0 {
-		color.Yellow("💡 AI detected %d potentially unused functions\n", deadCodeCount)
-		color.Yellow("   Manual review recommended before production deployment\n")
-		aiWarningCount += deadCodeCount
-	}
-
-	// Write output files (same as original)
-	outputDir := cfg.Output.Directory
-	if outputDir == "" {
-		outputDir = "clean_migrations"
-	}
-
-	if !dryRun {
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeValidationFailed,
-				"Failed to create output directory",
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithFile(outputDir).WithInnerError(err).WithSuggestion("Check directory permissions")
-		}
-
-		outputFile := filepath.Join(outputDir, "001_consolidated_migration.sql")
-		if err := os.WriteFile(outputFile, []byte(finalSQL), 0644); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeSQLGenerationFailed,
-				"Failed to write consolidated migration file",
-				errors.SeverityError,
-				errors.CategoryConsolidation,
-			).WithFile(outputFile).WithInnerError(err).WithSuggestion("Ensure sufficient disk space")
-		}
-
-		color.Green("☑ Squashed migrations written to: %s\n", outputFile)
-	}
-
-	// Run Docker validation
-	if !dryRun {
-		color.Cyan("🔍 Running Docker validation with %s approach...\n", validationApproach)
-
-		validationConfig := validation.DefaultValidationConfig()
-		validationConfig.EnableExtensionDetection = true
-		validationConfig.EnableSQLFixes = false                                  // No auto-fix in SAFE mode
-		validationConfig.DockerApproach = validation.ApproachTwoContainers       // SAFE uses TWO_CONTAINERS
-		validationConfig.AuthCompatibilitySQL = engine.GetAuthCompatibilitySQL() // Inject auth compatibility
-		validationConfig.Verbose = true                                          // Show auth layer creation
-		validator := validation.NewSchemaValidator(validationConfig, nil, nil)
-
-		ctx := context.Background()
-		result, err := validator.ValidateWithDocker(ctx, filepath.Dir(args[0]), outputDir)
-		if err != nil {
-			color.Red("☒ Docker validation failed: %v\n", err)
-		} else if result != nil && len(result.Errors) == 0 {
-			color.Green("☑ Docker validation passed!\n")
-		} else {
-			color.Yellow("⚠️  Schema differences detected - see validation report\n")
-		}
-	}
-
-	if aiWarningCount > 0 {
-		color.Yellow("🛡️  AI Safety Validation: %d warnings (review recommended, not blocking)\n", aiWarningCount)
-	} else {
-		color.Green("🛡️  AI Safety Validation: No issues detected\n")
-	}
-
-	// Print summary
-	sqlLines := strings.Count(finalSQL, "\n")
-	outputFile := filepath.Join(outputDir, "001_consolidated_migration.sql")
-	printSquashSummary(len(migrations), sqlLines, time.Since(startTime), warnings, outputFile)
-	return nil
-}
-
-func executeSquashWithAIOptimization(args []string, cfg *config.Config, validationApproach string) error {
-	startTime := time.Now()
-
-	// Load migrations
-	migrations, err := loadMigrations(args, cfg.Performance.ShowProgress)
-	if err != nil {
-		return errors.NewError(
-			errors.ErrorCodeSyntaxError,
-			"Failed to load migration files for AI optimization",
-			errors.SeverityError,
-			errors.CategoryParsing,
-		).WithInnerError(err).WithSuggestion("Verify migration files contain valid SQL")
-	}
-
-	// Initialize AI analyzer
-	analyzer, aiErr := ai.NewAnalyzer()
-	if aiErr != nil {
-		color.Yellow("⚠️  AI analyzer unavailable: %v\n", aiErr)
-		// Fall back to regular processing
-		return executeSquashWithValidation(args, cfg, validationApproach)
-	}
-
-	color.Cyan("🧠 AI-Enhanced FAST Processing\n")
-
-	// Create squasher engine
-	engineConfig := squasher.EngineConfig{
-		Config:               cfg,
-		EnableStreaming:      false,
-		EnableTransformation: true,
-	}
-	engine := squasher.NewEngine(engineConfig)
-
-	// Convert migrations to format expected by engine
-	migrationMap := make(map[int]string)
-	combinedSQL := ""
-	for i, mig := range migrations {
-		migrationMap[i+1] = mig.Content
-		combinedSQL += mig.Content + "\n"
-	}
-
-	// Execute squashing
-	finalSQL, warnings, err := engine.Squash(migrationMap)
-	if err != nil {
-		return errors.NewError(
-			errors.ErrorCodeConsolidationFailed,
-			"Failed to squash migrations in FAST workflow",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err).WithSuggestion("Try reducing migration complexity or using SAFE workflow")
-	}
-
-	// AI-Powered Optimizations
-	color.Cyan("⚡ AI Optimization Engine...\n")
-
-	// 1. Function semantic analysis for deduplication
-	functions := extractFunctionsFromSQL(finalSQL)
-	equivalentPairs := 0
-	for i, func1 := range functions {
-		for j := i + 1; j < len(functions); j++ {
-			func2 := functions[j]
-			isEquivalent, _, err := analyzer.AreFunctionsSemanticallyEquivalent(context.Background(), func1, func2)
-			if err == nil && isEquivalent {
-				color.Cyan("🔄 AI found equivalent functions: %s ≡ %s\n",
-					extractFunctionName(func1), extractFunctionName(func2))
-				equivalentPairs++
-			}
-		}
-	}
-
-	// 2. Performance optimization suggestions
-	optimizationsResp, err := analyzer.SuggestOptimizations(context.Background(), finalSQL)
-	if err == nil && len(optimizationsResp.Optimizations) > 0 {
-		color.Green("⚡ AI Performance Suggestions:\n")
-		for i, opt := range optimizationsResp.Optimizations {
-			if i < 5 { // Show top 5 suggestions
-				color.Green("   ► %s\n", opt)
-			}
-		}
-		if len(optimizationsResp.Optimizations) > 5 {
-			color.Green("   ... and %d more optimizations\n", len(optimizationsResp.Optimizations)-5)
-		}
-	}
-
-	// 3. Complexity warnings
-	complexityWarnings := 0
-	for _, mig := range migrations {
-		complexityResp, err := analyzer.AnalyzeFunctionComplexity(context.Background(), mig.Content)
-		if err == nil && strings.Contains(strings.ToLower(complexityResp.Reasoning), "high") {
-			color.Yellow("⚠️  High complexity in %s - consider refactoring\n", mig.FullPath)
-			complexityWarnings++
-		}
-	}
-
-	// Write output files
-	outputDir := cfg.Output.Directory
-	if outputDir == "" {
-		outputDir = "clean_migrations"
-	}
-
-	if !dryRun {
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeValidationFailed,
-				"Failed to create output directory",
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithFile(outputDir).WithInnerError(err).WithSuggestion("Check directory permissions")
-		}
-
-		outputFile := filepath.Join(outputDir, "001_consolidated_migration.sql")
-		if err := os.WriteFile(outputFile, []byte(finalSQL), 0644); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeSQLGenerationFailed,
-				"Failed to write optimized migration file",
-				errors.SeverityError,
-				errors.CategoryConsolidation,
-			).WithFile(outputFile).WithInnerError(err).WithSuggestion("Ensure sufficient disk space")
-		}
-
-		color.Green("☑ Optimized migrations written to: %s\n", outputFile)
-	}
-
-	// Fast Docker validation
-	if !dryRun {
-		color.Cyan("🔍 Running fast Docker validation...\n")
-
-		validationConfig := validation.DefaultValidationConfig()
-		validationConfig.EnableExtensionDetection = true
-		validationConfig.EnableSQLFixes = true                                   // Enable auto-fix for FAST mode
-		validationConfig.DockerApproach = validation.ApproachSchemaDiff          // FAST uses SCHEMA_DIFF
-		validationConfig.AuthCompatibilitySQL = engine.GetAuthCompatibilitySQL() // Inject auth compatibility
-		validationConfig.Verbose = true                                          // Show auth layer creation
-		validator := validation.NewSchemaValidator(validationConfig, nil, nil)
-
-		ctx := context.Background()
-		result, err := validator.ValidateWithDocker(ctx, filepath.Dir(args[0]), outputDir)
-		if err != nil {
-			color.Yellow("⚠️  Validation completed with warnings: %v\n", err)
-		} else if result != nil && len(result.Errors) == 0 {
-			color.Green("☑ Fast validation passed!\n")
-		}
-	}
-
-	// AI Summary
-	color.Green("⚡ AI Optimization Summary:\n")
-	color.Green("   ► Equivalent function pairs found: %d\n", equivalentPairs)
-	color.Green("   ► Performance optimizations suggested: %d\n", len(optimizationsResp.Optimizations))
-	if complexityWarnings > 0 {
-		color.Yellow("   ► High complexity warnings: %d\n", complexityWarnings)
-	}
-
-	// Print summary
-	sqlLines := strings.Count(finalSQL, "\n")
-	outputFile := filepath.Join(outputDir, "001_consolidated_migration.sql")
-	printSquashSummary(len(migrations), sqlLines, time.Since(startTime), warnings, outputFile)
-	return nil
-}
-
-func executeAIComprehensiveAnalysis(args []string, cfg *config.Config) error {
-	startTime := time.Now()
-
-	color.Cyan("🔍 AI-Powered Comprehensive Analysis\n")
-
-	// Load migrations
-	migrations, err := loadMigrations(args, cfg.Performance.ShowProgress)
-	if err != nil {
-		return errors.NewError(
-			errors.ErrorCodeSyntaxError,
-			"Failed to load migration files for AI comprehensive analysis",
-			errors.SeverityError,
-			errors.CategoryParsing,
-		).WithInnerError(err).WithSuggestion("Ensure migration files contain valid SQL")
-	}
-
-	// Initialize AI analyzer
-	analyzer, aiErr := ai.NewAnalyzer()
-	if aiErr != nil {
-		color.Red("☒ AI analyzer unavailable: %v\n", aiErr)
-		// Fall back to basic analysis
-		return executeComprehensiveAnalysis(args, cfg)
-	}
-
-	// Create combined SQL for analysis
-	combinedSQL := ""
-	for _, mig := range migrations {
-		combinedSQL += mig.Content + "\n"
-	}
-
-	color.Cyan("🧠 Deep AI Analysis in progress...\n")
-
-	// 1. Authentication Security Audit
-	authPatternsResp, err := analyzer.DetectAuthPatterns(context.Background(), combinedSQL)
-	authAnalysis := "No auth patterns detected"
-	if err == nil && len(authPatternsResp.Patterns) > 0 {
-		authAnalysis = fmt.Sprintf("%d patterns found: %v", len(authPatternsResp.Patterns), authPatternsResp.Patterns)
-	}
-
-	// 2. Dead Code Analysis
-	functions := extractFunctionsFromSQL(combinedSQL)
-	deadCodeCount := 0
-	deadFunctions := []string{}
-	for _, function := range functions {
-		functionName := extractFunctionName(function)
-		isDead, _, err := analyzer.IsDeadCode(context.Background(), combinedSQL, functionName)
-		if err == nil && isDead {
-			deadCodeCount++
-			deadFunctions = append(deadFunctions, functionName)
-		}
-	}
-
-	// 3. Function Complexity Heatmap
-	complexityMap := make(map[string]string)
-	highComplexityCount := 0
-	for _, mig := range migrations {
-		complexityResp, err := analyzer.AnalyzeFunctionComplexity(context.Background(), mig.Content)
-		if err == nil {
-			complexityMap[mig.FullPath] = complexityResp.Reasoning
-			if strings.Contains(strings.ToLower(complexityResp.Reasoning), "high") {
-				highComplexityCount++
-			}
-		}
-	}
-
-	// 4. Performance Optimization Opportunities
-	optimizationsResp, err := analyzer.SuggestOptimizations(context.Background(), combinedSQL)
-	optimizationCount := 0
-	if err == nil {
-		optimizationCount = len(optimizationsResp.Optimizations)
-	}
-
-	// 5. Function Semantic Analysis
-	equivalentPairs := 0
-	for i, func1 := range functions {
-		for j := i + 1; j < len(functions); j++ {
-			func2 := functions[j]
-			isEquivalent, _, err := analyzer.AreFunctionsSemanticallyEquivalent(context.Background(), func1, func2)
-			if err == nil && isEquivalent {
-				equivalentPairs++
-			}
-		}
-	}
-
-	// 6. Code Coverage Analysis
-	coverageIssues := []string{}
-	for _, function := range functions[:min(len(functions), 10)] { // Analyze top 10 functions
-		coverageResp, err := analyzer.AnalyzeCodeCoverage(context.Background(), function, combinedSQL)
-		if err == nil && strings.Contains(strings.ToLower(coverageResp), "unused") {
-			coverageIssues = append(coverageIssues, extractFunctionName(function))
-		}
-	}
-
-	// Enhanced AI Reporting
-	color.Cyan("\n🧠 AI Deep Analysis Results\n")
-	color.Cyan("=====================================\n")
-
-	fmt.Printf("📊 Migration Files Analyzed: %d\n", len(migrations))
-	fmt.Printf("⏱️  Analysis Duration: %v\n", time.Since(startTime))
-	fmt.Printf("🔍 Total Functions Found: %d\n", len(functions))
-	fmt.Println()
-
-	color.Cyan("🔐 Security Analysis:\n")
-	fmt.Printf("   ► Authentication Patterns: %s\n", authAnalysis)
-	fmt.Println()
-
-	color.Cyan("🧹 Code Quality Analysis:\n")
-	fmt.Printf("   ► Dead Code Functions: %d\n", deadCodeCount)
-	if len(deadFunctions) > 0 && len(deadFunctions) <= 5 {
-		for _, fn := range deadFunctions {
-			fmt.Printf("     - %s\n", fn)
-		}
-	} else if len(deadFunctions) > 5 {
-		for _, fn := range deadFunctions[:5] {
-			fmt.Printf("     - %s\n", fn)
-		}
-		fmt.Printf("     ... and %d more\n", len(deadFunctions)-5)
-	}
-	fmt.Printf("   ► High Complexity Migrations: %d\n", highComplexityCount)
-	fmt.Printf("   ► Semantically Equivalent Function Pairs: %d\n", equivalentPairs)
-	fmt.Println()
-
-	color.Cyan("⚡ Performance Analysis:\n")
-	fmt.Printf("   ► Optimization Opportunities: %d\n", optimizationCount)
-	if optimizationCount > 0 && optimizationsResp != nil {
-		fmt.Println("   Top suggestions:")
-		for i, opt := range optimizationsResp.Optimizations[:min(len(optimizationsResp.Optimizations), 3)] {
-			fmt.Printf("     %d. %s\n", i+1, opt)
-		}
-	}
-	fmt.Printf("   ► Coverage Issues: %d functions with low usage\n", len(coverageIssues))
-	fmt.Println()
-
-	// Strategic Recommendations
-	color.Cyan("💡 AI Recommendations:\n")
-	if deadCodeCount > 0 {
-		color.Yellow("   ► Run FAST workflow to automatically optimize %d functions\n", equivalentPairs)
-	}
-	if len(authPatternsResp.Patterns) > 0 {
-		color.Yellow("   ► Use SAFE workflow for production - auth patterns detected\n")
-	}
-	if optimizationCount > 10 {
-		color.Green("   ► High optimization potential - FAST workflow recommended\n")
-	} else if optimizationCount == 0 {
-		color.Green("   ► Migrations appear well-optimized\n")
-	}
-
-	color.Green("\n✨ AI Analysis Complete!\n")
-	return nil
+	// Execute deterministic comprehensive analysis
+	return executeComprehensiveAnalysis(args, cfg)
 }
 
 // Helper functions for standardized workflows
+
+// sqlFixStatus describes the configured SQL auto-fix behavior for workflow banners.
+func sqlFixStatus(cfg *config.Config) string {
+	if cfg.Validation.EnableSQLFixes {
+		return "enabled - output files may be rewritten in place"
+	}
+	return "disabled"
+}
 
 func executeSquashWithValidation(args []string, cfg *config.Config, validationApproach string) error {
 	startTime := time.Now()
@@ -1900,13 +2500,40 @@ func executeSquashWithValidation(args []string, cfg *config.Config, validationAp
 		).WithInnerError(err).WithSuggestion("Check migration file syntax and permissions")
 	}
 
-	// Create squasher engine
+	if cfg.Output.Directory == "" {
+		cfg.Output.Directory = "clean_migrations"
+	}
+	outputDir := cfg.Output.Directory
+
+	// Same guard as `squash`: never write output into the input directory.
+	if err := ensureOutputNotInputDirectory(outputDir, args); err != nil {
+		return err
+	}
+
+	// Create squasher engine using the workflow's feature toggles.
 	engineConfig := squasher.EngineConfig{
 		Config:               cfg,
+		Version:              rootCmd.Version,
 		EnableStreaming:      false,
-		EnableTransformation: true,
+		EnableBackup:         enableBackup,
+		EnableRollback:       enableRollback,
+		EnableTransformation: enableTransformation,
+		BackupConfig:         createBackupConfig(),
+		TransformationConfig: createTransformationConfig(),
+		RollbackPath:         rollbackPath,
+		BackupPath:           backupPath,
+		EnableCycleDetection: enableCycleDetection,
 	}
-	engine := squasher.NewEngine(engineConfig)
+	engine, err := squasher.NewEngine(engineConfig)
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeConsolidationFailed,
+			"failed to initialize squashing engine",
+			errors.SeverityError,
+			errors.CategoryConsolidation,
+		).WithInnerError(err).WithSuggestion("Review engine configuration and database connectivity settings")
+	}
+	defer engine.Close()
 
 	// Convert migrations to format expected by engine
 	migrationMap := make(map[int]string)
@@ -1915,7 +2542,7 @@ func executeSquashWithValidation(args []string, cfg *config.Config, validationAp
 	}
 
 	// Execute squashing
-	finalSQL, warnings, err := engine.Squash(migrationMap)
+	res, err := engine.Squash(migrationMap)
 	if err != nil {
 		return errors.NewError(
 			errors.ErrorCodeConsolidationFailed,
@@ -1924,79 +2551,146 @@ func executeSquashWithValidation(args []string, cfg *config.Config, validationAp
 			errors.CategoryConsolidation,
 		).WithInnerError(err).WithSuggestion("Check migration syntax and dependency graph")
 	}
+	finalSQL, warnings := res.BaselineSQL, res.Warnings
 
-	// Write output files
-	outputDir := cfg.Output.Directory
-	if outputDir == "" {
-		outputDir = "clean_migrations"
+	// Stage output and promote only after validation passes. The workflow
+	// output filename matches `squash` (000_baseline.sql) so downstream
+	// tooling sees a single naming contract.
+	stagingDir, cleanupStaging, err := stageSquashOutput(cfg, finalSQL, "", nil, res.Extensions)
+	if err != nil {
+		return err
+	}
+	promoted := false
+	defer func() {
+		if !promoted {
+			cleanupStaging()
+		}
+	}()
+
+	outputFile := filepath.Join(outputDir, "000_baseline.sql")
+
+	// Workflows promise validation: a validation execution failure (including
+	// Docker being unavailable) or real schema differences must fail the run.
+	color.Cyan("🔍 Running Docker validation with %s approach...\n", validationApproach)
+	valResult, valErr := runWorkflowValidation(cfg, args, stagingDir, engine.GetAuthCompatibilitySQL(), validationApproach)
+	if err := evaluateWorkflowValidation(valResult, valErr); err != nil {
+		return err
 	}
 
-	if !dryRun {
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeValidationFailed,
-				"Failed to create output directory",
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithFile(outputDir).WithInnerError(err).WithSuggestion("Check directory permissions")
-		}
-
-		outputFile := filepath.Join(outputDir, "001_consolidated_migration.sql")
-		if err := os.WriteFile(outputFile, []byte(finalSQL), 0644); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeSQLGenerationFailed,
-				"Failed to write consolidated migration file",
-				errors.SeverityError,
-				errors.CategoryConsolidation,
-			).WithFile(outputFile).WithInnerError(err).WithSuggestion("Ensure sufficient disk space")
-		}
-
-		color.Green("☑ Squashed migrations written to: %s\n", outputFile)
+	if err := promoteStagedOutput(stagingDir, outputDir); err != nil {
+		return err
 	}
-
-	// Run validation if not dry run
-	if !dryRun {
-		color.Cyan("🔍 Running Docker validation with %s approach...\n", validationApproach)
-
-		validationConfig := validation.DefaultValidationConfig()
-		validationConfig.EnableExtensionDetection = true
-		validationConfig.EnableSQLFixes = validationApproach == "SCHEMA_DIFF" // Auto-fix only for fast approach
-
-		// Set Docker approach based on workflow
-		switch validationApproach {
-		case "TWO_CONTAINERS":
-			validationConfig.DockerApproach = validation.ApproachTwoContainers
-		case "TWO_DATABASES":
-			validationConfig.DockerApproach = validation.ApproachTwoDatabases
-		case "SCHEMA_DIFF":
-			validationConfig.DockerApproach = validation.ApproachSchemaDiff
-		}
-
-		validationConfig.AuthCompatibilitySQL = engine.GetAuthCompatibilitySQL() // Inject auth compatibility
-		validationConfig.Verbose = true                                          // Show auth layer creation
-
-		validator := validation.NewSchemaValidator(validationConfig, nil, nil)
-
-		// Get the original migrations directory and the output file for validation
-		originalDir := filepath.Dir(args[0])
-		outputFile := filepath.Join(outputDir, "001_consolidated_migration.sql")
-
-		ctx := context.Background()
-		result, err := validator.ValidateWithDocker(ctx, originalDir, outputFile)
-		if err != nil {
-			color.Red("☒ Validation failed: %v\n", err)
-		} else if result != nil && len(result.Errors) == 0 {
-			color.Green("☑ Schema validation passed!\n")
-		} else {
-			color.Yellow("⚠️  Schema differences detected - see validation report\n")
-		}
-	}
+	promoted = true
+	color.Green("☑ Squashed migrations written to: %s\n", outputFile)
 
 	// Print summary
 	sqlLines := strings.Count(finalSQL, "\n")
-	outputFile := filepath.Join(outputDir, "001_consolidated_migration.sql")
 	printSquashSummary(len(migrations), sqlLines, time.Since(startTime), warnings, outputFile)
 	return nil
+}
+
+// runWorkflowValidation runs Docker validation for the safe/fast workflows,
+// honoring the config validation section (extension detection, SQL fixes,
+// container timeout) instead of hardcoded defaults. Only the Docker approach
+// is fixed by the workflow definition.
+func runWorkflowValidation(cfg *config.Config, args []string, squashedPath, authCompatibilitySQL, validationApproach string) (*validation.ValidationResult, error) {
+	validationConfig := validation.DefaultValidationConfig()
+	validationConfig.EnableExtensionDetection = cfg.Validation.EnableExtensionDetection
+	validationConfig.AutoInstallExtensions = cfg.Validation.AutoInstallExtensions
+	validationConfig.EnableSQLFixes = cfg.Validation.EnableSQLFixes // opt-in only: never silently rewrite output
+	validationConfig.EnablePreprocessing = cfg.Validation.EnablePreprocessing
+	validationConfig.Verbose = true // Show auth layer creation
+
+	if cfg.Validation.DockerImage != "" {
+		parts := strings.Split(cfg.Validation.DockerImage, ":")
+		if len(parts) == 2 {
+			validationConfig.PostgreSQLVersion = parts[1]
+		}
+	}
+	if cfg.Validation.ContainerReadyTimeout > 0 {
+		validationConfig.ContainerReadyTimeout = time.Duration(cfg.Validation.ContainerReadyTimeout) * time.Second
+	}
+
+	// Set Docker approach based on workflow
+	switch validationApproach {
+	case "TWO_CONTAINERS":
+		validationConfig.DockerApproach = validation.ApproachTwoContainers
+	case "TWO_DATABASES":
+		validationConfig.DockerApproach = validation.ApproachTwoDatabases
+	case "SCHEMA_DIFF":
+		validationConfig.DockerApproach = validation.ApproachSchemaDiff
+	}
+
+	validationConfig.AuthCompatibilitySQL = authCompatibilitySQL
+
+	validator := validation.NewSchemaValidator(validationConfig, nil, nil)
+	defer func() {
+		if err := validator.Close(); err != nil {
+			utils.GetDefaultLogger().Warn("Failed to close validator: %v", err)
+		}
+	}()
+
+	// Determine the original migrations directory.
+	originalDir := filepath.Dir(args[0])
+	if info, err := os.Stat(args[0]); err == nil && info.IsDir() {
+		originalDir = args[0]
+	}
+
+	return validator.ValidateWithDocker(context.Background(), originalDir, squashedPath)
+}
+
+// evaluateWorkflowValidation decides whether a safe/fast workflow run must
+// fail based on the validation outcome:
+//
+//   - validation execution errors (e.g. Docker unavailable) fail the run
+//   - real schema differences (a valid comparison with diffs) fail the run
+//   - an unproven comparison (original migrations failed to apply) is
+//     reported loudly but does not fail the run, since fixing broken
+//     migration histories is the tool's primary use case
+func evaluateWorkflowValidation(result *validation.ValidationResult, valErr error) error {
+	if valErr != nil {
+		color.Red("☒ Validation failed: %v\n", valErr)
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"workflow validation failed",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(valErr).WithSuggestion("Ensure Docker is running - the safe/fast workflows require validation to complete")
+	}
+
+	if result == nil {
+		return errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"workflow validation returned no result",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		)
+	}
+
+	if result.Success {
+		color.Green("☑ Schema validation passed!\n")
+		return nil
+	}
+
+	if result.DockerValidation != nil && result.DockerValidation.OriginalApplyFailed {
+		color.Yellow("⚠️  Original migrations failed to apply - schema equivalence is UNPROVEN\n")
+		if result.DockerValidation.OriginalMigrationsError != "" {
+			color.Yellow("    Error: %s\n", result.DockerValidation.OriginalMigrationsError)
+		}
+		color.Green("✓ Squashed migrations applied successfully\n")
+		return nil
+	}
+
+	color.Red("☒ Schema differences detected between original and squashed migrations\n")
+	if result.DockerValidation != nil && result.DockerValidation.Differences != "" {
+		fmt.Println(result.DockerValidation.Differences)
+	}
+	return errors.NewError(
+		errors.ErrorCodeValidationFailed,
+		"schema differences detected between original and squashed migrations",
+		errors.SeverityError,
+		errors.CategoryValidation,
+	).WithSuggestion("Review the differences above and ensure squashing is correct")
 }
 
 func executeComprehensiveAnalysis(args []string, cfg *config.Config) error {
@@ -2021,7 +2715,16 @@ func executeComprehensiveAnalysis(args []string, cfg *config.Config) error {
 		EnableStreaming:      false,
 		EnableTransformation: false, // Analysis only, no transformation
 	}
-	engine := squasher.NewEngine(engineConfig)
+	engine, err := squasher.NewEngine(engineConfig)
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeConsolidationFailed,
+			"failed to initialize analysis engine",
+			errors.SeverityError,
+			errors.CategoryConsolidation,
+		).WithInnerError(err)
+	}
+	defer engine.Close()
 
 	// Convert migrations to format expected by engine
 	migrationMap := make(map[int]string)
@@ -2117,62 +2820,6 @@ func executeComprehensiveAnalysis(args []string, cfg *config.Config) error {
 	color.Cyan("► Review any warnings before proceeding with consolidation\n")
 
 	return nil
-}
-
-// Helper functions for AI integration
-
-func extractFunctionsFromSQL(sql string) []string {
-	// Simple function extraction - could be enhanced with proper parsing
-	functions := []string{}
-	lines := strings.Split(sql, "\n")
-	var currentFunction strings.Builder
-	inFunction := false
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToUpper(line), "CREATE OR REPLACE FUNCTION") ||
-			strings.HasPrefix(strings.ToUpper(line), "CREATE FUNCTION") {
-			inFunction = true
-			currentFunction.Reset()
-			currentFunction.WriteString(line + "\n")
-		} else if inFunction {
-			currentFunction.WriteString(line + "\n")
-			if strings.HasSuffix(strings.ToUpper(line), "$$;") ||
-				strings.HasSuffix(strings.ToUpper(line), "$BODY$;") {
-				functions = append(functions, currentFunction.String())
-				inFunction = false
-			}
-		}
-	}
-
-	return functions
-}
-
-func extractFunctionName(functionSQL string) string {
-	// Extract function name from CREATE FUNCTION statement
-	lines := strings.Split(functionSQL, "\n")
-	if len(lines) > 0 {
-		firstLine := strings.TrimSpace(lines[0])
-		// Parse "CREATE [OR REPLACE] FUNCTION function_name("
-		parts := strings.Fields(firstLine)
-		for i, part := range parts {
-			if strings.ToUpper(part) == "FUNCTION" && i+1 < len(parts) {
-				funcNamePart := parts[i+1]
-				if idx := strings.Index(funcNamePart, "("); idx > 0 {
-					return funcNamePart[:idx]
-				}
-				return funcNamePart
-			}
-		}
-	}
-	return "unknown_function"
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // MigrationWithContent contains both parsed migration and original file content
@@ -2272,6 +2919,46 @@ func loadMigrations(files []string, showProgress bool) ([]*MigrationWithContent,
 	return migrations, nil
 }
 
+func enforcePartialParsePolicy(migrations []*MigrationWithContent, strict bool) ([]string, error) {
+	parseWarnings := make([]string, 0)
+	filesWithParseErrors := 0
+	totalParseErrors := 0
+
+	for _, migration := range migrations {
+		if migration == nil || migration.Migration == nil || len(migration.ParseErrors) == 0 {
+			continue
+		}
+
+		filesWithParseErrors++
+		totalParseErrors += len(migration.ParseErrors)
+
+		fileName := filepath.Base(migration.FullPath)
+		if fileName == "." || fileName == "" {
+			fileName = migration.Filename
+		}
+
+		parseWarnings = append(parseWarnings, fmt.Sprintf(
+			"Partial parse in %s: %d parse error(s), %d statement(s) recovered",
+			fileName,
+			len(migration.ParseErrors),
+			len(migration.Statements),
+		))
+	}
+
+	if strict && filesWithParseErrors > 0 {
+		return parseWarnings, errors.NewError(
+			errors.ErrorCodeSyntaxError,
+			"Strict parse policy violation: one or more migrations were only partially parsed",
+			errors.SeverityError,
+			errors.CategoryParsing,
+		).WithAdditional("files_with_parse_errors", filesWithParseErrors).
+			WithAdditional("total_parse_errors", totalParseErrors).
+			WithSuggestion("Fix parse errors in migration SQL or rerun without --strict-parse")
+	}
+
+	return parseWarnings, nil
+}
+
 func printAnalysisReport(
 	migrations []*types.Migration,
 	redundancies []tracking.RedundancyReport,
@@ -2353,7 +3040,7 @@ func printSquashSummary(originalFiles, finalLines int, duration time.Duration, w
 		byCategory := wm.GetWarningsByCategory()
 
 		// Show safety and transformation features
-		if backupWarns := byCategory[utils.CategoryBackup]; len(backupWarns) > 0 {
+		if backupWarns := byCategory[errors.CategoryBackup]; len(backupWarns) > 0 {
 			fmt.Print("\n" + color.BlueString("🛡 Safety Features:") + "\n")
 			for _, w := range backupWarns {
 				cleanMsg := strings.Replace(w.Message, "Backup created: ", "Database backup: ", 1)
@@ -2361,14 +3048,14 @@ func printSquashSummary(originalFiles, finalLines int, duration time.Duration, w
 			}
 		}
 
-		if rollbackWarns := byCategory[utils.CategoryRollback]; len(rollbackWarns) > 0 {
+		if rollbackWarns := byCategory[errors.CategoryRollback]; len(rollbackWarns) > 0 {
 			fmt.Print("\n" + color.BlueString("🔄 Rollback Capabilities:") + "\n")
 			for _, w := range rollbackWarns {
 				fmt.Printf("  ☑ %s\n", w.Message)
 			}
 		}
 
-		if transformWarns := byCategory[utils.CategoryTransformation]; len(transformWarns) > 0 {
+		if transformWarns := byCategory[errors.CategoryTransformation]; len(transformWarns) > 0 {
 			fmt.Print("\n" + color.CyanString("⚡ SQL Transformations:") + "\n")
 			for _, w := range transformWarns {
 				cleanMsg := strings.Replace(w.Message, "Transformation: ", "", 1)
@@ -2376,7 +3063,7 @@ func printSquashSummary(originalFiles, finalLines int, duration time.Duration, w
 			}
 		}
 
-		if optWarns := byCategory[utils.CategoryOptimization]; len(optWarns) > 0 {
+		if optWarns := byCategory[errors.CategoryOptimization]; len(optWarns) > 0 {
 			fmt.Print("\n" + color.CyanString("⚡ Optimizations Applied:") + "\n")
 			for _, w := range optWarns {
 				fmt.Printf("  ☑ %s\n", w.Message)
@@ -2384,13 +3071,13 @@ func printSquashSummary(originalFiles, finalLines int, duration time.Duration, w
 		}
 
 		// Show cycle detection results
-		if cycleWarns := byCategory[utils.CategoryCycle]; len(cycleWarns) > 0 {
+		if cycleWarns := byCategory[errors.CategoryCycle]; len(cycleWarns) > 0 {
 			fmt.Print("\n" + color.YellowString("🔍 DDL Cycle Detection:") + "\n")
 			for _, w := range cycleWarns {
 				switch w.Severity {
-				case utils.SeverityCritical:
+				case errors.SeverityCritical:
 					fmt.Printf("  "+color.RedString("⚠ %s")+"\n", w.Message)
-				case utils.SeverityHigh:
+				case errors.SeverityError:
 					fmt.Printf("  "+color.YellowString("⚠ %s")+"\n", w.Message)
 				default:
 					fmt.Printf("  ℹ %s\n", w.Message)
@@ -2424,7 +3111,7 @@ func printSquashSummary(originalFiles, finalLines int, duration time.Duration, w
 			fmt.Print("\n" + color.YellowString("⚠ Warnings:") + "\n")
 
 			// Critical warnings
-			if critical := bySeverity[utils.SeverityCritical]; len(critical) > 0 {
+			if critical := bySeverity[errors.SeverityCritical]; len(critical) > 0 {
 				fmt.Print("\n" + color.RedString("  🔴 Critical (%d):", len(critical)) + "\n")
 				for _, w := range critical {
 					fmt.Printf("    ► %s\n", w.Message)
@@ -2434,10 +3121,10 @@ func printSquashSummary(originalFiles, finalLines int, duration time.Duration, w
 				}
 			}
 
-			// High severity
-			if high := bySeverity[utils.SeverityHigh]; len(high) > 0 {
-				fmt.Print("\n" + color.YellowString("  🟠 High Severity (%d):", len(high)) + "\n")
-				for _, w := range high {
+			// Error severity warnings
+			if errSev := bySeverity[errors.SeverityError]; len(errSev) > 0 {
+				fmt.Print("\n" + color.YellowString("  🟠 Error (%d):", len(errSev)) + "\n")
+				for _, w := range errSev {
 					fmt.Printf("    ► %s\n", w.Message)
 					if w.Suggestion != "" {
 						fmt.Printf("      → %s\n", color.CyanString(w.Suggestion))
@@ -2445,18 +3132,16 @@ func printSquashSummary(originalFiles, finalLines int, duration time.Duration, w
 				}
 			}
 
-			// Medium severity
-			if medium := bySeverity[utils.SeverityMedium]; len(medium) > 0 {
-				fmt.Print("\n" + color.YellowString("  🟡 Medium Severity (%d):", len(medium)) + "\n")
-				for _, w := range medium {
+			if warn := bySeverity[errors.SeverityWarning]; len(warn) > 0 {
+				fmt.Print("\n" + color.YellowString("  🟡 Warning (%d):", len(warn)) + "\n")
+				for _, w := range warn {
 					fmt.Printf("    ► %s\n", w.Message)
 				}
 			}
 
-			// Low/Info
-			if low := bySeverity[utils.SeverityLow]; len(low) > 0 {
-				fmt.Printf("\n  ℹ️  Info (%d):\n", len(low))
-				for _, w := range low {
+			if info := bySeverity[errors.SeverityInfo]; len(info) > 0 {
+				fmt.Printf("\n  ℹ️  Info (%d):\n", len(info))
+				for _, w := range info {
 					fmt.Printf("    ► %s\n", w.Message)
 				}
 			}
@@ -2494,7 +3179,8 @@ func createBackupConfig() *transformation.BackupConfig {
 	config.IncludeDrops = false // Conservative for safety
 	config.VerboseOutput = verbose
 
-	// Note: backupPath is handled by the BackupGenerator itself
+	// Note: the backup directory itself is wired via EngineConfig.BackupPath
+	// (--backup-path); the engine creates it or fails at construction time.
 
 	return config
 }
@@ -2515,4 +3201,25 @@ func createTransformationConfig() *transformation.TransformationConfig {
 	config.EnablePerformance = true    // Apply performance optimizations
 
 	return config
+}
+
+func readDirToSQL(dir string) (string, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	if err != nil {
+		return "", err
+	}
+
+	// Sort files to ensure deterministic order (important for concatenation)
+	sort.Strings(files)
+
+	var sb strings.Builder
+	for _, file := range files {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		sb.Write(content)
+		sb.WriteString("\n")
+	}
+	return sb.String(), nil
 }

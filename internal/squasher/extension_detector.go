@@ -2,13 +2,12 @@ package squasher
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins/auth"
+	"github.com/capysquash/pgsquash-engine/internal/plugins/auth"
 )
 
 // ExtensionDetector analyzes migrations to detect required PostgreSQL extensions
@@ -63,13 +62,13 @@ func NewExtensionDetector() *ExtensionDetector {
 // initializeExtensions populates the known extensions map
 func (ed *ExtensionDetector) initializeExtensions() {
 	// Extension definitions with Debian-based Docker images
-	// Migrated from Alpine to standard postgres (Debian) images
+	// Migrated from ubuntu to standard postgres (Debian) images
 	// PostGIS uses the official PostGIS image which is Debian-based
 	extensions := []ExtensionInfo{
 		{
 			Name:            "postgis",
-			PackageName:     "postgresql-15-postgis-3",
-			DockerImage:     "postgis/postgis:15-3.3", // Debian-based PostGIS image
+			PackageName:     "postgresql-17-postgis-3",
+			DockerImage:     "postgis/postgis:17-3.5", // Debian-based PostGIS image
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT PostGIS_version();",
 			RequiresCASCADE: true,
@@ -77,7 +76,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "earthdistance",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15", // Standard Debian-based postgres
+			DockerImage:     "postgres:17", // Standard Debian-based postgres
 			Dependencies:    []string{"cube"},
 			ValidationSQL:   "SELECT earth_distance(ll_to_earth(0,0), ll_to_earth(0,1));",
 			RequiresCASCADE: true,
@@ -85,7 +84,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "cube",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT cube(array[1,2,3]);",
 			RequiresCASCADE: false,
@@ -93,7 +92,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "uuid-ossp",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT uuid_generate_v4();",
 			RequiresCASCADE: false,
@@ -101,7 +100,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "pg_trgm",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT similarity('hello', 'hallo');",
 			RequiresCASCADE: false,
@@ -109,7 +108,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "pg_stat_statements",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			InstallCommand:  "shared_preload_libraries = 'pg_stat_statements'",
 			ValidationSQL:   "SELECT query FROM pg_stat_statements LIMIT 1;",
@@ -118,7 +117,7 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "btree_gin",
 			PackageName:     "postgresql-contrib",
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT 1;", // Simple validation
 			RequiresCASCADE: false,
@@ -126,9 +125,17 @@ func (ed *ExtensionDetector) initializeExtensions() {
 		{
 			Name:            "plpgsql",
 			PackageName:     "", // Built-in extension
-			DockerImage:     "postgres:15",
+			DockerImage:     "postgres:17",
 			Dependencies:    []string{},
 			ValidationSQL:   "SELECT 1;",
+			RequiresCASCADE: false,
+		},
+		{
+			Name:            "pgcrypto",
+			PackageName:     "postgresql-contrib",
+			DockerImage:     "postgres:17",
+			Dependencies:    []string{},
+			ValidationSQL:   "SELECT digest('test', 'sha256');",
 			RequiresCASCADE: false,
 		},
 	}
@@ -234,17 +241,15 @@ func (ed *ExtensionDetector) detectExtensionsInContent(content string) []string 
 	var extensions []string
 	seen := make(map[string]bool)
 
-	// Pattern 1: Explicit CREATE EXTENSION statements with VERSION and WITH SCHEMA
-	// Captures: name, optional version, optional schema
-	createExtRegex := regexp.MustCompile(`(?i)CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"?)([a-zA-Z0-9_-]+)(?:"?)(?:\s+VERSION\s+['"]([^'"]+)['"])?(?:\s+WITH\s+SCHEMA\s+([a-zA-Z0-9_]+))?`)
-	matches := createExtRegex.FindAllStringSubmatch(content, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			extName := strings.TrimSpace(match[1])
-			if !seen[extName] {
-				extensions = append(extensions, extName)
-				seen[extName] = true
-			}
+	// Pattern 1: Explicit CREATE EXTENSION statements with VERSION and WITH SCHEMA.
+	for _, ref := range parseCreateExtensionStatements(content) {
+		extName := strings.TrimSpace(ref.Name)
+		if extName == "" {
+			continue
+		}
+		if !seen[extName] {
+			extensions = append(extensions, extName)
+			seen[extName] = true
 		}
 	}
 
@@ -310,40 +315,251 @@ func (ed *ExtensionDetector) detectExtensionsInContent(content string) []string 
 func (ed *ExtensionDetector) DetectExtensionRefs(content string) []ExtensionRef {
 	var refs []ExtensionRef
 
-	// Enhanced regex to capture VERSION and WITH SCHEMA clauses
-	createExtRegex := regexp.MustCompile(`(?mi)CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"?)([a-zA-Z0-9_-]+)(?:"?)(?:\s+VERSION\s+['"]([^'"]+)['"])?(?:\s+WITH\s+SCHEMA\s+([a-zA-Z0-9_]+))?`)
-
-	lines := strings.Split(content, "\n")
-	currentLine := 0
-
-	for _, line := range lines {
-		currentLine++
-		matches := createExtRegex.FindAllStringSubmatch(line, -1)
-		for _, match := range matches {
-			if len(match) > 1 {
-				ref := ExtensionRef{
-					Name:    strings.TrimSpace(match[1]),
-					Version: "",
-					Schema:  "",
-					Line:    currentLine,
-				}
-
-				// Capture version if present
-				if len(match) > 2 && match[2] != "" {
-					ref.Version = strings.TrimSpace(match[2])
-				}
-
-				// Capture schema if present
-				if len(match) > 3 && match[3] != "" {
-					ref.Schema = strings.TrimSpace(match[3])
-				}
-
-				refs = append(refs, ref)
-			}
-		}
+	for _, parsed := range parseCreateExtensionStatements(content) {
+		refs = append(refs, ExtensionRef{
+			Name:    parsed.Name,
+			Version: parsed.Version,
+			Schema:  parsed.Schema,
+			Line:    parsed.Line,
+		})
 	}
 
 	return refs
+}
+
+type parsedCreateExtension struct {
+	Name      string
+	Version   string
+	Schema    string
+	Line      int
+	Statement string
+}
+
+type sqlStatementChunk struct {
+	Text      string
+	StartLine int
+}
+
+func parseCreateExtensionStatements(content string) []parsedCreateExtension {
+	chunks := splitSQLStatements(content)
+	refs := make([]parsedCreateExtension, 0)
+
+	for _, chunk := range chunks {
+		cleaned, lineOffset := stripLeadingCommentLines(chunk.Text)
+		name, version, schema, ok := parseCreateExtensionStatement(cleaned)
+		if !ok {
+			continue
+		}
+
+		refs = append(refs, parsedCreateExtension{
+			Name:      name,
+			Version:   version,
+			Schema:    schema,
+			Line:      chunk.StartLine + lineOffset,
+			Statement: cleaned,
+		})
+	}
+
+	return refs
+}
+
+func stripLeadingCommentLines(statement string) (string, int) {
+	lines := strings.Split(statement, "\n")
+	start := 0
+
+	for start < len(lines) {
+		trimmed := strings.TrimSpace(lines[start])
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			start++
+			continue
+		}
+		break
+	}
+
+	if start >= len(lines) {
+		return "", len(lines)
+	}
+
+	return strings.Join(lines[start:], "\n"), start
+}
+
+func splitSQLStatements(content string) []sqlStatementChunk {
+	statements := make([]sqlStatementChunk, 0)
+	if strings.TrimSpace(content) == "" {
+		return statements
+	}
+
+	var current strings.Builder
+	startLine := 1
+	line := 1
+	inSingleQuote := false
+	inDoubleQuote := false
+
+	for i := 0; i < len(content); i++ {
+		ch := content[i]
+		current.WriteByte(ch)
+
+		if ch == '\n' {
+			line++
+		}
+
+		if inSingleQuote {
+			if ch == '\'' {
+				if i+1 < len(content) && content[i+1] == '\'' {
+					current.WriteByte(content[i+1])
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		}
+
+		if inDoubleQuote {
+			if ch == '"' {
+				if i+1 < len(content) && content[i+1] == '"' {
+					current.WriteByte(content[i+1])
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+		case '"':
+			inDoubleQuote = true
+		case ';':
+			statement := strings.TrimSpace(current.String())
+			if statement != "" {
+				statements = append(statements, sqlStatementChunk{Text: statement, StartLine: startLine})
+			}
+			current.Reset()
+			startLine = line
+		}
+	}
+
+	remaining := strings.TrimSpace(current.String())
+	if remaining != "" {
+		statements = append(statements, sqlStatementChunk{Text: remaining, StartLine: startLine})
+	}
+
+	return statements
+}
+
+func parseCreateExtensionStatement(statement string) (name string, version string, schema string, ok bool) {
+	tokens := tokenizeSQLTokens(statement)
+	if len(tokens) < 3 {
+		return "", "", "", false
+	}
+
+	if !strings.EqualFold(tokens[0], "CREATE") || !strings.EqualFold(tokens[1], "EXTENSION") {
+		return "", "", "", false
+	}
+
+	idx := 2
+	if idx+2 < len(tokens) && strings.EqualFold(tokens[idx], "IF") && strings.EqualFold(tokens[idx+1], "NOT") && strings.EqualFold(tokens[idx+2], "EXISTS") {
+		idx += 3
+	}
+
+	if idx >= len(tokens) {
+		return "", "", "", false
+	}
+
+	name = normalizeSQLToken(tokens[idx])
+	if name == "" {
+		return "", "", "", false
+	}
+	idx++
+
+	for idx < len(tokens) {
+		if strings.EqualFold(tokens[idx], "VERSION") && idx+1 < len(tokens) {
+			version = normalizeSQLToken(tokens[idx+1])
+			idx += 2
+			continue
+		}
+
+		if strings.EqualFold(tokens[idx], "WITH") && idx+2 < len(tokens) && strings.EqualFold(tokens[idx+1], "SCHEMA") {
+			schema = normalizeSQLToken(tokens[idx+2])
+			idx += 3
+			continue
+		}
+
+		idx++
+	}
+
+	return name, version, schema, true
+}
+
+func tokenizeSQLTokens(statement string) []string {
+	tokens := make([]string, 0)
+	var current strings.Builder
+	inSingleQuote := false
+	inDoubleQuote := false
+
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		tokens = append(tokens, current.String())
+		current.Reset()
+	}
+
+	for i := 0; i < len(statement); i++ {
+		ch := statement[i]
+
+		if inSingleQuote {
+			current.WriteByte(ch)
+			if ch == '\'' {
+				if i+1 < len(statement) && statement[i+1] == '\'' {
+					current.WriteByte(statement[i+1])
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			continue
+		}
+
+		if inDoubleQuote {
+			current.WriteByte(ch)
+			if ch == '"' {
+				if i+1 < len(statement) && statement[i+1] == '"' {
+					current.WriteByte(statement[i+1])
+					i++
+					continue
+				}
+				inDoubleQuote = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+			current.WriteByte(ch)
+		case '"':
+			inDoubleQuote = true
+			current.WriteByte(ch)
+		case ' ', '\t', '\n', '\r', '\f', '\v', ',', ';', '(', ')':
+			flush()
+		default:
+			current.WriteByte(ch)
+		}
+	}
+
+	flush()
+	return tokens
+}
+
+func normalizeSQLToken(token string) string {
+	trimmed := strings.TrimSpace(token)
+	trimmed = strings.Trim(trimmed, ",;()")
+	trimmed = strings.Trim(trimmed, `"'`)
+	return strings.TrimSpace(trimmed)
 }
 
 // CanMergeExtensions checks if two extension references can be safely merged
@@ -356,17 +572,17 @@ func CanMergeExtensions(ext1, ext2 ExtensionRef) bool {
 func (ed *ExtensionDetector) selectBestDockerImage(extensionDetails map[string]ExtensionInfo) string {
 	// Priority order for Docker images (Debian-based)
 	imagePriority := map[string]int{
-		"postgis/postgis:15-3.3": 1, // PostGIS (Debian-based, includes most extensions)
-		"postgres:15":            2, // Standard PostgreSQL (Debian-based)
+		"postgis/postgis:17-3.5": 1, // PostGIS (Debian-based, includes most extensions)
+		"postgres:17":            2, // Standard PostgreSQL (Debian-based)
 	}
 
-	bestImage := "postgres:15" // Default (Debian-based)
+	bestImage := "postgres:17" // Default (Debian-based)
 	bestPriority := 999
 
 	// Check if PostGIS is required
 	for _, info := range extensionDetails {
 		if info.RequiresPostGIS || strings.Contains(strings.ToLower(info.Name), "postgis") {
-			return "postgis/postgis:15-3.3" // Debian-based PostGIS image
+			return "postgis/postgis:17-3.5" // Debian-based PostGIS image
 		}
 
 		if priority, exists := imagePriority[info.DockerImage]; exists && priority < bestPriority {
@@ -546,7 +762,12 @@ func (ed *ExtensionDetector) detectAuthService(migrations map[int]string) AuthSe
 		contentLower := strings.ToLower(content)
 
 		// Clerk patterns - most specific first
-		if strings.Contains(content, "auth.jwt()") && strings.Contains(content, "'o'->>'id'") {
+		if strings.Contains(contentLower, "current_clerk_claims(") ||
+			strings.Contains(contentLower, "clerk_user_id(") ||
+			strings.Contains(contentLower, "current_clerk_user_id(") ||
+			strings.Contains(contentLower, "clerk_is_admin(") ||
+			(strings.Contains(content, "auth.jwt()") &&
+				(strings.Contains(content, "'o'->>'id'") || strings.Contains(content, "'org'->>'id'"))) {
 			utils.GetDefaultLogger().WithPrefix("EXT-DETECTOR").Info("Detected Clerk authentication service")
 			return AuthServiceClerk
 		}

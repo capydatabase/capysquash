@@ -1,12 +1,13 @@
 package tracking
 
 import (
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
 	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
+
+	"github.com/capysquash/pgsquash-engine/internal/types"
 )
 
 // Risk assessment rule implementations and helper methods
@@ -168,6 +169,11 @@ func (obj *ObjectLifecycle) GetFinalState() *types.Statement {
 
 	// For tables, prefer returning CREATE over ALTER
 	if obj.Type == types.TypeTable {
+		// First, check if the object was dropped
+		if len(obj.History) > 0 && obj.History[len(obj.History)-1].Operation == types.OpDrop {
+			return nil
+		}
+
 		// Debug: log history for profiles and viewing_requests tables
 		tableName := strings.ToLower(obj.Name)
 		if tableName == "profiles" || tableName == "viewing_requests" {
@@ -203,11 +209,21 @@ func (obj *ObjectLifecycle) GetFinalState() *types.Statement {
 		}
 	}
 
-	// Return the last non-DROP operation
+	// Return the last definition operation
+	// Iterate backwards skipping non-definition operations (Grant, Revoke, Comment)
+	// If we hit a DROP, the object is gone.
 	for i := len(obj.History) - 1; i >= 0; i-- {
-		if obj.History[i].Operation != types.OpDrop {
-			return &obj.History[i].Statement
+		op := obj.History[i].Operation
+		if op == types.OpDrop {
+			return nil
 		}
+
+		// Skip metadata/permission operations that don't define the object body
+		if op == types.OpGrant || op == types.OpRevoke || op == types.OpComment {
+			continue
+		}
+
+		return &obj.History[i].Statement
 	}
 
 	return nil
@@ -471,6 +487,9 @@ func (ut *UnifiedTracker) GetStatistics() TrackerStats {
 	if ut.statementCounter > 0 || ut.streamingMode {
 		stats.TotalStatements = int(ut.statementCounter)
 		stats.DataOperations = int(ut.dataOpCounter)
+		stats.Inserts = int(ut.insertOpCounter)
+		stats.Updates = int(ut.updateOpCounter)
+		stats.Deletes = int(ut.deleteOpCounter)
 		// Update migration count from counter in streaming mode
 		if ut.streamingMode {
 			stats.TotalMigrations = int(ut.migrationCounter)
@@ -482,6 +501,20 @@ func (ut *UnifiedTracker) GetStatistics() TrackerStats {
 			for _, stmt := range migration.Statements {
 				if stmt.IsDataOp {
 					stats.DataOperations++
+					// Categorize data ops
+					switch stmt.Operation {
+					case types.OpCreate:
+						// Insert is technically OpInsert, but let's check types
+						if stmt.Operation == types.OpInsert {
+							stats.Inserts++
+						}
+					case types.OpInsert:
+						stats.Inserts++
+					case types.OpUpdate:
+						stats.Updates++
+					case types.OpDelete:
+						stats.Deletes++
+					}
 				}
 			}
 		}
@@ -506,14 +539,19 @@ func (ut *UnifiedTracker) ValidateConsistency() []string {
 	// Check for objects that are used but never created
 	for objKey, deps := range ut.dependencies {
 		for _, dep := range deps {
-			depKey := makeKey(dep.DependsOn.Name, dep.DependsOn.Type)
+			// BUG FIX: Reconstruct full name from Schema + Name to match tracked object keys
+			depName := dep.DependsOn.Name
+			if dep.DependsOn.Schema != "" {
+				depName = fmt.Sprintf("%s.%s", dep.DependsOn.Schema, dep.DependsOn.Name)
+			}
+			depKey := makeKey(depName, dep.DependsOn.Type)
 
 			// UX FIX: Skip indexes on views/materialized views - these are valid and always created before indexes
 			// Views are in the foundation category, indexes come later, so this dependency is always satisfied
 			if obj, exists := ut.objects[objKey]; exists && obj.Type == types.TypeIndex {
 				// Check if dependency might be a view - try both with TypeView and TypeUnknown
-				viewKey := makeKey(dep.DependsOn.Name, types.TypeView)
-				unknownKey := makeKey(dep.DependsOn.Name, types.TypeUnknown)
+				viewKey := makeKey(depName, types.TypeView)
+				unknownKey := makeKey(depName, types.TypeUnknown)
 				if _, isView := ut.objects[viewKey]; isView {
 					continue // Index on view - dependency is satisfied
 				}
@@ -522,7 +560,50 @@ func (ut *UnifiedTracker) ValidateConsistency() []string {
 				}
 			}
 
-			if _, exists := ut.objects[depKey]; !exists {
+			// For dependencies with unknown type, try common object types before warning
+			// This handles cases like VIEW joining to another VIEW where only the name is known
+			depExists := false
+			if _, exists := ut.objects[depKey]; exists {
+				depExists = true
+			} else {
+				// Fallback: If no schema specified, try looking in public schema
+				if dep.DependsOn.Schema == "" && !strings.Contains(depName, ".") {
+					publicName := fmt.Sprintf("public.%s", depName)
+					publicKey := makeKey(publicName, dep.DependsOn.Type)
+					if _, exists := ut.objects[publicKey]; exists {
+						depExists = true
+					}
+				}
+			}
+
+			if !depExists && dep.DependsOn.Type == types.TypeUnknown {
+				// Try common object types: TABLE, VIEW, MATERIALIZED VIEW, TYPE
+				commonTypes := []types.ObjectType{
+					types.TypeTable,
+					types.TypeView,
+					types.TypeType,
+					types.TypeFunction,
+				}
+				for _, tryType := range commonTypes {
+					tryKey := makeKey(depName, tryType)
+					if _, exists := ut.objects[tryKey]; exists {
+						depExists = true
+						break
+					}
+
+					// Also try public schema for common types if original had no schema
+					if dep.DependsOn.Schema == "" && !strings.Contains(depName, ".") {
+						publicName := fmt.Sprintf("public.%s", depName)
+						tryPublicKey := makeKey(publicName, tryType)
+						if _, exists := ut.objects[tryPublicKey]; exists {
+							depExists = true
+							break
+						}
+					}
+				}
+			}
+
+			if !depExists {
 				// Filter out common false positives
 				depName := strings.ToLower(dep.DependsOn.Name)
 

@@ -4,19 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to release'
-        required: false
-        type: string
 
 permissions:
   contents: write
-  packages: write
 
 env:
-  GO_VERSION: '1.25.3'
+  GO_VERSION: "1.26.5"
 
 jobs:
   goreleaser:
@@ -24,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -38,45 +31,24 @@ jobs:
           go mod download
           go test -v ./...
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Run GoReleaser with goreleaser-cross
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser-cross
-          version: latest
-          args: release --clean
+      # goreleaser-cross ships the osxcross (o64-clang/oa64-clang) and GNU
+      # cross toolchains required for the CGO builds (pg_query_go). The
+      # goreleaser-action `distribution` input only supports
+      # goreleaser/goreleaser-pro, so the cross image is invoked directly.
+      - name: Run GoReleaser (goreleaser-cross)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":/work \
+            -w /work \
+            -e GITHUB_TOKEN \
+            --entrypoint /bin/sh \
+            ghcr.io/goreleaser/goreleaser-cross:v1.26.4 \
+            -c 'git config --global --add safe.directory /work && goreleaser release --clean'
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/*
-
-  trigger-docker-publish:
-    name: Trigger Docker Image Publishing
-    needs: goreleaser
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Trigger docker-publish workflow
-        uses: actions/github-script@v8
-        with:
-          script: |
-            github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'docker-publish.yml',
-              ref: context.ref,
-              inputs: {
-                push_to_registry: 'true',
-                Platforms: 'linux/amd64,linux/arm64'
-              }
-            })

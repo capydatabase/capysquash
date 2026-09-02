@@ -7,20 +7,20 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/patterns"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/performance"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/performance"
+	"github.com/capysquash/pgsquash-engine/internal/plugins"
+	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
@@ -63,13 +63,15 @@ type ValidationConfig struct {
 	QueryTimeout         time.Duration   `json:"query_timeout"`
 	// Docker-based validation options
 	DockerApproach           ValidationApproach `json:"docker_approach,omitempty"`
-	PostgreSQLVersion        string             `json:"postgresql_version,omitempty"` // PostgreSQL version for validation containers (default: 15)
+	PostgreSQLVersion        string             `json:"postgresql_version,omitempty"`  // PostgreSQL version for validation containers (default: 17)
+	CustomDockerImage        string             `json:"custom_docker_image,omitempty"` // Custom Docker image with pre-installed extensions (e.g., "myregistry/postgres-postgis:17")
 	EnableExtensionDetection bool               `json:"enable_extension_detection"`
 	AutoInstallExtensions    bool               `json:"auto_install_extensions"`
 	EnableSQLFixes           bool               `json:"enable_sql_fixes"`
+	EnablePreprocessing      bool               `json:"enable_preprocessing"` // Preprocess SQL to fix common issues (e.g., deduplicate publication statements) (default: true)
 	CustomExtensions         map[string]string  `json:"custom_extensions,omitempty"`
 	Verbose                  bool               `json:"verbose"`
-	ContainerReadyTimeout    time.Duration      `json:"container_ready_timeout,omitempty"`  // Timeout for container readiness (default: 30s)
+	ContainerReadyTimeout    time.Duration      `json:"container_ready_timeout,omitempty"`  // Timeout for container readiness (default: 150s, recommended for complex migrations with many extensions)
 	MaxPortSearchAttempts    int                `json:"max_port_search_attempts,omitempty"` // Max ports to search (default: 1000)
 	AuthCompatibilitySQL     string             `json:"auth_compatibility_sql,omitempty"`   // Auth compatibility SQL to inject before migrations
 }
@@ -77,49 +79,61 @@ type ValidationConfig struct {
 // DefaultValidationConfig returns a default validation configuration
 func DefaultValidationConfig() *ValidationConfig {
 	return &ValidationConfig{
-		Level:                ValidationLevelStandard,
-		ValidateExpressions:  true,
-		ValidateConstraints:  true,
-		ValidateDependencies: true,
-		ValidatePermissions:  false,
-		ValidatePerformance:  false,
-		IgnoreWarnings:       false,
-		StopOnError:          false,
-		MaxConcurrentQueries: 4,
-		QueryTimeout:         30 * time.Second,
+		Level:                    ValidationLevelStandard,
+		ValidateExpressions:      true,
+		ValidateConstraints:      true,
+		ValidateDependencies:     true,
+		ValidatePermissions:      false,
+		ValidatePerformance:      false,
+		IgnoreWarnings:           false,
+		StopOnError:              false,
+		MaxConcurrentQueries:     4,
+		QueryTimeout:             30 * time.Second,
+		ContainerReadyTimeout:    300 * time.Second,
+		EnablePreprocessing:      true, // Enable preprocessing by default (deduplicate publications, etc.)
+		EnableExtensionDetection: true, // Enable extension detection by default
+		AutoInstallExtensions:    true, // Auto-install extensions by default
+		Verbose:                  true, // Show detailed output by default
 	}
 }
 
 // ValidationResult represents the result of schema validation
 type ValidationResult struct {
-	StartTime     time.Time              `json:"start_time"`
-	EndTime       time.Time              `json:"end_time"`
-	Duration      time.Duration          `json:"duration"`
-	Level         ValidationLevel        `json:"level"`
-	Success       bool                   `json:"success"`
-	Errors        []ValidationError      `json:"errors"`
-	Warnings      []ValidationWarning    `json:"warnings"`
-	SchemaChanges []SchemaChange         `json:"schema_changes,omitempty"`
-	Statistics    ValidationStatistics   `json:"statistics"`
-	Details       map[string]interface{} `json:"details,omitempty"`
+	StartTime time.Time           `json:"start_time"`
+	EndTime   time.Time           `json:"end_time"`
+	Duration  time.Duration       `json:"duration"`
+	Level     ValidationLevel     `json:"level"`
+	Success   bool                `json:"success"`
+	Errors    []ValidationError   `json:"errors"`
+	Warnings  []ValidationWarning `json:"warnings"`
+
+	Statistics ValidationStatistics `json:"statistics"`
+	Details    map[string]any       `json:"details,omitempty"`
 	// Docker validation results
 	DockerValidation    *DockerValidationResult `json:"docker_validation,omitempty"`
 	ExtensionsDetected  []string                `json:"extensions_detected,omitempty"`
 	ExtensionsInstalled []string                `json:"extensions_installed,omitempty"`
 	ApproachUsed        ValidationApproach      `json:"approach_used,omitempty"`
 	FixesApplied        []ValidationFix         `json:"fixes_applied,omitempty"`
-	// AI validation results
-	AIValidation *AIValidationResult `json:"ai_validation,omitempty"`
 }
 
-// DockerValidationResult represents the result of Docker-based validation
+// DockerValidationResult represents the result of Docker-based validation.
+//
+// Success is only ever true when a real comparison ran (both migration sets
+// applied cleanly) and the schemas matched. When the original migrations fail
+// to apply, OriginalApplyFailed is set and Success is false: equivalence is
+// unproven, not passed.
 type DockerValidationResult struct {
-	Success     bool          `json:"success"`
-	Duration    time.Duration `json:"duration"`
-	Differences string        `json:"differences,omitempty"`
-	Error       string        `json:"error,omitempty"`
-	OriginalDB  string        `json:"original_db"`
-	SquashedDB  string        `json:"squashed_db"`
+	Success                 bool          `json:"success"`
+	Duration                time.Duration `json:"duration"`
+	Differences             string        `json:"differences,omitempty"`
+	Error                   string        `json:"error,omitempty"`
+	OriginalDB              string        `json:"original_db"`
+	SquashedDB              string        `json:"squashed_db"`
+	OriginalMigrationsError string        `json:"original_migrations_error,omitempty"` // Error applying original migrations (expected for broken migrations)
+	OriginalApplyFailed     bool          `json:"original_apply_failed"`               // True when the original migrations failed to apply (comparison is unproven)
+	ComparisonValid         bool          `json:"comparison_valid"`                    // True if both original and squashed migrations succeeded
+	HasDifferences          bool          `json:"has_differences"`
 }
 
 // ContainerInfo holds Docker container information
@@ -158,24 +172,24 @@ type SchemaDifference struct {
 // ValidationError represents a validation error
 // This now wraps the unified StructuredError
 type ValidationError struct {
-	Code       string                 `json:"code"`
-	Message    string                 `json:"message"`
-	ObjectID   ObjectID               `json:"object_id"`
-	Severity   string                 `json:"severity"`
-	Context    map[string]interface{} `json:"context,omitempty"`
-	Suggestion string                 `json:"suggestion,omitempty"`
-	SQLQuery   string                 `json:"sql_query,omitempty"`
-	Line       int                    `json:"line,omitempty"`
-	File       string                 `json:"file,omitempty"`
+	Code       string         `json:"code"`
+	Message    string         `json:"message"`
+	ObjectID   ObjectID       `json:"object_id"`
+	Severity   string         `json:"severity"`
+	Context    map[string]any `json:"context,omitempty"`
+	Suggestion string         `json:"suggestion,omitempty"`
+	SQLQuery   string         `json:"sql_query,omitempty"`
+	Line       int            `json:"line,omitempty"`
+	File       string         `json:"file,omitempty"`
 }
 
 // ValidationWarning represents a validation warning
 type ValidationWarning struct {
-	Code       string                 `json:"code"`
-	Message    string                 `json:"message"`
-	ObjectID   ObjectID               `json:"object_id"`
-	Context    map[string]interface{} `json:"context,omitempty"`
-	Suggestion string                 `json:"suggestion,omitempty"`
+	Code       string         `json:"code"`
+	Message    string         `json:"message"`
+	ObjectID   ObjectID       `json:"object_id"`
+	Context    map[string]any `json:"context,omitempty"`
+	Suggestion string         `json:"suggestion,omitempty"`
 }
 
 // Note: ValidationError and ValidationWarning remain as-is for now
@@ -198,10 +212,8 @@ type SchemaValidator struct {
 	config       *ValidationConfig
 	db           *sql.DB
 	reporter     performance.ProgressReporter
-	evaluator    *ExpressionValidator
 	dockerClient *client.Client
 	extensionMap map[string]string
-	aiValidator  *AIValidator
 }
 
 // NewSchemaValidator creates a new schema validator
@@ -210,17 +222,12 @@ func NewSchemaValidator(config *ValidationConfig, db *sql.DB, reporter performan
 		config = DefaultValidationConfig()
 	}
 
-	var evaluator *ExpressionValidator
-	if config.ValidateExpressions && db != nil {
-		evaluator = NewExpressionValidator(db)
-	}
-
 	// Initialize Docker client if needed
 	var dockerClient *client.Client
 	if config.DockerApproach != "" {
 		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 		if err != nil {
-			// Silently fail - error will be caught later when ValidateWithDocker is called
+			utils.GetDefaultLogger().Warn("Failed to create Docker client: %v", err)
 			dockerClient = nil
 		} else {
 			dockerClient = cli
@@ -231,17 +238,29 @@ func NewSchemaValidator(config *ValidationConfig, db *sql.DB, reporter performan
 		config:       config,
 		db:           db,
 		reporter:     reporter,
-		evaluator:    evaluator,
 		dockerClient: dockerClient,
 		extensionMap: getDefaultExtensionMap(),
 	}
 
 	// Add custom extensions
-	for ext, pkg := range config.CustomExtensions {
-		validator.extensionMap[ext] = pkg
-	}
+	maps.Copy(validator.extensionMap, config.CustomExtensions)
 
 	return validator
+}
+
+// Ensure SchemaValidator implements Logger interface
+func (sv *SchemaValidator) Infof(format string, args ...any) {
+	if sv.config.Verbose {
+		fmt.Printf(format+"\n", args...)
+	}
+}
+
+func (sv *SchemaValidator) Warnf(format string, args ...any) {
+	color.Yellow(format+"\n", args...)
+}
+
+func (sv *SchemaValidator) Errorf(format string, args ...any) {
+	color.Red(format+"\n", args...)
 }
 
 // ValidateMigrations validates a set of migrations
@@ -252,7 +271,7 @@ func (sv *SchemaValidator) ValidateMigrations(ctx context.Context, migrations []
 		Errors:     make([]ValidationError, 0),
 		Warnings:   make([]ValidationWarning, 0),
 		Statistics: ValidationStatistics{},
-		Details:    make(map[string]interface{}),
+		Details:    make(map[string]any),
 	}
 
 	if sv.reporter != nil {
@@ -357,33 +376,6 @@ func (sv *SchemaValidator) validateStatement(ctx context.Context, stmt *types.St
 	var errors []ValidationError
 	var warnings []ValidationWarning
 
-	objectID := ObjectID{
-		Type:   stmt.ObjectType,
-		Schema: stmt.Schema,
-		Name:   stmt.ObjectName,
-	}
-
-	// Validate expressions if enabled and evaluator available
-	if sv.config.ValidateExpressions && sv.evaluator != nil {
-		if expr := extractExpressionFromStatement(stmt); expr != "" {
-			if err := sv.evaluator.ValidateExpression(expr); err != nil {
-				errors = append(errors, ValidationError{
-					Code:     "INVALID_EXPRESSION",
-					Message:  fmt.Sprintf("Invalid SQL expression: %v", err),
-					ObjectID: objectID,
-					Severity: "ERROR",
-					Context: map[string]interface{}{
-						"expression": expr,
-					},
-					SQLQuery: stmt.SQL,
-					File:     filename,
-					Line:     stmt.Line,
-				})
-			}
-			sv.config.MaxConcurrentQueries++
-		}
-	}
-
 	// Validate constraints
 	if sv.config.ValidateConstraints {
 		constraintWarnings := sv.validateStatementConstraints(stmt, filename)
@@ -449,7 +441,7 @@ func (sv *SchemaValidator) validateDependencies(ctx context.Context, migrations 
 				Code:     "MISSING_DEPENDENCY",
 				Message:  fmt.Sprintf("Object %s is referenced but never created", depKey),
 				Severity: "ERROR",
-				Context: map[string]interface{}{
+				Context: map[string]any{
 					"referencing_files": referencingFiles,
 					"dependency":        depKey,
 				},
@@ -485,8 +477,28 @@ func (sv *SchemaValidator) validateWithDatabase(ctx context.Context, migrations 
 		for _, stmt := range migration.Statements {
 			// Use EXPLAIN to validate syntax without executing
 			if sv.canExplainStatement(&stmt) {
-				explainSQL := fmt.Sprintf("EXPLAIN %s", stmt.SQL)
-				_, err := sv.db.QueryContext(ctx, explainSQL)
+				// Sanitize: Ensure no multiple statements could be injected if parser failed
+				if strings.Contains(stmt.SQL, ";") {
+					// Check if semicolon is not just at the end
+					trimmed := strings.TrimRight(strings.TrimSpace(stmt.SQL), ";")
+					if strings.Contains(trimmed, ";") {
+						errors = append(errors, ValidationError{
+							Code:     "UNSAFE_SQL",
+							Message:  "Statement contains embedded semicolons, effectively multiple statements. skipping EXPLAIN for safety.",
+							Severity: "ERROR",
+							File:     migration.Filename,
+							Line:     stmt.Line,
+						})
+						continue
+					}
+				}
+
+				explainQuery := "EXPLAIN " + stmt.SQL
+
+				// Execute EXPLAIN
+				// Note: variable placeholders don't work for EXPLAIN statement text in lib/pq
+				// but since stmt.SQL comes from our parser, it's safer than raw user input.
+				rows, err := sv.db.QueryContext(ctx, explainQuery)
 				if err != nil {
 					errors = append(errors, ValidationError{
 						Code:    "INVALID_SQL_SYNTAX",
@@ -502,8 +514,16 @@ func (sv *SchemaValidator) validateWithDatabase(ctx context.Context, migrations 
 						Line:       stmt.Line,
 						Suggestion: "Check SQL syntax and fix errors",
 					})
+				} else {
+					if err := rows.Close(); err != nil {
+						// Return unsafe warning as valid validation error
+						errors = append(errors, ValidationError{
+							Code:     "RESOURCE_CLOSE_ERROR",
+							Message:  fmt.Sprintf("Failed to close rows: %v", err),
+							Severity: "WARNING",
+						})
+					}
 				}
-				sv.config.MaxConcurrentQueries++
 			}
 		}
 	}
@@ -553,16 +573,13 @@ func (sv *SchemaValidator) validateNamingConventions(stmt *types.Statement, file
 	// Check for reserved keywords (basic check)
 	reservedWords := []string{"user", "table", "index", "primary", "foreign", "check", "unique"}
 	lowerName := strings.ToLower(stmt.ObjectName)
-	for _, reserved := range reservedWords {
-		if lowerName == reserved {
-			warnings = append(warnings, ValidationWarning{
-				Code:       "RESERVED_KEYWORD",
-				Message:    fmt.Sprintf("Object name '%s' is a PostgreSQL reserved keyword", stmt.ObjectName),
-				ObjectID:   objectID,
-				Suggestion: "Use a different name or quote the identifier",
-			})
-			break
-		}
+	if slices.Contains(reservedWords, lowerName) {
+		warnings = append(warnings, ValidationWarning{
+			Code:       "RESERVED_KEYWORD",
+			Message:    fmt.Sprintf("Object name '%s' is a PostgreSQL reserved keyword", stmt.ObjectName),
+			ObjectID:   objectID,
+			Suggestion: "Use a different name or quote the identifier",
+		})
 	}
 
 	// Object-specific naming conventions
@@ -760,42 +777,6 @@ func (sv *SchemaValidator) analyzeStatementPerformance(stmt *types.Statement, fi
 
 // Helper functions
 
-// extractExpressionFromStatement extracts SQL expressions that can be validated
-func extractExpressionFromStatement(stmt *types.Statement) string {
-	sqlUpper := strings.ToUpper(stmt.SQL)
-
-	// Extract CHECK constraint expressions
-	if strings.Contains(sqlUpper, "CHECK (") {
-		start := strings.Index(sqlUpper, "CHECK (") + 6
-		if start < len(stmt.SQL) {
-			// Simple extraction - would need more sophisticated parsing in real implementation
-			end := strings.Index(stmt.SQL[start:], ")")
-			if end > 0 {
-				return strings.TrimSpace(stmt.SQL[start : start+end])
-			}
-		}
-	}
-
-	// Extract DEFAULT expressions
-	if strings.Contains(sqlUpper, "DEFAULT ") {
-		start := strings.Index(sqlUpper, "DEFAULT ") + 8
-		if start < len(stmt.SQL) {
-			// Extract until next keyword or end
-			remaining := stmt.SQL[start:]
-			keywords := []string{" NOT", " NULL", " CHECK", " REFERENCES", ",", ")"}
-			end := len(remaining)
-			for _, keyword := range keywords {
-				if idx := strings.Index(strings.ToUpper(remaining), keyword); idx >= 0 && idx < end {
-					end = idx
-				}
-			}
-			return strings.TrimSpace(remaining[:end])
-		}
-	}
-
-	return ""
-}
-
 // canExplainStatement checks if a statement can be validated with EXPLAIN
 func (sv *SchemaValidator) canExplainStatement(stmt *types.Statement) bool {
 	// Only certain statement types can be explained
@@ -842,7 +823,7 @@ func (sv *SchemaValidator) ValidateWithDocker(ctx context.Context, originalPath,
 		Errors:       make([]ValidationError, 0),
 		Warnings:     make([]ValidationWarning, 0),
 		Statistics:   ValidationStatistics{},
-		Details:      make(map[string]interface{}),
+		Details:      make(map[string]any),
 		FixesApplied: make([]ValidationFix, 0),
 	}
 
@@ -852,7 +833,7 @@ func (sv *SchemaValidator) ValidateWithDocker(ctx context.Context, originalPath,
 	}
 	result.ApproachUsed = approach
 
-	sv.logInfo("🚀 Starting Docker validation with approach: %s", approach)
+	sv.Infof("🚀 Starting Docker validation with approach: %s", approach)
 
 	// Step 1: Detect required extensions
 	if sv.config.EnableExtensionDetection {
@@ -866,14 +847,17 @@ func (sv *SchemaValidator) ValidateWithDocker(ctx context.Context, originalPath,
 			).WithInnerError(err).WithSuggestion("Check that migration files are readable and contain valid SQL")
 		}
 		result.ExtensionsDetected = extensions
-		sv.logInfo("📦 Detected %d required extensions: %v", len(extensions), extensions)
+		sv.Infof("📦 Detected %d required extensions: %v", len(extensions), extensions)
 	}
 
-	// Step 2: Apply SQL fixes if enabled (only to squashed output, not originals)
+	// Step 2: Apply SQL fixes if enabled (only to squashed output, not originals).
+	// This is opt-in (validation.enable_sql_fixes) because it REWRITES the
+	// user's generated output files in place.
 	if sv.config.EnableSQLFixes {
 		fix := sv.fixSQLIssues(squashedPath)
 		if fix.Success {
 			result.FixesApplied = append(result.FixesApplied, fix)
+			sv.Warnf("⚠️  enable_sql_fixes rewrote squashed output files in place: %s", fix.Description)
 		}
 	}
 
@@ -921,7 +905,7 @@ func (sv *SchemaValidator) validateWithTwoDatabases(ctx context.Context, origina
 	startTime := time.Now()
 	result := &DockerValidationResult{Success: false}
 
-	sv.logInfo("🔧 Using two-database validation approach")
+	sv.Infof("🔧 Using two-database validation approach")
 
 	// Create container with extensions
 	containerInfo, err := sv.createEnhancedContainer(ctx, extensions, "")
@@ -939,34 +923,91 @@ func (sv *SchemaValidator) validateWithTwoDatabases(ctx context.Context, origina
 	result.SquashedDB = squashedDSN
 
 	// Connect and create databases
-	if err := sv.setupDatabases(ctx, containerInfo, originalPath, squashedPath); err != nil {
-		result.Error = err.Error()
-		return result, err
+	originalMigErr, squashedMigErr := sv.setupDatabases(ctx, containerInfo, originalPath, squashedPath)
+
+	if originalMigErr != nil && sv.config.Verbose {
+		color.Yellow("📊 Original migrations failed to apply - schema equivalence cannot be proven\n")
 	}
 
-	// Compare schemas using pg_dump normalization
-	schema1, err := sv.DumpAndNormalizeContainerDatabase(ctx, containerInfo.ID, "validation_original")
+	// If squashed migrations failed, that's a critical error
+	if squashedMigErr != nil {
+		result.Error = squashedMigErr.Error()
+		return result, squashedMigErr
+	}
+
+	// Connect to both databases for diffing
+	origDB, err := sql.Open("postgres", originalDSN)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to dump original schema: %v", err)
-		return result, err
+		return result, fmt.Errorf("failed to connect to original database: %v", err)
 	}
+	defer origDB.Close()
 
-	schema2, err := sv.DumpAndNormalizeContainerDatabase(ctx, containerInfo.ID, "validation_squashed")
+	squashDB, err := sql.Open("postgres", squashedDSN)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to dump squashed schema: %v", err)
+		return result, fmt.Errorf("failed to connect to squashed database: %v", err)
+	}
+	defer squashDB.Close()
+
+	// Use SchemaComparator for semantic diff
+	comparator := NewSchemaComparator(sv)
+	diff, err := comparator.CompareDatabases(ctx, origDB, squashDB)
+	if err != nil {
+		result.Error = fmt.Sprintf("schema comparison failed: %v", err)
 		return result, err
 	}
-
-	// Compare normalized schemas
-	diff := CompareNormalizedSchemas(schema1, schema2)
 
 	result.Duration = time.Since(startTime)
-	result.Success = !diff.HasDifferences
-	if diff.HasDifferences {
-		result.Differences = diff.FormatDiff()
-	}
+	finalizeComparisonOutcome(result, originalMigErr, diff)
+	sv.reportComparisonOutcome(result)
 
 	return result, nil
+}
+
+// finalizeComparisonOutcome applies the single source of truth for validation
+// success semantics:
+//
+//   - Success is true only when a real comparison ran (originals applied
+//     cleanly) and no differences were found.
+//   - When the original migrations fail to apply, the outcome is recorded as
+//     OriginalApplyFailed and Success is false: "passed" must only ever mean a
+//     real comparison ran and matched.
+func finalizeComparisonOutcome(result *DockerValidationResult, originalMigErr error, diff *SchemaDiff) {
+	if diff != nil {
+		result.HasDifferences = diff.HasDifferences
+		if diff.HasDifferences {
+			result.Differences = strings.Join(diff.Differences, "\n")
+		}
+	}
+
+	if originalMigErr != nil {
+		result.OriginalMigrationsError = originalMigErr.Error()
+		result.OriginalApplyFailed = true
+		result.ComparisonValid = false
+		result.Success = false
+		return
+	}
+
+	result.ComparisonValid = true
+	result.Success = diff != nil && !diff.HasDifferences
+}
+
+// reportComparisonOutcome prints a human-readable summary of the finalized outcome.
+func (sv *SchemaValidator) reportComparisonOutcome(result *DockerValidationResult) {
+	if !sv.config.Verbose {
+		return
+	}
+
+	switch {
+	case result.Success:
+		color.Green("✓ Schemas match: original and squashed migrations are equivalent\n")
+	case result.OriginalApplyFailed:
+		color.Yellow("⚠️  Original migrations failed to apply - equivalence is UNPROVEN (not passed)\n")
+		if result.HasDifferences {
+			color.Yellow("ℹ️  Differences below compare against a partially-applied original schema\n")
+		}
+	case result.HasDifferences:
+		color.Red("✗ Schema differences detected between original and squashed migrations\n")
+	}
 }
 
 // validateWithTwoContainers validates using two separate containers
@@ -974,7 +1015,7 @@ func (sv *SchemaValidator) validateWithTwoContainers(ctx context.Context, origin
 	startTime := time.Now()
 	result := &DockerValidationResult{Success: false}
 
-	sv.logInfo("🔧 Using two-container validation approach")
+	sv.Infof("🔧 Using two-container validation approach")
 
 	// Create containers
 	originalContainer, err := sv.createEnhancedContainer(ctx, extensions, "ORIGINAL")
@@ -1009,89 +1050,139 @@ func (sv *SchemaValidator) validateWithTwoContainers(ctx context.Context, origin
 		return result, err
 	}
 
-	// Compare schemas using pg_dump normalization
-	diff, err := sv.compareSchemasWithNormalization(ctx, originalContainer.ID, squashedContainer.ID)
+	// Compare schemas using SchemaComparator
+	// Connect to both databases
+	origDB, err := sql.Open("postgres", originalDSN)
+	if err != nil {
+		return result, fmt.Errorf("failed to connect to original database: %v", err)
+	}
+	defer origDB.Close()
+
+	squashDB, err := sql.Open("postgres", squashedDSN)
+	if err != nil {
+		return result, fmt.Errorf("failed to connect to squashed database: %v", err)
+	}
+	defer squashDB.Close()
+
+	comparator := NewSchemaComparator(sv)
+	diff, err := comparator.CompareDatabases(ctx, origDB, squashDB)
 	if err != nil {
 		result.Error = fmt.Sprintf("schema comparison failed: %v", err)
 		return result, err
 	}
 
 	result.Duration = time.Since(startTime)
-	result.Success = !diff.HasDifferences
-	if diff.HasDifferences {
-		result.Differences = diff.FormatDiff()
+	finalizeComparisonOutcome(result, nil, diff)
+
+	if result.HasDifferences {
+		sv.Infof("Found %d schema differences", len(diff.Differences))
+	} else {
+		sv.Infof("✓ Schemas match perfectly")
 	}
 
 	return result, nil
 }
 
-// validateWithSchemaDiff validates by comparing with schema dump
+// validateWithSchemaDiff validates using a single database with sequential
+// catalog snapshots (the fastest strategy).
+//
+// Unlike TWO_DATABASES (which keeps both schemas live and diffs two running
+// databases), SCHEMA_DIFF applies the squashed migrations first, captures a
+// deterministic catalog signature snapshot, resets the database, applies the
+// original migrations, snapshots again, and compares the two stored snapshots.
+// This needs only one database, fails fast when the squashed output itself is
+// broken, and never runs a second live apply-and-compare cycle.
+//
+// Success semantics are identical to the other approaches: Success is true
+// only when the originals applied cleanly and the snapshots match.
 func (sv *SchemaValidator) validateWithSchemaDiff(ctx context.Context, originalPath, squashedPath string, extensions []string) (*DockerValidationResult, error) {
 	startTime := time.Now()
 	result := &DockerValidationResult{Success: false}
 
-	sv.logInfo("🔧 Using schema-diff validation approach")
+	sv.Infof("🔧 Using schema-diff validation approach (single database, sequential snapshots)")
 
-	// Create container and apply original migrations
 	containerInfo, err := sv.createEnhancedContainer(ctx, extensions, "")
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to create container: %v", err)
+		result.Error = fmt.Sprintf("failed to create enhanced container: %v", err)
 		return result, err
 	}
 	defer sv.stopAndRemoveContainer(ctx, containerInfo.ID)
 
-	// Apply original migrations - allow errors (broken originals are expected)
-	if err := sv.applyMigrationsToContainer(ctx, containerInfo, originalPath); err != nil {
-		if sv.config.Verbose {
-			color.Yellow("⚠️  Original migrations have errors (this is expected): %v\n", err)
-			color.Yellow("    Note: Validating squashed migrations independently\n")
-		}
-		// Clear the container and start fresh
-		sv.stopAndRemoveContainer(ctx, containerInfo.ID)
+	adminDSN := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", containerInfo.Port)
+	diffDSN := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/validation_diff?sslmode=disable", containerInfo.Port)
+	result.OriginalDB = diffDSN
+	result.SquashedDB = diffDSN
 
-		// Create new container for squashed-only validation
-		containerInfo, err = sv.createEnhancedContainer(ctx, extensions, "")
-		if err != nil {
-			result.Error = fmt.Sprintf("failed to create container for squashed validation: %v", err)
-			return result, err
-		}
-		defer sv.stopAndRemoveContainer(ctx, containerInfo.ID)
+	adminDB, err := sql.Open("postgres", adminDSN)
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to connect to admin database: %v", err)
+		return result, err
+	}
+	defer adminDB.Close()
 
-		// Apply squashed migrations - these MUST work
-		if err := sv.applyMigrationsToContainer(ctx, containerInfo, squashedPath); err != nil {
-			result.Error = fmt.Sprintf("squashed migrations failed to apply: %v", err)
-			return result, err
+	recreateDiffDatabase := func() error {
+		// Terminate any lingering connections before dropping.
+		_, _ = adminDB.ExecContext(ctx,
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'validation_diff' AND pid <> pg_backend_pid()")
+		if _, err := adminDB.ExecContext(ctx, "DROP DATABASE IF EXISTS validation_diff"); err != nil {
+			return fmt.Errorf("drop validation database: %w", err)
 		}
-
-		// Success - squashed migrations work even though originals don't
-		result.Duration = time.Since(startTime)
-		result.Success = true
-		result.Differences = "Original migrations failed - validated squashed migrations independently"
-		return result, nil
+		if _, err := adminDB.ExecContext(ctx, "CREATE DATABASE validation_diff"); err != nil {
+			return fmt.Errorf("create validation database: %w", err)
+		}
+		return nil
 	}
 
-	// Original migrations worked - do full comparison
-	// We need to compare DATABASE schemas, not file contents!
-	// Apply squashed migrations to the same container and compare the resulting schemas
-	if err := sv.applyMigrationsToContainer(ctx, containerInfo, squashedPath); err != nil {
-		result.Error = fmt.Sprintf("squashed migrations failed to apply: %v", err)
+	snapshotSignature := func() ([]string, error) {
+		db, err := sql.Open("postgres", diffDSN)
+		if err != nil {
+			return nil, fmt.Errorf("connect for snapshot: %w", err)
+		}
+		defer db.Close()
+		return collectSchemaSignature(ctx, db)
+	}
+
+	// Step 1: apply squashed migrations first (fail fast on broken output).
+	if err := recreateDiffDatabase(); err != nil {
+		result.Error = err.Error()
+		return result, err
+	}
+	if squashedErr := sv.applyMigrationsToDatabase(ctx, diffDSN, squashedPath); squashedErr != nil {
+		result.Error = squashedErr.Error()
+		return result, errors.NewError(
+			errors.ErrorCodeInvalidSQL,
+			"failed to apply squashed migrations",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(squashedErr).WithSuggestion("The squashed migrations contain SQL errors - check the generated SQL")
+	}
+	squashedLines, err := snapshotSignature()
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to snapshot squashed schema: %v", err)
 		return result, err
 	}
 
-	// Now both original and squashed migrations are applied to the SAME container
-	// Since they're in the same database, we need to use a different approach:
-	// Dump the current schema (which has both applied) as the "final" state
-	// This validates that squashed migrations CAN be applied successfully
-	// The fact that they applied without error means they're compatible
+	// Step 2: reset and apply original migrations (failure is recorded, not fatal).
+	if err := recreateDiffDatabase(); err != nil {
+		result.Error = err.Error()
+		return result, err
+	}
+	originalMigErr := sv.applyMigrationsToDatabase(ctx, diffDSN, originalPath)
+	if originalMigErr != nil && sv.config.Verbose {
+		color.Yellow("📊 Original migrations failed to apply - schema equivalence cannot be proven\n")
+	}
+	originalLines, err := snapshotSignature()
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to snapshot original schema: %v", err)
+		return result, err
+	}
 
-	// For SCHEMA_DIFF mode, we care that:
-	// 1. Original migrations applied successfully (checked above)
-	// 2. Squashed migrations applied successfully (just checked)
-	// Both succeeded, so validation passes
+	// Step 3: compare the stored catalog snapshots.
+	diff := compareLineSets(originalLines, squashedLines)
 
 	result.Duration = time.Since(startTime)
-	result.Success = true
-	result.Differences = "" // No differences - both applied successfully
+	finalizeComparisonOutcome(result, originalMigErr, diff)
+	sv.reportComparisonOutcome(result)
 
 	return result, nil
 }
@@ -1115,7 +1206,7 @@ func (sv *SchemaValidator) detectRequiredExtensions(originalPath, squashedPath s
 	// Log detected aliases once (after scanning both paths)
 	if sv.config.Verbose && len(aliasesFound) > 0 {
 		for alias, resolved := range aliasesFound {
-			sv.logInfo("ℹ️  Detected obsolete extension name '%s', using '%s' instead", alias, resolved)
+			sv.Infof("ℹ️  Detected obsolete extension name '%s', using '%s' instead", alias, resolved)
 		}
 	}
 
@@ -1173,31 +1264,23 @@ func resolveExtensionAlias(ext string) (string, bool) {
 
 // extractExtensionsFromSQL extracts extension names from SQL content
 func (sv *SchemaValidator) extractExtensionsFromSQL(sql string, extensions map[string]bool, aliasesFound map[string]string) {
-	// Patterns to match extension usage (using precompiled patterns)
-	extensionPatterns := []*regexp.Regexp{
-		patterns.CreateExtensionValidationPattern,
-		patterns.DropExtensionPattern,
-	}
-
 	upperSQL := strings.ToUpper(sql)
 
-	for _, pattern := range extensionPatterns {
-		matches := pattern.FindAllStringSubmatch(upperSQL, -1)
-		for _, match := range matches {
-			if len(match) > 1 {
-				ext := strings.ToLower(match[1])
-				ext = strings.ReplaceAll(ext, `"`, "")
-				ext = strings.ReplaceAll(ext, `'`, "")
-
-				// Apply extension aliases (e.g., uuid → uuid-ossp)
-				resolvedExt, wasAliased := resolveExtensionAlias(ext)
-				if wasAliased {
-					// Track alias for logging later (prevents duplicates)
-					aliasesFound[ext] = resolvedExt
-				}
-				extensions[resolvedExt] = true
-			}
+	for _, ext := range extractExtensionNamesFromSQL(sql) {
+		ext = strings.ToLower(strings.TrimSpace(ext))
+		ext = strings.ReplaceAll(ext, `"`, "")
+		ext = strings.ReplaceAll(ext, `'`, "")
+		if ext == "" {
+			continue
 		}
+
+		// Apply extension aliases (e.g., uuid → uuid-ossp)
+		resolvedExt, wasAliased := resolveExtensionAlias(ext)
+		if wasAliased {
+			// Track alias for logging later (prevents duplicates)
+			aliasesFound[ext] = resolvedExt
+		}
+		extensions[resolvedExt] = true
 	}
 
 	// Direct extension detection by name
@@ -1279,17 +1362,18 @@ func (sv *SchemaValidator) fixSQLIssues(migrationPath string) ValidationFix {
 
 // applySQLFixes applies common SQL fixes to squashed output
 func (sv *SchemaValidator) applySQLFixes(sql string) string {
-	// Fix 1: Add missing semicolons after ALTER PUBLICATION statements
-	sql = patterns.AlterPublicationPattern.ReplaceAllString(sql, "${1};${2}")
-
-	// Fix 2: Fix transaction blocks with missing semicolons
-	sql = patterns.TransactionPattern.ReplaceAllString(sql, "${1};${2}")
+	// Fix 1: Add missing semicolons after ALTER PUBLICATION ... ADD TABLE statements.
+	sql = addMissingSemicolonsForStatementPrefix(sql, func(lineUpper string) bool {
+		return strings.HasPrefix(lineUpper, "ALTER PUBLICATION") && strings.Contains(lineUpper, " ADD TABLE ")
+	})
 
 	// Fix 3: Remove duplicate extension creations
 	sql = sv.deduplicateExtensions(sql)
 
-	// Fix 4: Fix policy statements
-	sql = patterns.CreatePolicyPattern.ReplaceAllString(sql, "${1};${2}")
+	// Fix 4: Add missing semicolons after CREATE POLICY statements.
+	sql = addMissingSemicolonsForStatementPrefix(sql, func(lineUpper string) bool {
+		return strings.HasPrefix(lineUpper, "CREATE POLICY")
+	})
 
 	// Fix 5: Convert CREATE FUNCTION to CREATE OR REPLACE FUNCTION
 	sql = sv.fixDuplicateFunctions(sql)
@@ -1304,8 +1388,8 @@ func (sv *SchemaValidator) deduplicateExtensions(sql string) string {
 	var result []string
 
 	for _, line := range lines {
-		if match := patterns.ExtensionNamePattern.FindStringSubmatch(line); match != nil {
-			extension := strings.ToLower(match[1])
+		if extension := extractCreateExtensionNameFromLine(line); extension != "" {
+			extension = strings.ToLower(extension)
 			if extensionsSeen[extension] {
 				continue // Skip duplicate
 			}
@@ -1319,23 +1403,143 @@ func (sv *SchemaValidator) deduplicateExtensions(sql string) string {
 
 // fixDuplicateFunctions converts CREATE FUNCTION to CREATE OR REPLACE FUNCTION
 func (sv *SchemaValidator) fixDuplicateFunctions(sql string) string {
-	// Match CREATE FUNCTION but not CREATE OR REPLACE FUNCTION (using precompiled patterns)
 	lines := strings.Split(sql, "\n")
 	var result []string
 
 	for _, line := range lines {
-		// If it's CREATE FUNCTION and not already CREATE OR REPLACE FUNCTION
-		if patterns.FunctionHeaderPattern.MatchString(line) && !patterns.CreateOrReplaceFunctionPattern.MatchString(line) {
-			// Replace CREATE FUNCTION with CREATE OR REPLACE FUNCTION
-			line = patterns.FunctionHeaderPattern.ReplaceAllString(line, "CREATE OR REPLACE FUNCTION ")
+		if fixedLine, changed := normalizeCreateFunctionHeader(line); changed {
+			line = fixedLine
 			if sv.config.Verbose {
-				sv.logInfo("🔧 Converting CREATE FUNCTION to CREATE OR REPLACE FUNCTION")
+				sv.Infof("🔧 Converting CREATE FUNCTION to CREATE OR REPLACE FUNCTION")
 			}
 		}
 		result = append(result, line)
 	}
 
 	return strings.Join(result, "\n")
+}
+
+func extractExtensionNamesFromSQL(sql string) []string {
+	tokens := tokenizeValidationIdentifiers(sql)
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0)
+
+	for i := range tokens {
+		if !strings.EqualFold(tokens[i], "CREATE") && !strings.EqualFold(tokens[i], "DROP") {
+			continue
+		}
+
+		if i+1 >= len(tokens) || !strings.EqualFold(tokens[i+1], "EXTENSION") {
+			continue
+		}
+
+		j := i + 2
+		if j+2 < len(tokens) && strings.EqualFold(tokens[j], "IF") && strings.EqualFold(tokens[j+1], "NOT") && strings.EqualFold(tokens[j+2], "EXISTS") {
+			j += 3
+		} else if j+1 < len(tokens) && strings.EqualFold(tokens[j], "IF") && strings.EqualFold(tokens[j+1], "EXISTS") {
+			j += 2
+		}
+
+		if j < len(tokens) {
+			names = append(names, tokens[j])
+		}
+	}
+
+	return deduplicateValidationStrings(names)
+}
+
+func addMissingSemicolonsForStatementPrefix(sql string, shouldFix func(lineUpper string) bool) string {
+	lines := strings.Split(sql, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") || strings.HasSuffix(trimmed, ";") {
+			continue
+		}
+
+		if shouldFix(strings.ToUpper(trimmed)) {
+			lines[i] = line + ";"
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func extractCreateExtensionNameFromLine(line string) string {
+	tokens := tokenizeValidationIdentifiers(line)
+	if len(tokens) < 3 || !strings.EqualFold(tokens[0], "CREATE") || !strings.EqualFold(tokens[1], "EXTENSION") {
+		return ""
+	}
+
+	idx := 2
+	if idx+2 < len(tokens) && strings.EqualFold(tokens[idx], "IF") && strings.EqualFold(tokens[idx+1], "NOT") && strings.EqualFold(tokens[idx+2], "EXISTS") {
+		idx += 3
+	}
+
+	if idx >= len(tokens) {
+		return ""
+	}
+
+	return tokens[idx]
+}
+
+func normalizeCreateFunctionHeader(line string) (string, bool) {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmedLeft)]
+
+	if strings.HasPrefix(strings.ToUpper(trimmedLeft), "CREATE OR REPLACE FUNCTION") {
+		return line, false
+	}
+
+	if !strings.HasPrefix(strings.ToUpper(trimmedLeft), "CREATE FUNCTION") {
+		return line, false
+	}
+
+	rest := strings.TrimSpace(trimmedLeft[len("CREATE FUNCTION"):])
+	if rest == "" {
+		return indent + "CREATE OR REPLACE FUNCTION", true
+	}
+
+	return indent + "CREATE OR REPLACE FUNCTION " + rest, true
+}
+
+func tokenizeValidationIdentifiers(sql string) []string {
+	raw := strings.FieldsFunc(sql, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.')
+	})
+
+	tokens := make([]string, 0, len(raw))
+	for _, token := range raw {
+		token = strings.TrimSpace(token)
+		token = strings.Trim(token, `"'`)
+		if token == "" {
+			continue
+		}
+		tokens = append(tokens, token)
+	}
+
+	return tokens
+}
+
+func deduplicateValidationStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+
+	for _, value := range values {
+		key := strings.ToLower(strings.TrimSpace(value))
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+
+	return out
 }
 
 // =============================================================================
@@ -1345,20 +1549,9 @@ func (sv *SchemaValidator) fixDuplicateFunctions(sql string) string {
 // createEnhancedContainer creates a PostgreSQL container with extensions
 func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensions []string, containerPurpose string) (*ContainerInfo, error) {
 	if containerPurpose != "" {
-		sv.logInfo("🐳 Creating enhanced container [%s] with extensions: %v", containerPurpose, extensions)
+		sv.Infof("🐳 Creating enhanced container [%s] with extensions: %v", containerPurpose, extensions)
 	} else {
-		sv.logInfo("🐳 Creating enhanced container with extensions: %v", extensions)
-	}
-
-	// Find an available port
-	port, err := sv.findAvailablePort()
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to find available port",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Stop some Docker containers to free up ports, or increase MaxPortSearchAttempts in config")
+		sv.Infof("🐳 Creating enhanced container with extensions: %v", extensions)
 	}
 
 	// Generate session ID for container tracking
@@ -1375,13 +1568,13 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 	// - Production parity: matches AWS RDS, GCP CloudSQL, Azure Database
 	//
 	// MIGRATION HISTORY:
-	// - Previously used Alpine (postgres:15-alpine) with apk package manager
+	// - Previously used ubuntu (postgres:15-ubuntu) with apk package manager
 	// - Migrated to Debian/Ubuntu for:
 	//   * Better extension support (PostGIS available via apt vs compilation)
 	//   * Production environment parity (AWS/GCP/Azure all use Debian)
 	//   * Faster package installation (5s vs 5-10 min compilation)
 	//   * No musl/glibc collation compatibility issues
-	// - See docs/ALPINE_VS_DEBIAN_ANALYSIS.md for detailed rationale
+	// - See docs/ubuntu_VS_DEBIAN_ANALYSIS.md for detailed rationale
 	//
 	// FUTURE ENHANCEMENT (Solution 3): Custom Docker Image Building
 	// - Build custom images on-demand with Dockerfile templates
@@ -1405,17 +1598,25 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 	// ```
 	// =============================================================================
 
-	// Use configurable PostgreSQL version (default to 15)
-	postgresVersion := "15"
+	// Use configurable PostgreSQL version (default to 17)
+	postgresVersion := "17"
 	if sv.config != nil && sv.config.PostgreSQLVersion != "" {
 		postgresVersion = sv.config.PostgreSQLVersion
 	}
 
-	// Use standard Debian-based PostgreSQL image (NOT Alpine)
-	// Rationale: Debian provides pre-compiled extensions (PostGIS, etc.) via apt
-	// See docs/ALPINE_VS_DEBIAN_ANALYSIS.md for detailed comparison
-	postgresImage := fmt.Sprintf("postgres:%s", postgresVersion)
-	sv.logInfo("🐘 Using Debian-based PostgreSQL image: %s (production-grade, fast extensions)", postgresImage)
+	// Determine which Docker image to use
+	var postgresImage string
+	if sv.config.CustomDockerImage != "" {
+		// User specified a custom Docker image with pre-installed extensions
+		postgresImage = sv.config.CustomDockerImage
+		sv.Infof("🐳 Using custom Docker image: %s (pre-installed extensions)", postgresImage)
+	} else {
+		// Use standard Debian-based PostgreSQL image (NOT ubuntu)
+		// Rationale: Debian provides pre-compiled extensions (PostGIS, etc.) via apt
+		// See docs/ubuntu_VS_DEBIAN_ANALYSIS.md for detailed comparison
+		postgresImage = fmt.Sprintf("postgres:%s", postgresVersion)
+		sv.Infof("🐘 Using Debian-based PostgreSQL image: %s (production-grade, fast extensions)", postgresImage)
+	}
 
 	// Check if image exists locally, if not, pull it
 	if err := sv.ensureDockerImageAvailable(ctx, postgresImage); err != nil {
@@ -1448,7 +1649,8 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		},
 	}, &container.HostConfig{
 		PortBindings: nat.PortMap{
-			"5432/tcp": []nat.PortBinding{{HostPort: strconv.Itoa(port)}},
+			// Use "0" to let Docker assign a random available port dynamically
+			"5432/tcp": []nat.PortBinding{{HostPort: "0"}},
 		},
 		// Resource limits for security and stability
 		Resources: container.Resources{
@@ -1479,7 +1681,59 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		).WithInnerError(err).WithSuggestion("Check Docker logs for the container: docker logs " + resp.ID)
 	}
 
-	containerInfo := &ContainerInfo{ID: resp.ID, Port: port}
+	// Inspect container to get the dynamically assigned port
+	containerJSON, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+	if err != nil {
+		sv.stopAndRemoveContainer(ctx, resp.ID)
+		return nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"failed to inspect container for port assignment",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+
+	// Extract the assigned host port from the container inspection
+	assignedPort := 0
+	if bindings, ok := containerJSON.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+		// Parse the assigned port
+		portStr := bindings[0].HostPort
+		assignedPort, err = strconv.Atoi(portStr)
+		if err != nil {
+			sv.stopAndRemoveContainer(ctx, resp.ID)
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("failed to parse assigned port: %s", portStr),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(err)
+		}
+	} else {
+		sv.stopAndRemoveContainer(ctx, resp.ID)
+		return nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			"no port binding found for container",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithSuggestion("Container may have failed to start properly")
+	}
+
+	sv.Infof("📌 Docker assigned port: %d", assignedPort)
+	containerInfo := &ContainerInfo{ID: resp.ID, Port: assignedPort}
+
+	// Re-inspect after a brief delay to get the actual bound port
+	// Docker may not have fully bound the port when we first inspect
+	time.Sleep(500 * time.Millisecond)
+	containerJSON2, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+	if err == nil {
+		if bindings, ok := containerJSON2.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+			portStr := bindings[0].HostPort
+			if actualPort, err := strconv.Atoi(portStr); err == nil && actualPort != assignedPort {
+				sv.Infof("⚠️  Port changed from %d to %d after inspection, updating...", assignedPort, actualPort)
+				containerInfo.Port = actualPort
+			}
+		}
+	}
 
 	// Wait for container to start (before installing packages)
 	// We need the container running to exec package manager commands
@@ -1495,21 +1749,47 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 
 	// Step 1: Install required system packages for extensions (via apk/package manager)
 	// This must happen BEFORE PostgreSQL is fully ready, as some extensions need
-	// shared libraries loaded during PostgreSQL initialization
+	// shared libraries loaded during PostgreSQL initialization.
+	//
+	// Fail closed: a validation database missing required extensions would
+	// produce a schema comparison built on the wrong baseline, so an install
+	// failure fails this validation attempt instead of degrading to a warning.
 	if len(extensions) > 0 {
 		if err := sv.installExtensionsViaPackageManager(ctx, resp.ID, extensions); err != nil {
-			sv.logInfo("⚠️  Warning: Failed to install some system packages: %v", err)
-			// Continue anyway - some extensions might not need system packages
+			sv.stopAndRemoveContainer(ctx, resp.ID)
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("failed to install system packages for required extensions %v", extensions),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(err).WithSuggestion("Use --docker-image with the extensions pre-installed, or disable extension auto-install (validation.auto_install_extensions) if the extensions are not actually required")
 		}
 
 		// Step 1.5: Restart PostgreSQL to load newly installed extension libraries
 		// PostGIS and other extensions with shared libraries need this
-		sv.logInfo("🔄 Restarting PostgreSQL to load extension libraries...")
+		sv.Infof("🔄 Restarting PostgreSQL to load extension libraries...")
 		stopTimeout := 10
 		if err := sv.dockerClient.ContainerRestart(ctx, resp.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
-			sv.logInfo("⚠️  Warning: Failed to restart container: %v", err)
+			sv.Infof("⚠️  Warning: Failed to restart container: %v", err)
 		} else {
-			sv.logInfo("☑ Container restarted successfully")
+			sv.Infof("☑ Container restarted successfully")
+			// Wait a bit after restart for PostgreSQL to begin initialization
+			// Without this, we immediately try to connect before PostgreSQL has started
+			sv.Infof("⏳ Waiting 10 seconds for PostgreSQL to initialize after restart...")
+			time.Sleep(10 * time.Second)
+
+			// Re-inspect port after container restart
+			// Docker may reassign the port binding when the container restarts
+			containerJSON3, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+			if err == nil {
+				if bindings, ok := containerJSON3.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+					portStr := bindings[0].HostPort
+					if actualPort, err := strconv.Atoi(portStr); err == nil && actualPort != containerInfo.Port {
+						sv.Infof("⚠️  Port changed from %d to %d after container restart, updating...", containerInfo.Port, actualPort)
+						containerInfo.Port = actualPort
+					}
+				}
+			}
 		}
 	}
 
@@ -1524,10 +1804,18 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		).WithInnerError(err).WithSuggestion("Increase ContainerReadyTimeout in config or check container logs for PostgreSQL startup errors")
 	}
 
-	// Step 3: Create SQL extensions (CREATE EXTENSION commands)
+	// Step 3: Create SQL extensions (CREATE EXTENSION commands).
+	// Fail closed for the same reason as step 1: comparing schemas on a
+	// database missing required extensions yields a meaningless result.
 	if len(extensions) > 0 {
 		if err := sv.installExtensions(ctx, containerInfo, extensions); err != nil {
-			sv.logInfo("⚠️  Warning: Failed to install some extensions: %v", err)
+			sv.stopAndRemoveContainer(ctx, resp.ID)
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("failed to create required extensions %v in validation database", extensions),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(err).WithSuggestion("Use --docker-image with the extensions pre-installed, or verify the extension names detected from the migrations")
 		}
 	}
 
@@ -1535,50 +1823,8 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 }
 
 // =============================================================================
-// Helper Methods (Stubs - Implementation would continue...)
+// Helper Methods
 // =============================================================================
-
-// Additional helper methods would be implemented here...
-func (sv *SchemaValidator) findAvailablePort() (int, error) {
-	// Get max attempts from config (default: 1000)
-	maxAttempts := 1000
-	if sv.config != nil && sv.config.MaxPortSearchAttempts > 0 {
-		maxAttempts = sv.config.MaxPortSearchAttempts
-	}
-
-	// Search for available port in expanded range
-	basePort := 15432
-	for i := 0; i < maxAttempts; i++ {
-		port := basePort + i
-		if sv.isPortAvailable(port) {
-			return port, nil
-		}
-	}
-	return 0, errors.NewError(
-		errors.ErrorCodeValidationFailed,
-		fmt.Sprintf("no available ports found after checking %d ports starting from %d", maxAttempts, basePort),
-		errors.SeverityError,
-		errors.CategoryValidation,
-	).WithSuggestion("Stop some Docker containers or increase MaxPortSearchAttempts in config")
-}
-
-func (sv *SchemaValidator) isPortAvailable(port int) bool {
-	// Implementation from docker_validator.go
-	ctx := context.Background()
-	containers, err := sv.dockerClient.ContainerList(ctx, container.ListOptions{})
-	if err != nil {
-		return false
-	}
-
-	for _, cont := range containers {
-		for _, portMapping := range cont.Ports {
-			if int(portMapping.PublicPort) == port {
-				return false
-			}
-		}
-	}
-	return true
-}
 
 // ensureDockerImageAvailable checks if a Docker image exists locally
 // If not, it pulls the image with a progress indicator
@@ -1587,13 +1833,13 @@ func (sv *SchemaValidator) ensureDockerImageAvailable(ctx context.Context, image
 	_, err := sv.dockerClient.ImageInspect(ctx, imageName)
 	if err == nil {
 		// Image exists, no need to pull
-		sv.logInfo("☑ Docker image '%s' found locally", imageName)
+		sv.Infof("☑ Docker image '%s' found locally", imageName)
 		return nil
 	}
 
 	// Image not found locally, pull it
-	if err != nil && strings.Contains(err.Error(), "No such image") {
-		sv.logInfo("📦 Docker image '%s' not found locally", imageName)
+	if strings.Contains(err.Error(), "No such image") {
+		sv.Infof("📦 Docker image '%s' not found locally", imageName)
 		if sv.config.Verbose {
 			color.Cyan("   Pulling image... (this may take a few minutes on first run)\n")
 		}
@@ -1613,12 +1859,16 @@ func (sv *SchemaValidator) ensureDockerImageAvailable(ctx context.Context, image
 				errors.CategoryValidation,
 			).WithInnerError(err).WithSuggestion(fmt.Sprintf("Pull the image manually: docker pull %s", imageName))
 		}
-		defer func() { _ = reader.Close() }()
+		defer func() {
+			if err := reader.Close(); err != nil {
+				utils.GetDefaultLogger().Warn("Failed to close reader: %v", err)
+			}
+		}()
 
 		// Show simple progress indicator
 		// Note: Full progress parsing would require jsonmessage decoding
 		// For now, we just show that pulling is happening
-		sv.logInfo("⏳ Downloading image layers...")
+		sv.Infof("⏳ Downloading image layers...")
 
 		// Copy output to show progress (basic approach)
 		// In production, we'd parse JSON progress messages
@@ -1627,7 +1877,7 @@ func (sv *SchemaValidator) ensureDockerImageAvailable(ctx context.Context, image
 		for {
 			n, err := reader.Read(buf)
 			if n > 0 && time.Since(lastUpdate) > 2*time.Second {
-				sv.logInfo("   Still pulling...")
+				sv.Infof("   Still pulling...")
 				lastUpdate = time.Now()
 			}
 			if err != nil {
@@ -1658,7 +1908,7 @@ func (sv *SchemaValidator) stopAndRemoveContainer(ctx context.Context, container
 			// Container already removed, nothing to do
 			return
 		}
-		sv.logInfo("⚠️  Failed to inspect container %s: %v", containerID, err)
+		sv.Infof("⚠️  Failed to inspect container %s: %v", containerID, err)
 		// Continue anyway to try cleanup
 	}
 
@@ -1666,7 +1916,7 @@ func (sv *SchemaValidator) stopAndRemoveContainer(ctx context.Context, container
 	stopTimeout := 10
 	if err := sv.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
 		if !strings.Contains(err.Error(), "No such container") {
-			sv.logInfo("⚠️  Failed to stop container %s: %v", containerID, err)
+			sv.Infof("⚠️  Failed to stop container %s: %v", containerID, err)
 		}
 		// Continue to removal attempt
 	}
@@ -1677,10 +1927,10 @@ func (sv *SchemaValidator) stopAndRemoveContainer(ctx context.Context, container
 		RemoveVolumes: true,
 	}); err != nil {
 		if !strings.Contains(err.Error(), "No such container") {
-			sv.logInfo("⚠️  Failed to remove container %s: %v", containerID, err)
+			sv.Infof("⚠️  Failed to remove container %s: %v", containerID, err)
 		}
 	} else {
-		sv.logInfo("☑ Successfully cleaned up container %s", containerID)
+		sv.Infof("☑ Successfully cleaned up container %s", containerID)
 	}
 }
 
@@ -1720,12 +1970,19 @@ func (sv *SchemaValidator) waitForPostgreSQLReady(ctx context.Context, container
 	if err != nil {
 		return err
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			utils.GetDefaultLogger().Warn("Failed to close database: %v", err)
+		}
+	}()
 
-	// Get timeout from config (default: 60s - longer because package installation may delay startup)
-	timeoutDuration := 60 * time.Second
+	// Get timeout from config (default: 150s - sufficient for heavy extensions like postgis, pgcrypto, cube, earthdistance)
+	timeoutDuration := 150 * time.Second
 	if sv.config != nil && sv.config.ContainerReadyTimeout > 0 {
-		timeoutDuration = sv.config.ContainerReadyTimeout
+		timeoutDuration = sv.config.ContainerReadyTimeout // Already a time.Duration, no conversion needed
+		sv.Infof("📊 Using container_ready_timeout from config: %v", timeoutDuration)
+	} else {
+		sv.Infof("⚠️  Using default container_ready_timeout: %v (config nil=%v, timeout=%v)", timeoutDuration, sv.config == nil, sv.config.ContainerReadyTimeout)
 	}
 
 	timeout := time.After(timeoutDuration)
@@ -1740,21 +1997,15 @@ func (sv *SchemaValidator) waitForPostgreSQLReady(ctx context.Context, container
 				fmt.Sprintf("timeout waiting for PostgreSQL after %v", timeoutDuration),
 				errors.SeverityError,
 				errors.CategoryValidation,
-			).WithSuggestion("PostgreSQL may have failed to start - check container logs: docker logs " + containerInfo.ID)
+			).WithSuggestion(fmt.Sprintf("Increase container_ready_timeout in config (current: %ds, suggested: %ds+) or check container logs: docker logs %s",
+				int(timeoutDuration.Seconds()), int(timeoutDuration.Seconds())+30, containerInfo.ID))
 		case <-ticker.C:
 			if err := db.PingContext(ctx); err == nil {
-				sv.logInfo("☑ PostgreSQL ready and accepting connections")
+				sv.Infof("☑ PostgreSQL ready and accepting connections")
 				return nil
 			}
 		}
 	}
-}
-
-// Backward compatibility alias
-//
-//nolint:unused // Backward compatibility alias, kept for potential future use
-func (sv *SchemaValidator) waitForContainer(ctx context.Context, containerInfo *ContainerInfo) error {
-	return sv.waitForPostgreSQLReady(ctx, containerInfo)
 }
 
 func (sv *SchemaValidator) installExtensions(ctx context.Context, containerInfo *ContainerInfo, extensions []string) error {
@@ -1763,7 +2014,11 @@ func (sv *SchemaValidator) installExtensions(ctx context.Context, containerInfo 
 	if err != nil {
 		return err
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			utils.GetDefaultLogger().Warn("Failed to close database: %v", err)
+		}
+	}()
 
 	var failedExtensions []string
 
@@ -1776,13 +2031,13 @@ func (sv *SchemaValidator) installExtensions(ctx context.Context, containerInfo 
 				"SELECT EXISTS(SELECT 1 FROM pg_available_extensions WHERE name = $1)", ext).Scan(&available)
 
 			if checkErr == nil && !available {
-				sv.logInfo("⚠️  Extension %s not available in PostgreSQL - may need custom Docker image", ext)
+				sv.Infof("⚠️  Extension %s not available in PostgreSQL - may need custom Docker image", ext)
 			} else {
-				sv.logInfo("⚠️  Failed to install extension %s: %v", ext, err)
+				sv.Infof("⚠️  Failed to install extension %s: %v", ext, err)
 			}
 			failedExtensions = append(failedExtensions, ext)
 		} else {
-			sv.logInfo("☑ Installed extension: %s", ext)
+			sv.Infof("☑ Installed extension: %s", ext)
 		}
 	}
 
@@ -1819,23 +2074,23 @@ func (sv *SchemaValidator) installExtensions(ctx context.Context, containerInfo 
 //
 // The image builder would render Dockerfile templates like:
 //
-//	FROM postgres:15
+//	FROM postgres:17
 //	RUN apt-get update && apt-get install -y --no-install-recommends \
-//	    postgresql-15-postgis-3 \
+//	    postgresql-17-postgis-3 \
 //	    postgresql-contrib \
 //	    ...other packages && \
 //	    apt-get clean && rm -rf /var/lib/apt/lists/*
 //
 // And cache with content-based tags like:
 //
-//	pgsquash-postgres:15-debian-sha256-abc123
+//	pgsquash-postgres:17-debian-sha256-abc123
 //
 // This keeps the flexibility of runtime installation while gaining
 // speed benefits of pre-built images for common extension combinations.
 // =============================================================================
 func (sv *SchemaValidator) installExtensionsViaPackageManager(ctx context.Context, containerID string, extensions []string) error {
 	// Get PostgreSQL version from config for version-specific packages
-	postgresVersion := "15"
+	postgresVersion := "17"
 	if sv.config != nil && sv.config.PostgreSQLVersion != "" {
 		postgresVersion = sv.config.PostgreSQLVersion
 	}
@@ -1868,13 +2123,13 @@ func (sv *SchemaValidator) installExtensionsViaPackageManager(ctx context.Contex
 			packagesToInstall[pkg] = true
 		} else if ext != "plpgsql" && ext != "uuid" && !exists {
 			// Unknown extension - try version-specific package
-			sv.logInfo("⚙️  Unknown extension '%s', trying postgresql-%s-%s", ext, postgresVersion, ext)
+			sv.Infof("⚙️  Unknown extension '%s', trying postgresql-%s-%s", ext, postgresVersion, ext)
 			packagesToInstall[fmt.Sprintf("postgresql-%s-%s", postgresVersion, ext)] = true
 		}
 	}
 
 	if len(packagesToInstall) == 0 {
-		sv.logInfo("☑ No system packages needed for requested extensions")
+		sv.Infof("☑ No system packages needed for requested extensions")
 		return nil
 	}
 
@@ -1884,16 +2139,18 @@ func (sv *SchemaValidator) installExtensionsViaPackageManager(ctx context.Contex
 		packages = append(packages, pkg)
 	}
 
-	sv.logInfo("📦 Installing Debian packages via apt-get: %v", packages)
+	sv.Infof("📦 Installing Debian packages via apt-get: %v", packages)
 
 	// Set DEBIAN_FRONTEND=noninteractive to avoid interactive prompts
 	setEnvCmd := []string{"sh", "-c", "export DEBIAN_FRONTEND=noninteractive"}
-	_ = sv.execInContainer(ctx, containerID, setEnvCmd) // Ignore error - best effort
+	if err := sv.execInContainer(ctx, containerID, setEnvCmd); err != nil {
+		utils.GetDefaultLogger().Warn("Failed to set env in container (best effort): %v", err)
+	}
 
 	// Update apt repositories
 	updateCmd := []string{"apt-get", "update"}
 	if err := sv.execInContainer(ctx, containerID, updateCmd); err != nil {
-		sv.logInfo("⚠️  Failed to update apt repositories: %v", err)
+		sv.Infof("⚠️  Failed to update apt repositories: %v", err)
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
 			"apt-get update failed",
@@ -1917,9 +2174,11 @@ func (sv *SchemaValidator) installExtensionsViaPackageManager(ctx context.Contex
 
 	// Clean up apt cache to save space
 	cleanCmd := []string{"apt-get", "clean"}
-	_ = sv.execInContainer(ctx, containerID, cleanCmd) // Ignore error - best effort
+	if err := sv.execInContainer(ctx, containerID, cleanCmd); err != nil {
+		utils.GetDefaultLogger().Warn("Failed to cleanup container (best effort): %v", err)
+	}
 
-	sv.logInfo("☑ Successfully installed Debian packages")
+	sv.Infof("☑ Successfully installed Debian packages")
 	return nil
 }
 
@@ -1996,21 +2255,25 @@ func (sv *SchemaValidator) execInContainer(ctx context.Context, containerID stri
 	}
 }
 
-func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *ContainerInfo, originalPath, squashedPath string) error {
+func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *ContainerInfo, originalPath, squashedPath string) (originalErr error, squashedErr error) {
 	// Create databases and apply migrations
 	dsn := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", containerInfo.Port)
 	adminDB, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() { _ = adminDB.Close() }()
+	defer func() {
+		if err := adminDB.Close(); err != nil {
+			utils.GetDefaultLogger().Warn("Failed to close admin database: %v", err)
+		}
+	}()
 
 	// Create databases
 	if _, err := adminDB.ExecContext(ctx, "CREATE DATABASE validation_original"); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := adminDB.ExecContext(ctx, "CREATE DATABASE validation_squashed"); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Apply migrations to each database
@@ -2018,39 +2281,45 @@ func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *Co
 	squashedDSN := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/validation_squashed?sslmode=disable", containerInfo.Port)
 
 	// Apply original migrations - allow errors (broken originals are expected)
-	if err := sv.applyMigrationsToDatabase(originalDSN, originalPath); err != nil {
+	originalErr = sv.applyMigrationsToDatabase(ctx, originalDSN, originalPath)
+	if originalErr != nil {
 		if sv.config.Verbose {
-			color.Yellow("⚠️  Original migrations have errors (this is expected): %v\n", err)
+			color.Yellow("⚠️  Original migrations have errors (this is expected): %v\n", originalErr)
 			color.Yellow("    Note: pgsquash is designed to fix broken migrations\n")
 		}
-		// Don't return error - we only care if squashed migrations work
+		// Don't fail validation - just track that original failed
 	}
 
 	// Apply squashed migrations - this MUST succeed
-	if err := sv.applyMigrationsToDatabase(squashedDSN, squashedPath); err != nil {
-		return errors.NewError(
+	squashedErr = sv.applyMigrationsToDatabase(ctx, squashedDSN, squashedPath)
+	if squashedErr != nil {
+		return originalErr, errors.NewError(
 			errors.ErrorCodeInvalidSQL,
 			"failed to apply squashed migrations",
 			errors.SeverityError,
 			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("The squashed migrations contain SQL errors - check the generated SQL")
+		).WithInnerError(squashedErr).WithSuggestion("The squashed migrations contain SQL errors - check the generated SQL")
 	}
 
-	return nil
+	return originalErr, nil
 }
 
-func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) error {
+func (sv *SchemaValidator) applyMigrationsToDatabase(ctx context.Context, dsn, migrationPath string) error {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			utils.GetDefaultLogger().Warn("Failed to close database: %v", err)
+		}
+	}()
 
 	// Inject auth compatibility SQL from plugins (Clerk, Supabase, Auth0, etc.)
 	// This creates mock auth functions, roles, and schemas for validation
-	compatibilitySQL := sv.getPluginCompatibilitySQL(context.Background())
+	compatibilitySQL := sv.getPluginCompatibilitySQL(ctx)
 
-	// Fallback to manual config if no plugins active (backward compatibility)
+	// Allow caller-provided compatibility SQL when plugin discovery is unavailable.
 	if compatibilitySQL == "" && sv.config.AuthCompatibilitySQL != "" {
 		compatibilitySQL = sv.config.AuthCompatibilitySQL
 	}
@@ -2059,13 +2328,21 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) 
 		if sv.config.Verbose {
 			color.Cyan("🔐 Creating plugin compatibility layers...\n")
 		}
-		if _, err := db.Exec(compatibilitySQL); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeInvalidSQL,
-				"failed to create compatibility layer",
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithInnerError(err).WithSuggestion("Plugin compatibility SQL may have errors - check plugin configuration")
+		// Split and execute compatibility SQL statements
+		statements := splitSQLStatements(compatibilitySQL)
+		for i, stmt := range statements {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				return errors.NewError(
+					errors.ErrorCodeInvalidSQL,
+					fmt.Sprintf("failed to create compatibility layer (statement %d)", i+1),
+					errors.SeverityError,
+					errors.CategoryValidation,
+				).WithInnerError(err).WithSuggestion(fmt.Sprintf("Plugin compatibility SQL may have errors - check plugin configuration.\nFailed statement:\n%s", stmt))
+			}
 		}
 		if sv.config.Verbose {
 			color.Green("☑ Compatibility layers created successfully\n")
@@ -2095,17 +2372,16 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) 
 			).WithInnerError(err).WithSuggestion("Ensure the migration file has read permissions")
 		}
 
-		// Execute SQL exactly as generated by squasher (no preprocessing)
-		// This ensures validation catches any bugs in the squasher's output
 		sqlContent := string(content)
 
-		if _, err := db.Exec(sqlContent); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeInvalidSQL,
-				fmt.Sprintf("failed to execute migration %s", migrationPath),
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithInnerError(err).WithSuggestion("The migration contains invalid SQL - review the generated migration file")
+		// Preprocess SQL if enabled (e.g., deduplicate publication statements)
+		if sv.config.EnablePreprocessing {
+			sqlContent = preprocessMigrationSQL(sqlContent, true)
+		}
+
+		// Use executeSQLFile which can handle multiple statements
+		if err := sv.executeSQLFile(ctx, db, sqlContent, migrationPath); err != nil {
+			return err
 		}
 
 		return nil
@@ -2122,338 +2398,206 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(dsn, migrationPath string) 
 			return err
 		}
 
-		// Execute SQL exactly as generated by squasher (no preprocessing)
-		// This ensures validation catches any bugs in the squasher's output
 		sqlContent := string(content)
 
-		if _, err := db.Exec(sqlContent); err != nil {
-			return errors.NewError(
-				errors.ErrorCodeInvalidSQL,
-				fmt.Sprintf("failed to execute migration %s", path),
-				errors.SeverityError,
-				errors.CategoryValidation,
-			).WithInnerError(err).WithSuggestion("The migration contains invalid SQL - review the migration file")
+		// Preprocess SQL if enabled (e.g., deduplicate publication statements)
+		if sv.config.EnablePreprocessing {
+			sqlContent = preprocessMigrationSQL(sqlContent, true)
+		}
+
+		// Use executeSQLFile which can handle multiple statements
+		if err := sv.executeSQLFile(ctx, db, sqlContent, path); err != nil {
+			return err
 		}
 
 		return nil
 	})
 }
 
+// executeSQLFile executes a SQL file that may contain multiple statements
+// Splits the SQL into individual statements and executes them one by one
+func (sv *SchemaValidator) executeSQLFile(ctx context.Context, db *sql.DB, sqlContent, filePath string) error {
+	// Split SQL into individual statements
+	statements := splitSQLStatements(sqlContent)
+
+	// Execute each statement
+	for i, stmt := range statements {
+		// Skip empty statements
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+
+		// Execute the statement
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return errors.NewError(
+				errors.ErrorCodeInvalidSQL,
+				fmt.Sprintf("failed to execute statement %d in migration %s", i+1, filePath),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(err).WithSuggestion(fmt.Sprintf("The migration contains invalid SQL at statement %d.\nPostgreSQL error: %v\n\nStatement:\n%s", i+1, err, stmt))
+		}
+	}
+
+	return nil
+}
+
+// splitSQLStatements splits a SQL file into individual statements
+// Handles PostgreSQL-specific syntax including dollar-quoted strings and DO blocks
+func splitSQLStatements(sql string) []string {
+	var statements []string
+	var current strings.Builder
+	var inDollarQuote bool
+	var dollarTag string
+	var inString bool
+	var inLineComment bool
+	var inBlockComment bool
+
+	runes := []rune(sql)
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
+
+		// Handle line comments (-- ...)
+		if !inString && !inDollarQuote && !inBlockComment && i < len(runes)-1 && ch == '-' && runes[i+1] == '-' {
+			inLineComment = true
+			current.WriteRune(ch)
+			continue
+		}
+
+		// End of line comment
+		if inLineComment && ch == '\n' {
+			inLineComment = false
+			current.WriteRune(ch)
+			continue
+		}
+
+		// Handle block comments (/* ... */)
+		if !inString && !inDollarQuote && !inLineComment && i < len(runes)-1 && ch == '/' && runes[i+1] == '*' {
+			inBlockComment = true
+			current.WriteRune(ch)
+			continue
+		}
+
+		// End of block comment
+		if inBlockComment && i < len(runes)-1 && ch == '*' && runes[i+1] == '/' {
+			inBlockComment = false
+			current.WriteRune(ch)
+			i++ // Skip the '/'
+			current.WriteRune(runes[i])
+			continue
+		}
+
+		// Skip processing if in comment
+		if inLineComment || inBlockComment {
+			current.WriteRune(ch)
+			continue
+		}
+
+		// Handle regular strings ('')
+		if !inDollarQuote && ch == '\'' {
+			// Check if it's an escaped quote
+			if i > 0 && runes[i-1] == '\\' {
+				current.WriteRune(ch)
+				continue
+			}
+			inString = !inString
+			current.WriteRune(ch)
+			continue
+		}
+
+		// Handle dollar-quoted strings ($$...$$, $tag$...$tag$)
+		if !inString && ch == '$' {
+			// Try to match dollar quote
+			var tag strings.Builder
+			tag.WriteString(string(ch))
+			j := i + 1
+			for j < len(runes) && (runes[j] == '_' || (runes[j] >= 'a' && runes[j] <= 'z') || (runes[j] >= 'A' && runes[j] <= 'Z') || (runes[j] >= '0' && runes[j] <= '9')) {
+				tag.WriteString(string(runes[j]))
+				j++
+			}
+			if j < len(runes) && runes[j] == '$' {
+				tag.WriteString("$")
+				if inDollarQuote {
+					// Check if this closes the dollar quote
+					if tag.String() == dollarTag {
+						inDollarQuote = false
+						dollarTag = ""
+					}
+				} else {
+					// Start dollar quote
+					inDollarQuote = true
+					dollarTag = tag.String()
+				}
+				current.WriteString(tag.String())
+				i = j
+				continue
+			}
+		}
+
+		// Handle statement terminator (semicolon)
+		if !inString && !inDollarQuote && ch == ';' {
+			current.WriteRune(ch)
+			stmt := strings.TrimSpace(current.String())
+			if stmt != "" {
+				statements = append(statements, stmt)
+			}
+			current.Reset()
+			continue
+		}
+
+		// Regular character
+		current.WriteRune(ch)
+	}
+
+	// Add any remaining content
+	if current.Len() > 0 {
+		stmt := strings.TrimSpace(current.String())
+		if stmt != "" {
+			statements = append(statements, stmt)
+		}
+	}
+
+	return statements
+}
+
 func (sv *SchemaValidator) applyMigrationsToContainer(ctx context.Context, containerInfo *ContainerInfo, migrationPath string) error {
 	dsn := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", containerInfo.Port)
-	return sv.applyMigrationsToDatabase(dsn, migrationPath)
+	return sv.applyMigrationsToDatabase(ctx, dsn, migrationPath)
 }
 
-// compareSchemasWithNormalization compares schemas using pg_dump normalization pipeline
-// This is the production-grade comparison method that handles subtle differences
-func (sv *SchemaValidator) compareSchemasWithNormalization(ctx context.Context, container1ID, container2ID string) (*SchemaDiff, error) {
-	// Dump and normalize schema from both containers
-	schema1, err := sv.DumpAndNormalizeContainerSchema(ctx, container1ID)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to dump schema from original container",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err)
-	}
+// getDefaultExtensionMap returns a mapping of extensions to Debian/Ubuntu packages
 
-	schema2, err := sv.DumpAndNormalizeContainerSchema(ctx, container2ID)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to dump schema from squashed container",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err)
+// Close closes the validator and its resources
+func (sv *SchemaValidator) Close() error {
+	if sv.dockerClient != nil {
+		return sv.dockerClient.Close()
 	}
-
-	// Compare normalized schemas
-	diff := CompareNormalizedSchemas(schema1, schema2)
-	return diff, nil
+	return nil
 }
 
-//nolint:unused // Kept for backward compatibility, use DumpAndNormalizeContainerSchema instead
-func (sv *SchemaValidator) dumpContainerSchema(ctx context.Context, containerInfo *ContainerInfo) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", "exec", containerInfo.ID,
-		"pg_dump", "-U", "postgres", "-d", "postgres", "--schema-only")
+// getPluginCompatibilitySQL aggregates compatibility SQL from all active plugins
+// This creates mock auth functions, roles, schemas, etc. for validation
+// Examples:
+//   - Clerk: Creates auth.jwt() with JWT v2 organization structure
+//   - Supabase: Creates auth.uid(), auth.jwt(), Supabase roles
+//   - Auth0: Creates auth.jwt() with Auth0 claim structure
+func (sv *SchemaValidator) getPluginCompatibilitySQL(ctx context.Context) string {
+	registry := plugins.GlobalRegistry()
 
-	output, err := cmd.Output()
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to dump schema",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Ensure pg_dump is available in the container")
+	// Only get compatibility SQL if plugins are initialized
+	if len(registry.ActivePlugins()) == 0 {
+		return "" // No plugins active
 	}
 
-	return string(output), nil
+	// Call InjectCompatibilityLayer on registry (handles all active plugins)
+	return registry.InjectCompatibilityLayer(ctx)
 }
 
-func (sv *SchemaValidator) compareSchemas(db1, db2 *sql.DB) (string, error) {
-	// Note: This method is kept for backward compatibility but is deprecated.
-	// For container-based validation, use compareSchemasWithNormalization instead.
-
-	// Compare tables
-	tables1, err := sv.getTables(db1)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get tables from db1",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	tables2, err := sv.getTables(db2)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get tables from db2",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	if diff := sv.compareStringSlices(tables1, tables2); diff != "" {
-		return fmt.Sprintf("Table differences: %s", diff), nil
-	}
-
-	// Compare indexes
-	indexes1, err := sv.getIndexes(db1)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get indexes from db1",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-	indexes2, err := sv.getIndexes(db2)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get indexes from db2",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	if diff := sv.compareStringSlices(indexes1, indexes2); diff != "" {
-		return fmt.Sprintf("Index differences: %s", diff), nil
-	}
-
-	// Compare functions
-	functions1, err := sv.getFunctions(db1)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get functions from db1",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-	functions2, err := sv.getFunctions(db2)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get functions from db2",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	if diff := sv.compareStringSlices(functions1, functions2); diff != "" {
-		return fmt.Sprintf("Function differences: %s", diff), nil
-	}
-
-	// Compare triggers
-	triggers1, err := sv.getTriggers(db1)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get triggers from db1",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-	triggers2, err := sv.getTriggers(db2)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get triggers from db2",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	if diff := sv.compareStringSlices(triggers1, triggers2); diff != "" {
-		return fmt.Sprintf("Trigger differences: %s", diff), nil
-	}
-
-	// Compare views
-	views1, err := sv.getViews(db1)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get views from db1",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-	views2, err := sv.getViews(db2)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get views from db2",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	if diff := sv.compareStringSlices(views1, views2); diff != "" {
-		return fmt.Sprintf("View differences: %s", diff), nil
-	}
-
-	// Compare sequences
-	sequences1, err := sv.getSequences(db1)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get sequences from db1",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-	sequences2, err := sv.getSequences(db2)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get sequences from db2",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	if diff := sv.compareStringSlices(sequences1, sequences2); diff != "" {
-		return fmt.Sprintf("Sequence differences: %s", diff), nil
-	}
-
-	// Compare types
-	types1, err := sv.getCustomTypes(db1)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get types from db1",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-	types2, err := sv.getCustomTypes(db2)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get types from db2",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	if diff := sv.compareStringSlices(types1, types2); diff != "" {
-		return fmt.Sprintf("Type differences: %s", diff), nil
-	}
-
-	// Compare extensions
-	extensions1, err := sv.getExtensions(db1)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get extensions from db1",
-			errors.SeverityError,
-			errors.CategoryExtension,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-	extensions2, err := sv.getExtensions(db2)
-	if err != nil {
-		return "", errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"failed to get extensions from db2",
-			errors.SeverityError,
-			errors.CategoryExtension,
-		).WithInnerError(err).WithSuggestion("Check database connection and permissions")
-	}
-
-	if diff := sv.compareStringSlices(extensions1, extensions2); diff != "" {
-		return fmt.Sprintf("Extension differences: %s", diff), nil
-	}
-
-	return "", nil // No differences
-}
-
-func (sv *SchemaValidator) getTables(db *sql.DB) ([]string, error) {
-	rows, err := db.Query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var tables []string
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			return nil, err
-		}
-		tables = append(tables, table)
-	}
-	return tables, nil
-}
-
-func (sv *SchemaValidator) getIndexes(db *sql.DB) ([]string, error) {
-	rows, err := db.Query("SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' ORDER BY indexname")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var indexes []string
-	for rows.Next() {
-		var indexDef string
-		if err := rows.Scan(&indexDef); err != nil {
-			return nil, err
-		}
-		indexes = append(indexes, indexDef)
-	}
-	return indexes, nil
-}
-
-func (sv *SchemaValidator) compareStringSlices(a, b []string) string {
-	mapA := make(map[string]bool)
-	for _, item := range a {
-		mapA[item] = true
-	}
-
-	mapB := make(map[string]bool)
-	for _, item := range b {
-		mapB[item] = true
-	}
-
-	var diffs []string
-	for item := range mapA {
-		if !mapB[item] {
-			diffs = append(diffs, fmt.Sprintf("- %s", item))
-		}
-	}
-	for item := range mapB {
-		if !mapA[item] {
-			diffs = append(diffs, fmt.Sprintf("+ %s", item))
-		}
-	}
-
-	if len(diffs) == 0 {
-		return ""
-	}
-	return strings.Join(diffs, "; ")
+// ObjectID identifies a database object
+type ObjectID struct {
+	Type   types.ObjectType `json:"type"`
+	Schema string           `json:"schema"`
+	Name   string           `json:"name"`
 }
 
 // getDefaultExtensionMap returns a mapping of extensions to Debian/Ubuntu packages
@@ -2476,195 +2620,8 @@ func getDefaultExtensionMap() map[string]string {
 	}
 }
 
-func (sv *SchemaValidator) getFunctions(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`
-		SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
-		FROM pg_proc p
-		JOIN pg_namespace n ON p.pronamespace = n.oid
-		WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-		ORDER BY n.nspname, p.proname
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var functions []string
-	for rows.Next() {
-		var function string
-		if err := rows.Scan(&function); err != nil {
-			return nil, err
-		}
-		functions = append(functions, function)
-	}
-	return functions, nil
-}
-
-func (sv *SchemaValidator) getTriggers(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`
-		SELECT trigger_name || ' ON ' || event_object_table
-		FROM information_schema.triggers
-		WHERE trigger_schema = 'public'
-		ORDER BY trigger_name
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var triggers []string
-	for rows.Next() {
-		var trigger string
-		if err := rows.Scan(&trigger); err != nil {
-			return nil, err
-		}
-		triggers = append(triggers, trigger)
-	}
-	return triggers, nil
-}
-
-func (sv *SchemaValidator) getViews(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`
-		SELECT table_name
-		FROM information_schema.views
-		WHERE table_schema = 'public'
-		ORDER BY table_name
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var views []string
-	for rows.Next() {
-		var view string
-		if err := rows.Scan(&view); err != nil {
-			return nil, err
-		}
-		views = append(views, view)
-	}
-	return views, nil
-}
-
-func (sv *SchemaValidator) getSequences(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`
-		SELECT sequence_name
-		FROM information_schema.sequences
-		WHERE sequence_schema = 'public'
-		ORDER BY sequence_name
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var sequences []string
-	for rows.Next() {
-		var sequence string
-		if err := rows.Scan(&sequence); err != nil {
-			return nil, err
-		}
-		sequences = append(sequences, sequence)
-	}
-	return sequences, nil
-}
-
-func (sv *SchemaValidator) getCustomTypes(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`
-		SELECT n.nspname || '.' || t.typname
-		FROM pg_type t
-		JOIN pg_namespace n ON t.typnamespace = n.oid
-		WHERE n.nspname = 'public' AND t.typtype IN ('e', 'c', 'd')
-		ORDER BY n.nspname, t.typname
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var types []string
-	for rows.Next() {
-		var typeInfo string
-		if err := rows.Scan(&typeInfo); err != nil {
-			return nil, err
-		}
-		types = append(types, typeInfo)
-	}
-	return types, nil
-}
-
-func (sv *SchemaValidator) getExtensions(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`
-		SELECT extname
-		FROM pg_extension
-		WHERE extname NOT IN ('plpgsql')
-		ORDER BY extname
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var extensions []string
-	for rows.Next() {
-		var ext string
-		if err := rows.Scan(&ext); err != nil {
-			return nil, err
-		}
-		extensions = append(extensions, ext)
-	}
-	return extensions, nil
-}
-
-func (sv *SchemaValidator) logInfo(format string, args ...interface{}) {
-	if sv.config.Verbose {
-		_, _ = color.New(color.FgCyan).Printf("[VALIDATOR] "+format+"\n", args...)
-	}
-}
-
-// Close closes the validator and its resources
-func (sv *SchemaValidator) Close() error {
-	if sv.dockerClient != nil {
-		return sv.dockerClient.Close()
-	}
-	return nil
-}
-
-// SetAIValidator sets the AI validator for enhanced post-processing validation
-func (sv *SchemaValidator) SetAIValidator(aiValidator *AIValidator) {
-	sv.aiValidator = aiValidator
-}
-
-// ValidateWithAI performs AI-powered post-processing validation
-// This should be called after Docker validation completes successfully
-func (sv *SchemaValidator) ValidateWithAI(ctx context.Context, migrations []*types.Migration, squashedSQL string) (*AIValidationResult, error) {
-	if sv.aiValidator == nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"AI validator not configured",
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithSuggestion("Call SetAIValidator first to enable AI-powered validation")
-	}
-
-	sv.logInfo("🤖 Starting AI-powered validation...")
-	return sv.aiValidator.ValidatePostProcessing(ctx, migrations, squashedSQL)
-}
-
-// getPluginCompatibilitySQL aggregates compatibility SQL from all active plugins
-// This creates mock auth functions, roles, schemas, etc. for validation
-// Examples:
-//   - Clerk: Creates auth.jwt() with JWT v2 organization structure
-//   - Supabase: Creates auth.uid(), auth.jwt(), Supabase roles
-//   - Auth0: Creates auth.jwt() with Auth0 claim structure
-func (sv *SchemaValidator) getPluginCompatibilitySQL(ctx context.Context) string {
-	registry := plugins.GlobalRegistry()
-
-	// Only get compatibility SQL if plugins are initialized
-	if len(registry.ActivePlugins()) == 0 {
-		return "" // No plugins active
-	}
-
-	// Call InjectCompatibilityLayer on registry (handles all active plugins)
-	return registry.InjectCompatibilityLayer(ctx)
+// SchemaDiff represents differences between schemas
+type SchemaDiff struct {
+	HasDifferences bool
+	Differences    []string
 }

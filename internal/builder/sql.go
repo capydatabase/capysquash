@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/types"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
@@ -261,9 +261,18 @@ func (b *SQLBuilder) CreateIndex(index *IndexDefinition) *SQLBuilder {
 
 	b.P("ON").S().Quote(index.Schema).P(".").Quote(index.Table)
 
+	// 1. Method is non-BTREE (always explicit)
+	// 2. Method is BTREE AND it was explicit in original SQL
+	// This prevents adding "USING btree" to spatial indexes where it would fail
 	if index.Method != "" && index.Method != "BTREE" {
+		// Non-BTREE methods (GIN, GIST, HASH, etc.) are always explicit
 		b.S().P("USING").S().P(index.Method)
+	} else if index.Method == "BTREE" && index.HadExplicitAccessMethod {
+		// BTREE was explicitly specified, preserve it
+		b.S().P("USING").S().P("btree")
 	}
+	// If Method is BTREE but wasn't explicit, omit USING clause entirely
+	// PostgreSQL will choose the correct default based on column type
 
 	b.Wrap(func(inner *SQLBuilder) {
 		for i, col := range index.Columns {
@@ -315,8 +324,75 @@ func (b *SQLBuilder) CreateFunction(function *FunctionDefinition) *SQLBuilder {
 	// Return type
 	b.NL().P("RETURNS").S().P(function.ReturnType)
 
-	// Language
-	b.NL().P("LANGUAGE").S().P(function.Language)
+	// Prepare body and handle language declaration
+	body := function.Body
+	bodyLanguage := ""
+
+	// ALWAYS remove trailing language clauses using string replacement
+	// This handles all cases regardless of format
+	body = strings.ReplaceAll(body, " language 'plpgsql';", "")
+	body = strings.ReplaceAll(body, " language 'sql';", "")
+	body = strings.ReplaceAll(body, " language plpgsql;", "")
+	body = strings.ReplaceAll(body, " language sql;", "")
+
+	// Find and extract language declaration from body if present
+	// Check for common trailing language patterns and remove them
+	patterns := []string{
+		" language 'plpgsql';",
+		" language 'sql';",
+		" language plpgsql;",
+		" language sql;",
+		" language 'plpgsql'",
+		" language 'sql'",
+		" language plpgsql",
+		" language sql",
+		"\nlanguage 'plpgsql';",
+		"\nlanguage 'sql';",
+		"\nlanguage plpgsql;",
+		"\nlanguage sql;",
+	}
+
+	bodyLower := strings.ToLower(body)
+	for _, pattern := range patterns {
+		if idx := strings.LastIndex(bodyLower, pattern); idx > 0 {
+			// Extract language from pattern
+			if strings.Contains(pattern, "plpgsql") {
+				bodyLanguage = "plpgsql"
+			} else {
+				bodyLanguage = "sql"
+			}
+
+			// Remove the pattern from the body
+			body = body[:idx]
+			break
+		}
+	}
+
+	// Determine language with priority:
+	// 1. Extracted from body (most reliable)
+	// 2. Infer from body content (overrides function.Language if body has plpgsql constructs)
+	// 3. Use function.Language
+	// 4. Default to sql
+	language := bodyLanguage
+
+	if language == "" {
+		// Check body content for plpgsql constructs
+		bodyLowerForInfer := strings.ToLower(body)
+		hasPlpgsqlConstructs := strings.Contains(bodyLowerForInfer, "declare") ||
+			(strings.Contains(bodyLowerForInfer, "begin") && strings.Contains(bodyLowerForInfer, "end")) ||
+			strings.Contains(bodyLowerForInfer, "perform ")
+
+		if hasPlpgsqlConstructs {
+			language = "plpgsql"
+		} else if function.Language != "" {
+			language = function.Language
+		} else {
+			language = "sql"
+		}
+	}
+
+	// Add LANGUAGE clause
+	b.NL().P("LANGUAGE").S().P(language)
 
 	// Properties
 	if function.Volatility != "" && function.Volatility != "VOLATILE" {
@@ -332,7 +408,7 @@ func (b *SQLBuilder) CreateFunction(function *FunctionDefinition) *SQLBuilder {
 	}
 
 	// Body
-	b.NL().P("AS").S().P(function.Body)
+	b.NL().P("AS").S().P(strings.TrimSpace(body))
 
 	return b
 }
@@ -517,15 +593,16 @@ type ConstraintDefinition struct {
 }
 
 type IndexDefinition struct {
-	Schema      string         `json:"schema"`
-	Table       string         `json:"table"`
-	Name        string         `json:"name,omitempty"`
-	IfNotExists bool           `json:"if_not_exists"`
-	Unique      bool           `json:"unique"`
-	Method      string         `json:"method"` // BTREE, HASH, GIN, GIST, etc.
-	Columns     []*IndexColumn `json:"columns"`
-	Where       string         `json:"where,omitempty"`
-	Comment     string         `json:"comment,omitempty"`
+	Schema                  string         `json:"schema"`
+	Table                   string         `json:"table"`
+	Name                    string         `json:"name,omitempty"`
+	IfNotExists             bool           `json:"if_not_exists"`
+	Unique                  bool           `json:"unique"`
+	Method                  string         `json:"method"`                     // BTREE, HASH, GIN, GIST, etc.
+	HadExplicitAccessMethod bool           `json:"had_explicit_access_method"` // BUG-001: Track if USING was explicit
+	Columns                 []*IndexColumn `json:"columns"`
+	Where                   string         `json:"where,omitempty"`
+	Comment                 string         `json:"comment,omitempty"`
 }
 
 type IndexColumn struct {
@@ -603,31 +680,61 @@ func (b *SQLBuilder) FromStatement(stmt types.Statement) *SQLBuilder {
 }
 
 // fromASTStatement converts AST-based statements (CREATE, ALTER) back to SQL
-// using pg_query.Deparse, falling back to original SQL if conversion fails
 func (b *SQLBuilder) fromASTStatement(stmt types.Statement) *SQLBuilder {
-	// Use pg_query.Deparse to convert AST back to SQL
+	// Deparsing (pg_query.Deparse) corrupts functions by changing:
+	// - LANGUAGE placement (before AS vs after body)
+	// - LANGUAGE type (sql vs plpgsql)
+	// - Volatility markers (STABLE, IMMUTABLE, VOLATILE)
+	// - Security markers (SECURITY DEFINER)
+	//
+	// Since consolidation rules now preserve original SQL (rule.go, function_dedup_rule.go),
+	// we must use that SQL directly instead of deparsing the AST.
+	if stmt.SQL != "" {
+		b.Statement(stmt.SQL)
+		return b
+	}
+
+	// Only deparse if we don't have original SQL
 	if stmt.ParseTree != nil {
 		// The ParseTree is stored as interface{}, try to cast to *pg_query.ParseResult
-		switch parseTree := stmt.ParseTree.(type) {
-		case *pg_query.ParseResult:
+		// The ParseTree is stored as concrete type
+		if parseTree := stmt.ParseTree; parseTree != nil {
 			if deparsed, err := pg_query.Deparse(parseTree); err == nil {
+				// pg_query.Deparse() adds "USING btree" even when it wasn't in the original SQL.
+				// This causes errors for spatial types (point, geography, geometry) which need GIST/SP-GIST.
+				if stmt.ObjectType == types.TypeIndex && !stmt.IndexHadExplicitAccessMethod {
+					deparsed = stripImplicitUsingBtreeClause(deparsed)
+				}
 				b.Statement(deparsed)
 				return b
 			}
 		}
 	}
 
-	// Fallback to original SQL if AST conversion fails
-	b.Statement(stmt.SQL)
+	// If both original SQL and AST conversion fail, return empty
 	return b
 }
 
 func (b *SQLBuilder) fromDropStatement(stmt types.Statement) *SQLBuilder {
+	if stmt.ObjectType == types.TypeUnknown || stmt.ObjectType == "" {
+		// Cannot generate valid DROP statement for unknown object types
+		// Generate a comment instead
+		b.P("-- WARNING: Cannot generate DROP statement for object '").P(stmt.ObjectName).P("' with unknown type")
+		b.NL()
+		b.P("-- Consider manual cleanup if this object exists in your database")
+		return b
+	}
+
 	b.P("DROP").S().P(string(stmt.ObjectType))
 	if stmt.IfNotExists {
 		b.P("IF EXISTS")
 	}
 	b.S().Quote(stmt.ObjectName)
+
+	// DROP POLICY requires ON table_name clause
+	if stmt.ObjectType == types.TypePolicy && len(stmt.Dependencies) > 0 {
+		b.S().P("ON").S().Quote(stmt.Dependencies[0])
+	}
 	return b
 }
 
@@ -643,4 +750,84 @@ func (b *SQLBuilder) fromRevokeStatement(stmt types.Statement) *SQLBuilder {
 	b.S().P("ON").S().P(string(stmt.ObjectType)).S().Quote(stmt.ObjectName)
 	b.S().P("FROM").S().P(strings.Join(stmt.Grantees, ", "))
 	return b
+}
+
+func stripImplicitUsingBtreeClause(sql string) string {
+	if strings.TrimSpace(sql) == "" {
+		return sql
+	}
+
+	lower := strings.ToLower(sql)
+	for i := 0; i < len(lower); i++ {
+		if !hasBuilderKeywordAt(lower, i, "using") {
+			continue
+		}
+
+		j := skipBuilderWhitespace(lower, i+len("using"))
+		if !hasBuilderKeywordAt(lower, j, "btree") {
+			continue
+		}
+
+		start := i
+		for start > 0 && isBuilderWhitespaceByte(lower[start-1]) {
+			start--
+		}
+
+		end := j + len("btree")
+		for end < len(lower) && isBuilderWhitespaceByte(lower[end]) {
+			end++
+		}
+
+		prefix := sql[:start]
+		suffix := sql[end:]
+
+		if prefix != "" && suffix != "" && !isBuilderWhitespaceByte(prefix[len(prefix)-1]) && !isBuilderWhitespaceByte(suffix[0]) {
+			return prefix + " " + suffix
+		}
+
+		return prefix + suffix
+	}
+
+	return sql
+}
+
+func hasBuilderKeywordAt(value string, pos int, keyword string) bool {
+	if pos < 0 || pos+len(keyword) > len(value) {
+		return false
+	}
+
+	if value[pos:pos+len(keyword)] != keyword {
+		return false
+	}
+
+	if pos > 0 && isBuilderIdentifierByte(value[pos-1]) {
+		return false
+	}
+
+	end := pos + len(keyword)
+	if end < len(value) && isBuilderIdentifierByte(value[end]) {
+		return false
+	}
+
+	return true
+}
+
+func skipBuilderWhitespace(value string, pos int) int {
+	for pos < len(value) && isBuilderWhitespaceByte(value[pos]) {
+		pos++
+	}
+	return pos
+}
+
+func isBuilderIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
+}
+
+func isBuilderWhitespaceByte(ch byte) bool {
+	switch ch {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	default:
+		return false
+	}
 }

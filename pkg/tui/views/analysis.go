@@ -7,11 +7,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/config"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/parser"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/tracking"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/styles"
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/tui/viewtypes"
+	"github.com/capysquash/pgsquash-engine/internal/config"
+	"github.com/capysquash/pgsquash-engine/internal/parser"
+	"github.com/capysquash/pgsquash-engine/internal/tracking"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/styles"
+	"github.com/capysquash/pgsquash-engine/pkg/tui/viewtypes"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )

@@ -1,0 +1,67 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please fill out the sections below.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Description
+      description: What problem does this feature solve?
+      placeholder: I'm frustrated when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How would you like this to work?
+      placeholder: I think pgsquash should...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other solutions have you considered?
+      placeholder: I also thought about...
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component does this relate to?
+      options:
+        - CLI
+        - Core consolidation engine
+        - Parser
+        - Validation
+        - Plugin system
+        - Configuration
+        - Documentation
+        - Other
+
+  - type: dropdown
+    id: willing-to-contribute
+    attributes:
+      label: Willing to Contribute?
+      options:
+        - "Yes, I can submit a PR"
+        - "Maybe, with guidance"
+        - "No, just suggesting"
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues/discussions to ensure this is not a duplicate
+          required: true
+        - label: This feature aligns with pgsquash-engine's goals (PostgreSQL migration consolidation)
+          required: true

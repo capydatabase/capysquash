@@ -10,9 +10,9 @@ This fixture tests pragma (manual override) functionality in pgsquash.
 
 ## Migration Files
 
-1. **001_create_users.sql**: Table creation with `-- pgsquash:ignore` pragma
-2. **002_create_posts.sql**: Table and index creation with `-- pgsquash:no-merge` pragma
-3. **003_add_data.sql**: Data operations with `-- pgsquash:ignore` pragma
+1. **001_create_users.sql**: Table creation with ` -  pgsquash:ignore` pragma
+2. **002_create_posts.sql**: Table and index creation with ` -  pgsquash:no-merge` pragma
+3. **003_add_data.sql**: Data operations with ` -  pgsquash:ignore` pragma
 
 ## Expected Behavior
 
@@ -31,9 +31,12 @@ This fixture tests pragma (manual override) functionality in pgsquash.
 ## Testing Commands
 
 ```bash
+
 # Test pragma detection
+
 go test -v ./test-fixtures/... -run TestFixture/pragma_examples
 
 # Test with specific safety mode
+
 pgsquash squash test-fixtures/pragma_examples/original/ --output test_output/ --dry-run
 ```

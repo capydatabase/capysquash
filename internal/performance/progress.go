@@ -320,116 +320,12 @@ func (cpr *ConsoleProgressReporter) printProgress(summary ProgressSummary) {
 	}
 }
 
-// ProgressManager manages multiple progress reporters
-type ProgressManager struct {
-	reporters []ProgressReporter
-	mu        sync.RWMutex
-}
-
-// NewProgressManager creates a new progress manager
-func NewProgressManager() *ProgressManager {
-	return &ProgressManager{
-		reporters: make([]ProgressReporter, 0),
-	}
-}
-
-// AddReporter adds a progress reporter
-func (pm *ProgressManager) AddReporter(reporter ProgressReporter) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	pm.reporters = append(pm.reporters, reporter)
-}
-
-// StartPhase starts a phase on all reporters
-func (pm *ProgressManager) StartPhase(phase ProcessingPhase, total int) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	for _, reporter := range pm.reporters {
-		reporter.StartPhase(phase, total)
-	}
-}
-
-// UpdateProgress updates progress on all reporters
-func (pm *ProgressManager) UpdateProgress(current int, message string) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	for _, reporter := range pm.reporters {
-		reporter.UpdateProgress(current, message)
-	}
-}
-
-// FinishPhase finishes a phase on all reporters
-func (pm *ProgressManager) FinishPhase(phase ProcessingPhase, success bool, message string) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	for _, reporter := range pm.reporters {
-		reporter.FinishPhase(phase, success, message)
-	}
-}
-
-// SetOverallProgress sets overall progress on all reporters
-func (pm *ProgressManager) SetOverallProgress(current, total int) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	for _, reporter := range pm.reporters {
-		reporter.SetOverallProgress(current, total)
-	}
-}
-
-// AddWarning adds a warning to all reporters
-func (pm *ProgressManager) AddWarning(message string) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	for _, reporter := range pm.reporters {
-		reporter.AddWarning(message)
-	}
-}
-
-// AddError adds an error to all reporters
-func (pm *ProgressManager) AddError(err error) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	for _, reporter := range pm.reporters {
-		reporter.AddError(err)
-	}
-}
-
-// Complete marks completion on all reporters
-func (pm *ProgressManager) Complete(success bool) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	for _, reporter := range pm.reporters {
-		if dpr, ok := reporter.(*DefaultProgressReporter); ok {
-			dpr.Complete(success)
-		}
-	}
-}
-
-// GetPrimaryReporter returns the first reporter (assuming it's the primary one)
-func (pm *ProgressManager) GetPrimaryReporter() ProgressReporter {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	if len(pm.reporters) > 0 {
-		return pm.reporters[0]
-	}
-	return nil
-}
-
 // ProgressAggregator aggregates progress from multiple sources
 type ProgressAggregator struct {
-	sources       map[string]ProgressReporter
-	weights       map[string]float64
-	totalWeight   float64
-	aggregatedSum ProgressSummary //nolint:unused // Reserved for future progress aggregation
-	mu            sync.RWMutex
+	sources     map[string]ProgressReporter
+	weights     map[string]float64
+	totalWeight float64
+	mu          sync.RWMutex
 }
 
 // NewProgressAggregator creates a new progress aggregator

@@ -1,4 +1,5 @@
 # Test fixture: matviews
+
 # Tests materialized view handling and REFRESH operations
 
 This fixture tests how pgsquash handles materialized views:
@@ -10,10 +11,10 @@ This fixture tests how pgsquash handles materialized views:
 
 ## Original migrations:
 
-001_create_base_tables.sql: Creates source tables
-002_create_matview.sql: Creates materialized view
-003_add_refresh_function.sql: Creates function for refreshing MV
-004_schedule_refresh.sql: Creates trigger for automatic refresh
+001_create_base_tables.sql: Creates source tables.
+002_create_matview\.sql: Creates materialized view.
+003_add_refresh_function.sql: Creates function for refreshing MV.
+004_schedule_refresh.sql: Creates trigger for automatic refresh.
 
 ## Expected behavior:
 

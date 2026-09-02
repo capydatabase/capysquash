@@ -2,10 +2,16 @@
 -- This script sets up the necessary extensions, roles, and configurations
 
 -- Enable required extensions
+-- NOTE: cube must be created before earthdistance (dependency)
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "btree_gin";
 CREATE EXTENSION IF NOT EXISTS "btree_gist";
+CREATE EXTENSION IF NOT EXISTS "cube";           -- Required by earthdistance
+CREATE EXTENSION IF NOT EXISTS "earthdistance";  -- Depends on cube
+CREATE EXTENSION IF NOT EXISTS "postgis";        -- Geospatial extension
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";        -- Trigram matching for text search
+CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";  -- Query statistics
 
 -- Create additional roles for testing
 CREATE ROLE pgsquash_readonly;

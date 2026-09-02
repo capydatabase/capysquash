@@ -2,14 +2,14 @@ package parser
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
-	"regexp"
 	"strings"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/errors"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/plugins"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/types"
-	"github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capysquash/pgsquash-engine/internal/plugins"
+	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capysquash/pgsquash-engine/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
@@ -38,7 +38,9 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 	stmts, err := pg_query.SplitWithScanner(cleanContent, true)
 	if err != nil {
 		parseCtx := errorHandler.CreateContext(filename, 0, nil)
-		_ = errorHandler.HandleParseError(err, parseCtx) // Log the error for tracking
+		if handleErr := errorHandler.HandleParseError(err, parseCtx); handleErr != nil {
+			utils.GetDefaultLogger().Warn("Failed to handle parse error: %v", handleErr)
+		}
 		if !errorHandler.ShouldContinue() {
 			return nil, errors.Wrap(err, errors.ErrorCodeSyntaxError, errors.CategoryParsing, "failed to split statements", nil)
 		}
@@ -52,7 +54,9 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 		if parseErr != nil {
 			parseCtx := errorHandler.CreateContext(filename, 0, nil)
 			parseCtx.StatementText = cleanContent
-			_ = errorHandler.HandleParseError(parseErr, parseCtx)
+			if handleErr := errorHandler.HandleParseError(parseErr, parseCtx); handleErr != nil {
+				utils.GetDefaultLogger().Warn("Failed to handle parse error: %v", handleErr)
+			}
 		}
 	}
 
@@ -63,12 +67,17 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 		ParseErrors: make([]string, 0),
 	}
 
+	searchCursor := 0
 	for i, stmtStr := range stmts {
 		if strings.TrimSpace(stmtStr) == "" {
 			continue
 		}
 
-		stmt, err := parseStatementWithNormalizationAndContext(stmtStr, i, normalizer, errorHandler, filename)
+		stmtLine, stmtColumn, nextCursor := locateStatementPosition(cleanContent, stmtStr, searchCursor)
+		searchCursor = nextCursor
+
+		// Parse the statement normally
+		stmt, err := parseStatementWithNormalizationAndContext(stmtStr, stmtLine, stmtColumn, normalizer, errorHandler, filename)
 		if err != nil {
 			// Error was already handled by parseStatementWithNormalizationAndContext
 			if !errorHandler.ShouldContinue() {
@@ -95,16 +104,17 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 		utils.GetDefaultLogger().WithPrefix("PARSER").Info("Warning: Parsed %d statements with %d errors in %s",
 			len(migration.Statements), len(migration.ParseErrors), filename)
 
-		// CRITICAL: If we have parse errors but NO statements were successfully parsed,
-		// and we have content, this indicates complete parsing failure (e.g., missing semicolons)
 		if len(migration.Statements) == 0 && len(migration.ParseErrors) > 0 {
 			// Return error to indicate catastrophic failure
 			return migration, errors.New(errors.ErrorCodeSyntaxError, errors.CategoryParsing, fmt.Sprintf("fatal: all statements failed to parse in %s: %d parse errors, 0 statements recovered", filename, len(migration.ParseErrors)), nil)
 		}
 
-		// Return migration with statements that did parse successfully
-		// Callers can check migration.ParseErrors to see what failed
-		return migration, nil
+		return migration, errors.New(
+			errors.ErrorCodeSyntaxError,
+			errors.CategoryParsing,
+			fmt.Sprintf("migration %s contains %d statement parse errors", filename, len(migration.ParseErrors)),
+			nil,
+		)
 	}
 
 	// migration is never nil here since it was initialized above
@@ -112,14 +122,16 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 }
 
 // parseStatementWithNormalizationAndContext parses a statement with context and error handling
-func parseStatementWithNormalizationAndContext(sql string, line int, normalizer *ContextualNormalizer, errorHandler *ErrorHandler, filename string) (*types.Statement, error) {
+func parseStatementWithNormalizationAndContext(sql string, line int, column int, normalizer *ContextualNormalizer, errorHandler *ErrorHandler, filename string) (*types.Statement, error) {
 	defer errorHandler.Recovery(filename, line)
 
 	parsed, err := pg_query.Parse(sql)
 	if err != nil {
 		parseCtx := errorHandler.CreateContext(filename, line, nil)
 		parseCtx.StatementText = sql
-		_ = errorHandler.HandleParseError(err, parseCtx) // Log the error for tracking
+		if handleErr := errorHandler.HandleParseError(err, parseCtx); handleErr != nil {
+			utils.GetDefaultLogger().Warn("Failed to handle parse error: %v", handleErr)
+		}
 		return nil, err
 	}
 
@@ -127,20 +139,18 @@ func parseStatementWithNormalizationAndContext(sql string, line int, normalizer 
 		parseCtx := errorHandler.CreateContext(filename, line, nil)
 		parseCtx.StatementText = sql
 		err := errors.New(errors.ErrorCodeSyntaxError, errors.CategoryParsing, "no statements found", nil)
-		_ = errorHandler.HandleValidationError(err.Error(), parseCtx) // Log the validation error
+		if handleErr := errorHandler.HandleValidationError(err.Error(), parseCtx); handleErr != nil {
+			utils.GetDefaultLogger().Warn("Failed to handle validation error: %v", handleErr)
+		}
 		return nil, err
-	}
-
-	// Use actual statement location from pg_query instead of loop index
-	statementLine := line // Default to passed line (loop index) as fallback
-	if len(parsed.Stmts) > 0 && parsed.Stmts[0].StmtLocation > 0 {
-		statementLine = int(parsed.Stmts[0].StmtLocation)
 	}
 
 	stmt := &types.Statement{
 		SQL:       strings.TrimSpace(sql),
 		ParseTree: parsed,
-		Line:      statementLine,
+		Filename:  filename,
+		Line:      line,
+		Column:    column,
 	}
 
 	// Analyze first statement with normalization
@@ -175,12 +185,63 @@ func parseStatementWithNormalizationAndContext(sql string, line int, normalizer 
 	enrichStatementWithPlugins(context.Background(), stmt)
 
 	// Analyze statement metadata (lock levels, transaction requirements, etc.)
-	// Use PostgreSQL 15 as default version (can be overridden by config later)
-	analyzer := NewStatementAnalyzer("15")
+	// Use PostgreSQL 17 as default version (can be overridden by config later)
+	analyzer := NewStatementAnalyzer("17")
 	analyzer.AnalyzeStatement(stmt)
 	analyzer.AnalyzePragmas(stmt)
 
 	return stmt, nil
+}
+
+func locateStatementPosition(content string, statement string, searchFrom int) (line int, column int, nextSearchFrom int) {
+	if searchFrom < 0 {
+		searchFrom = 0
+	}
+	if searchFrom > len(content) {
+		searchFrom = len(content)
+	}
+
+	absoluteOffset := searchFrom
+	searchTarget := statement
+
+	if idx := strings.Index(content[searchFrom:], statement); idx >= 0 {
+		absoluteOffset = searchFrom + idx
+	} else {
+		trimmed := strings.TrimSpace(statement)
+		if trimmed != "" {
+			if idx := strings.Index(content[searchFrom:], trimmed); idx >= 0 {
+				absoluteOffset = searchFrom + idx
+				searchTarget = trimmed
+			}
+		}
+	}
+
+	line, column = offsetToLineColumn(content, absoluteOffset)
+	nextSearchFrom = max(absoluteOffset+len(searchTarget), searchFrom)
+
+	return line, column, nextSearchFrom
+}
+
+func offsetToLineColumn(content string, offset int) (line int, column int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(content) {
+		offset = len(content)
+	}
+
+	line = 1
+	column = 1
+	for i := 0; i < offset; i++ {
+		if content[i] == '\n' {
+			line++
+			column = 1
+			continue
+		}
+		column++
+	}
+
+	return line, column
 }
 
 // analyzeStatementWithNormalization analyzes statements with PostgreSQL-specific normalization
@@ -200,28 +261,76 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		// Extract constraint information from ALTER TABLE commands
 		stmt.Dependencies = extractAlterTableConstraints(node.AlterTableStmt, normalizer)
 
+	case *pg_query.Node_RenameStmt:
+		// RenameStmt covers: ALTER TABLE ... RENAME COLUMN, ALTER TABLE ... RENAME TO, etc.
+		renameStmt := node.RenameStmt
+		stmt.Operation = types.OpAlter // RENAME is a type of ALTER operation
+
+		// Extract table name from the Relation
+		if renameStmt.Relation != nil {
+			stmt.ObjectName = getTableNameWithNormalization(renameStmt.Relation, normalizer)
+			stmt.ObjectType = types.TypeTable
+		}
+
+		// No dependencies for RENAME operations
+		stmt.Dependencies = []string{}
+
 	case *pg_query.Node_DropStmt:
 		stmt.Operation = types.OpDrop
 		if len(node.DropStmt.Objects) > 0 {
 			stmt.ObjectType = mapObjectType(node.DropStmt.RemoveType)
-			if list := node.DropStmt.Objects[0]; list != nil {
-				stmt.ObjectName = extractObjectNameWithNormalization(list, normalizer)
+			firstObject := node.DropStmt.Objects[0]
+			if node.DropStmt.RemoveType == pg_query.ObjectType_OBJECT_POLICY {
+				tableName, policyName := extractDropPolicyDetails(firstObject, normalizer)
+				if policyName != "" {
+					stmt.ObjectName = policyName
+				} else {
+					stmt.ObjectName = extractObjectNameWithNormalization(firstObject, normalizer)
+				}
+				if tableName != "" {
+					stmt.Dependencies = append(stmt.Dependencies, tableName)
+				}
+			} else if node.DropStmt.RemoveType == pg_query.ObjectType_OBJECT_TRIGGER {
+				// DROP TRIGGER syntax: DROP TRIGGER [IF EXISTS] trigger_name ON table_name
+				// The pg_query parser returns a list like [schema?, table, trigger]
+				tableName, triggerName := extractDropTriggerDetails(firstObject, normalizer)
+				if triggerName != "" {
+					stmt.ObjectName = triggerName
+				} else {
+					stmt.ObjectName = extractObjectNameWithNormalization(firstObject, normalizer)
+				}
+				if tableName != "" {
+					stmt.Dependencies = append(stmt.Dependencies, tableName)
+				}
+			} else if firstObject != nil {
+				stmt.ObjectName = extractObjectNameWithNormalization(firstObject, normalizer)
 			}
 		}
 
 	case *pg_query.Node_IndexStmt:
 		stmt.ObjectType = types.TypeIndex
 		stmt.Operation = types.OpCreate
-		stmt.ObjectName = normalizer.NormalizeIdentifier(node.IndexStmt.Idxname)
-		if node.IndexStmt.Relation != nil {
-			stmt.Dependencies = []string{getTableNameWithNormalization(node.IndexStmt.Relation, normalizer)}
+		// Normalize index name, potentially adding schema from relation
+		idxName := normalizer.NormalizeIdentifier(node.IndexStmt.Idxname)
+		if node.IndexStmt.Relation != nil && node.IndexStmt.Relation.Schemaname != "" {
+			// If relation has explicit schema, prepend it to index name for consistency
+			// Note: Indexes live in the same schema as their table
+			schema := normalizer.NormalizeSchemaName(node.IndexStmt.Relation.Schemaname)
+			stmt.ObjectName = fmt.Sprintf("%s.%s", schema, idxName)
+		} else if node.IndexStmt.Relation != nil && normalizer.context.DefaultSchema != "" {
+			// Infer partial qualification from default schema if available
+			stmt.ObjectName = fmt.Sprintf("%s.%s", normalizer.context.DefaultSchema, idxName)
+		} else {
+			stmt.ObjectName = idxName
 		}
 
-	case *pg_query.Node_CreateFunctionStmt:
-		stmt.ObjectType = types.TypeFunction
-		stmt.Operation = types.OpCreate
-		if node.CreateFunctionStmt.Funcname != nil {
-			stmt.ObjectName = extractFunctionNameWithNormalization(node.CreateFunctionStmt.Funcname, normalizer)
+		// This prevents pg_query.Deparse from adding "USING btree" to spatial indexes
+		// Check the original SQL, not the AST, since pg_query may have normalized it
+		if strings.Contains(strings.ToUpper(stmt.SQL), " USING ") {
+			stmt.IndexHadExplicitAccessMethod = true
+		}
+		if node.IndexStmt.Relation != nil {
+			stmt.Dependencies = []string{getTableNameWithNormalization(node.IndexStmt.Relation, normalizer)}
 		}
 
 	case *pg_query.Node_CreateTrigStmt:
@@ -231,6 +340,10 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		if node.CreateTrigStmt.Relation != nil {
 			stmt.Dependencies = []string{getTableNameWithNormalization(node.CreateTrigStmt.Relation, normalizer)}
 		}
+		if node.CreateTrigStmt.Funcname != nil {
+			funcName := extractFunctionNameWithNormalization(node.CreateTrigStmt.Funcname, normalizer)
+			stmt.Dependencies = append(stmt.Dependencies, funcName)
+		}
 
 	case *pg_query.Node_ViewStmt:
 		stmt.ObjectType = types.TypeView
@@ -238,7 +351,6 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		if node.ViewStmt.View != nil {
 			stmt.ObjectName = getTableNameWithNormalization(node.ViewStmt.View, normalizer)
 		}
-		// CRITICAL FIX: Extract table dependencies from the view's SELECT query
 		// This ensures views are placed AFTER the tables they reference
 		if node.ViewStmt.Query != nil {
 			stmt.Dependencies = extractQueryDependencies(node.ViewStmt.Query, normalizer)
@@ -261,10 +373,24 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 	case *pg_query.Node_CreatePolicyStmt:
 		stmt.ObjectType = types.TypePolicy
 		stmt.Operation = types.OpCreate
-		stmt.ObjectName = normalizer.NormalizeIdentifier(node.CreatePolicyStmt.PolicyName)
+
+		policyName := normalizer.NormalizeIdentifier(node.CreatePolicyStmt.PolicyName)
 		if node.CreatePolicyStmt.Table != nil {
-			stmt.Dependencies = []string{getTableNameWithNormalization(node.CreatePolicyStmt.Table, normalizer)}
+			tableName := getTableNameWithNormalization(node.CreatePolicyStmt.Table, normalizer)
+			stmt.ObjectName = fmt.Sprintf("%s.%s", tableName, policyName)
+			stmt.Dependencies = []string{tableName}
+		} else {
+			stmt.ObjectName = policyName
 		}
+
+		// Extract dependencies from USING (Qual) and WITH CHECK (WithCheck) clauses
+		if node.CreatePolicyStmt.Qual != nil {
+			stmt.Dependencies = append(stmt.Dependencies, extractExpressionDependencies(node.CreatePolicyStmt.Qual, normalizer)...)
+		}
+		if node.CreatePolicyStmt.WithCheck != nil {
+			stmt.Dependencies = append(stmt.Dependencies, extractExpressionDependencies(node.CreatePolicyStmt.WithCheck, normalizer)...)
+		}
+
 		// Check for RESTRICTIVE policies
 		if strings.Contains(stmt.SQL, "AS RESTRICTIVE") {
 			stmt.Comments = append(stmt.Comments, "-- RESTRICTIVE policy")
@@ -272,6 +398,7 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 
 	case *pg_query.Node_InsertStmt:
 		stmt.Operation = types.OpInsert
+		stmt.ObjectType = types.TypeData
 		stmt.IsDataOp = true
 		stmt.ObjectName = getTableNameWithNormalization(node.InsertStmt.Relation, normalizer)
 		// Check for ON CONFLICT clause
@@ -281,11 +408,13 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 
 	case *pg_query.Node_UpdateStmt:
 		stmt.Operation = types.OpUpdate
+		stmt.ObjectType = types.TypeData
 		stmt.IsDataOp = true
 		stmt.ObjectName = getTableNameWithNormalization(node.UpdateStmt.Relation, normalizer)
 
 	case *pg_query.Node_DeleteStmt:
 		stmt.Operation = types.OpDelete
+		stmt.ObjectType = types.TypeData
 		stmt.IsDataOp = true
 		stmt.ObjectName = getTableNameWithNormalization(node.DeleteStmt.Relation, normalizer)
 
@@ -309,6 +438,23 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 			stmt.ObjectName = extractRoleNameWithNormalization(node.GrantRoleStmt.GrantedRoles[0], normalizer)
 		}
 		stmt.Grantees = extractGranteeRolesWithNormalization(node.GrantRoleStmt.GranteeRoles, normalizer)
+	case *pg_query.Node_CreateFunctionStmt:
+		stmt.ObjectType = types.TypeFunction
+		stmt.Operation = types.OpCreate
+		if node.CreateFunctionStmt.Funcname != nil {
+			stmt.ObjectName = extractFunctionNameWithNormalization(node.CreateFunctionStmt.Funcname, normalizer)
+
+			// Extract schema explicitly for dependency matching
+			// Dependency matching compares Dep.Schema == Lifecycle.Schema
+			funcNameParts := node.CreateFunctionStmt.Funcname
+			if len(funcNameParts) >= 2 {
+				// Has schema qualification (e.g. public.func)
+				stmt.Schema = normalizer.NormalizeIdentifier(funcNameParts[0].GetString_().Sval)
+			} else {
+				// Unqualified, defaults to public
+				stmt.Schema = "public"
+			}
+		}
 
 	case *pg_query.Node_CreateExtensionStmt:
 		stmt.ObjectType = types.TypeExtension
@@ -316,13 +462,15 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		stmt.ObjectName = normalizer.NormalizeIdentifier(node.CreateExtensionStmt.Extname)
 
 	case *pg_query.Node_CommentStmt:
-		stmt.ObjectType = types.TypeUnknown // Will be determined by objtype
+		// This prevents "Object X::VIEW depends on X which is never created" false warnings
+		// where COMMENT ON VIEW was being stored as a VIEW object instead of a COMMENT object
+		stmt.ObjectType = types.TypeComment
 		stmt.Operation = types.OpComment
 		// Extract object name and type from comment statement
 		if node.CommentStmt.Object != nil {
 			stmt.ObjectName = extractCommentObjectNameWithNormalization(node.CommentStmt, normalizer)
-			stmt.ObjectType = mapCommentObjectType(node.CommentStmt.Objtype)
-			// Extract dependency on the object being commented
+			// Extract dependency on the object being commented (with proper type)
+			// This creates a dependency like: "collection_contents::COMMENT depends on collection_contents::VIEW"
 			stmt.Dependencies = extractCommentDependenciesWithNormalization(node.CommentStmt, normalizer)
 		}
 
@@ -352,10 +500,15 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 				stmt.Dependencies = nestedTypes
 			}
 		} else {
-			// Regular DO block without types
+			// Handle DO blocks (anonymous code blocks)
+			// These are often used for data migration or complex logic
 			stmt.ObjectType = types.TypeDoBlock
-			stmt.Operation = types.Operation("DO_BLOCK")
-			stmt.ObjectName = "anonymous_block"
+			stmt.Operation = types.Operation("UNKNOWN")
+			// Use a hash of the content to ensure unique identity for each DO block
+			// This prevents them from being consolidated into a single "anonymous_block" object
+			// which would mess up sorting (using the first block's position for all)
+			sum := sha256.Sum256([]byte(stmt.SQL))
+			stmt.ObjectName = fmt.Sprintf("anonymous_block_%x", sum[:8])
 		}
 
 	case *pg_query.Node_CreateEnumStmt:
@@ -402,12 +555,28 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 	default:
 		stmt.ObjectType = types.TypeUnknown
 		stmt.Operation = types.Operation("UNKNOWN")
+		stmt.Metadata.PreserveVerbatim = true
+		sum := sha256.Sum256([]byte(stmt.SQL))
+		stmt.ObjectName = fmt.Sprintf("verbatim_statement_%x", sum[:8])
 	}
 }
 
 func categorizeStatement(stmt types.Statement) types.Category {
 	if stmt.IsDataOp {
 		return types.CategoryData
+	}
+
+	// DO blocks usually contain ad-hoc data operations (INSERTs) or scripts
+	// Treat them as Data to preserve migration order
+	if stmt.ObjectType == types.TypeDoBlock {
+		return types.CategoryData
+	}
+
+	// COMMENT ON statements have ObjectType set to the object being commented (e.g., TypeTable),
+	// but must be categorized as CategoryComments to ensure they come after object creation
+	if stmt.Operation == types.OpComment {
+		// Comments must come after the objects they reference
+		return types.CategoryComments
 	}
 
 	switch stmt.ObjectType {
@@ -417,12 +586,15 @@ func categorizeStatement(stmt types.Statement) types.Category {
 		// Views (including materialized views) are foundational objects
 		// They must be created before indexes and triggers can reference them
 		return types.CategoryFoundation
+	case types.TypeFunction:
+		// CRITICAL: Functions MUST be in CategoryFoundation (not CategoryFunctions)
+		// because tables may reference functions in CHECK constraints
+		// Within CategoryFoundation, topological sort will order functions before tables
+		return types.CategoryFoundation
 	case types.TypeConstraint:
 		return types.CategoryConstraints
 	case types.TypeIndex:
 		return types.CategoryIndexes
-	case types.TypeFunction, types.TypeDoBlock:
-		return types.CategoryFunctions
 	case types.TypeTrigger:
 		return types.CategoryTriggers
 	case types.TypePolicy, types.TypeRole, types.TypePublication:
@@ -431,6 +603,8 @@ func categorizeStatement(stmt types.Statement) types.Category {
 		return types.CategoryExtensions
 	case types.TypeComment:
 		// Comments must come after the objects they reference
+		// Note: This case is now redundant due to the OpComment check above,
+		// but kept for clarity and as a fallback
 		return types.CategoryComments
 	default:
 		return types.CategoryFoundation
@@ -446,7 +620,8 @@ func getTableNameWithNormalization(rangeVar *pg_query.RangeVar, normalizer *Cont
 	schema := normalizer.NormalizeSchemaName(rangeVar.Schemaname)
 	table := normalizer.NormalizeIdentifier(rangeVar.Relname)
 
-	if rangeVar.Schemaname != "" {
+	// Always use the normalized schema which handles defaults
+	if schema != "" {
 		return fmt.Sprintf("%s.%s", schema, table)
 	}
 	return table
@@ -553,6 +728,8 @@ func isBuiltInType(typeName string) bool {
 		"tsrange": true, "tstzrange": true, "daterange": true,
 		// Special types
 		"void": true, "record": true, "trigger": true,
+		// Common extension types (to prevent false positive dependency warnings)
+		"vector": true, "geometry": true, "geography": true, "ltree": true, "hstore": true,
 	}
 	return builtInTypes[strings.ToLower(typeName)]
 }
@@ -575,6 +752,13 @@ func extractQueryDependencies(queryNode *pg_query.Node, normalizer *ContextualNo
 			if joinExpr := fromClause.GetJoinExpr(); joinExpr != nil {
 				deps = append(deps, extractJoinDependencies(joinExpr, normalizer)...)
 			}
+			// Handle subqueries (RangeSubselect)
+			if rangeSubselect := fromClause.GetRangeSubselect(); rangeSubselect != nil {
+				if rangeSubselect.Subquery != nil {
+					// Recursively extract dependencies from subquery
+					deps = append(deps, extractQueryDependencies(rangeSubselect.Subquery, normalizer)...)
+				}
+			}
 		}
 	}
 
@@ -596,6 +780,12 @@ func extractJoinDependencies(joinExpr *pg_query.JoinExpr, normalizer *Contextual
 		if nestedJoin := joinExpr.Larg.GetJoinExpr(); nestedJoin != nil {
 			deps = append(deps, extractJoinDependencies(nestedJoin, normalizer)...)
 		}
+		// Handle subquery on left side
+		if rangeSubselect := joinExpr.Larg.GetRangeSubselect(); rangeSubselect != nil {
+			if rangeSubselect.Subquery != nil {
+				deps = append(deps, extractQueryDependencies(rangeSubselect.Subquery, normalizer)...)
+			}
+		}
 	}
 
 	// Right side of JOIN
@@ -608,6 +798,12 @@ func extractJoinDependencies(joinExpr *pg_query.JoinExpr, normalizer *Contextual
 		}
 		if nestedJoin := joinExpr.Rarg.GetJoinExpr(); nestedJoin != nil {
 			deps = append(deps, extractJoinDependencies(nestedJoin, normalizer)...)
+		}
+		// Handle subquery on right side
+		if rangeSubselect := joinExpr.Rarg.GetRangeSubselect(); rangeSubselect != nil {
+			if rangeSubselect.Subquery != nil {
+				deps = append(deps, extractQueryDependencies(rangeSubselect.Subquery, normalizer)...)
+			}
 		}
 	}
 
@@ -664,6 +860,12 @@ func extractFunctionNameWithNormalization(funcname []*pg_query.Node, normalizer 
 		if str := part.GetString_(); str != nil {
 			parts = append(parts, normalizer.NormalizeIdentifier(str.Sval))
 		}
+	}
+
+	// Normalize: always add "public" schema if not present (simplified heuristic)
+	// This prevents duplication between "func" and "public.func"
+	if len(parts) == 1 {
+		return "public." + parts[0]
 	}
 
 	return strings.Join(parts, ".")
@@ -752,6 +954,8 @@ func mapObjectType(removeType pg_query.ObjectType) types.ObjectType {
 		return types.TypeView
 	case pg_query.ObjectType_OBJECT_SEQUENCE:
 		return types.TypeSequence
+	case pg_query.ObjectType_OBJECT_POLICY:
+		return types.TypePolicy
 	default:
 		return types.TypeUnknown
 	}
@@ -766,9 +970,121 @@ func extractObjectNameWithNormalization(obj *pg_query.Node, normalizer *Contextu
 				parts = append(parts, normalizer.NormalizeIdentifier(str.Sval))
 			}
 		}
+
+		// Normalize: always add default schema (public) if not present
+		if len(parts) == 1 {
+			return fmt.Sprintf("%s.%s", normalizer.NormalizeSchemaName(""), parts[0])
+		}
 		return strings.Join(parts, ".")
 	}
+
+	// Handle ObjectWithArgs (used in DROP FUNCTION foo(args))
+	if args := obj.GetObjectWithArgs(); args != nil {
+		var parts []string
+		for _, item := range args.Objname {
+			if str := item.GetString_(); str != nil {
+				parts = append(parts, normalizer.NormalizeIdentifier(str.Sval))
+			}
+		}
+		// NOTE: currently we ignore args.Objargs signatures to match extractFunctionNameWithNormalization behavior
+		// This ensures CREATE FUNCTION foo() and DROP FUNCTION foo() generate matching keys.
+		// TODO: Support full function signatures in object keys for strict overloading support.
+
+		// Normalize: always add default schema (public) if not present
+		if len(parts) == 1 {
+			return fmt.Sprintf("%s.%s", normalizer.NormalizeSchemaName(""), parts[0])
+		}
+		return strings.Join(parts, ".")
+	}
+
 	return ""
+}
+
+// extractDropPolicyDetails returns the associated table (schema-qualified when available)
+// and policy name from a DROP POLICY statement target list.
+func extractDropPolicyDetails(obj *pg_query.Node, normalizer *ContextualNormalizer) (string, string) {
+	if obj == nil {
+		return "", ""
+	}
+
+	list := obj.GetList()
+	if list == nil || len(list.Items) == 0 {
+		return "", ""
+	}
+
+	var tableParts []string
+	var policyName string
+
+	for idx, item := range list.Items {
+		str := item.GetString_()
+		if str == nil {
+			continue
+		}
+
+		name := normalizer.NormalizeIdentifier(str.Sval)
+		if idx == len(list.Items)-1 {
+			policyName = name
+			continue
+		}
+
+		tableParts = append(tableParts, name)
+	}
+
+	var tableName string
+	if len(tableParts) == 1 {
+		// Preserve unqualified table names as-is for DROP POLICY ... ON table_name.
+		// Schema defaults are derived separately from AST extraction when needed.
+		tableName = tableParts[0]
+	} else if len(tableParts) > 1 {
+		// Already qualified
+		tableName = strings.Join(tableParts, ".")
+	}
+
+	return tableName, policyName
+}
+
+// extractDropTriggerDetails returns the associated table (schema-qualified when available)
+// and trigger name from a DROP TRIGGER statement target list.
+// DROP TRIGGER syntax: DROP TRIGGER [IF EXISTS] trigger_name ON table_name
+// The pg_query parser returns a list like [schema?, table, trigger]
+func extractDropTriggerDetails(obj *pg_query.Node, normalizer *ContextualNormalizer) (string, string) {
+	if obj == nil {
+		return "", ""
+	}
+
+	list := obj.GetList()
+	if list == nil || len(list.Items) == 0 {
+		return "", ""
+	}
+
+	var tableParts []string
+	var triggerName string
+
+	for idx, item := range list.Items {
+		str := item.GetString_()
+		if str == nil {
+			continue
+		}
+
+		name := normalizer.NormalizeIdentifier(str.Sval)
+		if idx == len(list.Items)-1 {
+			// Last element is the trigger name
+			triggerName = name
+			continue
+		}
+
+		// All other elements are part of the table name (schema.table or just table)
+		tableParts = append(tableParts, name)
+	}
+
+	var tableName string
+	if len(tableParts) == 1 {
+		tableName = tableParts[0]
+	} else if len(tableParts) > 1 {
+		tableName = strings.Join(tableParts, ".")
+	}
+
+	return tableName, triggerName
 }
 
 func extractComments(content string) (string, []string) {
@@ -811,19 +1127,38 @@ func extractCommentObjectNameWithNormalization(commentStmt *pg_query.CommentStmt
 }
 
 func mapCommentObjectType(objtype pg_query.ObjectType) types.ObjectType {
+	// This prevents "never created" warnings for COMMENT ON VIEW, COMMENT ON POLICY, etc.
 	switch objtype {
 	case pg_query.ObjectType_OBJECT_TABLE:
 		return types.TypeTable
 	case pg_query.ObjectType_OBJECT_COLUMN:
 		return types.TypeTable // Column comments are table-related
+	case pg_query.ObjectType_OBJECT_VIEW:
+		return types.TypeView
+	case pg_query.ObjectType_OBJECT_INDEX:
+		return types.TypeIndex
 	case pg_query.ObjectType_OBJECT_FUNCTION:
 		return types.TypeFunction
+	case pg_query.ObjectType_OBJECT_TRIGGER:
+		return types.TypeTrigger
+	case pg_query.ObjectType_OBJECT_SEQUENCE:
+		return types.TypeSequence
+	case pg_query.ObjectType_OBJECT_POLICY:
+		return types.TypePolicy
+	case pg_query.ObjectType_OBJECT_SCHEMA:
+		return types.TypeSchema
+	case pg_query.ObjectType_OBJECT_EXTENSION:
+		return types.TypeExtension
+	case pg_query.ObjectType_OBJECT_TYPE:
+		return types.TypeType
 	default:
 		return types.TypeComment
 	}
 }
 
 // extractCommentDependenciesWithNormalization extracts the target object that a COMMENT ON references
+// Returns dependencies with type prefix in format: "TYPE:name" (e.g., "VIEW:collection_contents")
+// This allows proper dependency tracking using the same pattern as CONSTRAINT: and COLUMN: prefixes
 func extractCommentDependenciesWithNormalization(commentStmt *pg_query.CommentStmt, normalizer *ContextualNormalizer) []string {
 	if commentStmt.Object == nil {
 		return nil
@@ -834,22 +1169,26 @@ func extractCommentDependenciesWithNormalization(commentStmt *pg_query.CommentSt
 	// Extract the target object name
 	targetName := extractObjectNameWithNormalization(commentStmt.Object, normalizer)
 	if targetName != "" {
+		// Get the target object type
+		targetType := mapCommentObjectType(commentStmt.Objtype)
+
 		// For COMMENT ON COLUMN, extract just the table name
 		if commentStmt.Objtype == pg_query.ObjectType_OBJECT_COLUMN {
 			// Format is: table_name.column_name, we want just table_name
 			parts := strings.Split(targetName, ".")
 			if len(parts) >= 2 {
-				// If schema.table.column, use schema.table
+				// If schema.table.column, use TABLE:schema.table
 				if len(parts) == 3 {
-					deps = append(deps, fmt.Sprintf("%s.%s", parts[0], parts[1]))
+					deps = append(deps, fmt.Sprintf("%s:%s.%s", types.TypeTable, parts[0], parts[1]))
 				} else {
-					// If table.column, use just table
-					deps = append(deps, parts[0])
+					// If table.column, use TABLE:table
+					deps = append(deps, fmt.Sprintf("%s:%s", types.TypeTable, parts[0]))
 				}
 			}
 		} else {
-			// For other object types, use the full name
-			deps = append(deps, targetName)
+			// For other object types, use prefix format: "TYPE:name"
+			// This matches the CONSTRAINT: and COLUMN: prefix pattern used elsewhere
+			deps = append(deps, fmt.Sprintf("%s:%s", targetType, targetName))
 		}
 	}
 
@@ -872,9 +1211,9 @@ func extractSchemaWithNormalization(stmt *types.Statement, normalizer *Contextua
 		return "public" // Default if no parse tree available
 	}
 
-	// Type assert to pg_query.ParseResult
-	parseResult, ok := stmt.ParseTree.(*pg_query.ParseResult)
-	if !ok || parseResult == nil || len(parseResult.Stmts) == 0 {
+	// Access ParseResult directly
+	parseResult := stmt.ParseTree
+	if parseResult == nil || len(parseResult.Stmts) == 0 {
 		return "public"
 	}
 
@@ -908,6 +1247,15 @@ func extractSchemaFromAST(rawStmt *pg_query.RawStmt, normalizer *ContextualNorma
 
 	case *pg_query.Node_DropStmt:
 		if len(node.DropStmt.Objects) > 0 {
+			if node.DropStmt.RemoveType == pg_query.ObjectType_OBJECT_POLICY {
+				tableName, _ := extractDropPolicyDetails(node.DropStmt.Objects[0], normalizer)
+				if tableName != "" {
+					if strings.Contains(tableName, ".") {
+						return strings.SplitN(tableName, ".", 2)[0]
+					}
+					return "public"
+				}
+			}
 			return extractSchemaFromObjectList(node.DropStmt.Objects[0], normalizer)
 		}
 
@@ -1031,7 +1379,7 @@ func validateNamingConventions(stmt *types.Statement, collector *ErrorCollector,
 	}
 
 	// Check for reserved words
-	keywordManager := NewVersionedKeywordManager(15) // PostgreSQL 15
+	keywordManager := NewVersionedKeywordManager(17) // PostgreSQL 17
 	if keywordManager.IsReservedKeyword(objectName) {
 		collector.AddNamingWarning(
 			fmt.Sprintf("Object name '%s' is a PostgreSQL reserved keyword", objectName),
@@ -1204,7 +1552,7 @@ func detectAuthPattern(stmt *types.Statement) types.AuthPatternType {
 
 	// RLS policies (generic)
 	if strings.Contains(sql, "row level security") ||
-	   (strings.Contains(sql, "create policy") && stmt.ObjectType == types.TypePolicy) {
+		(strings.Contains(sql, "create policy") && stmt.ObjectType == types.TypePolicy) {
 		return types.AuthPatternRLS
 	}
 
@@ -1290,8 +1638,7 @@ func cleanSQL(sql string) string {
 	cleaned := strings.Join(cleanLines, "\n")
 
 	// Remove multi-line comments
-	multiCommentPattern := regexp.MustCompile(`/\*[\s\S]*?\*/`)
-	cleaned = multiCommentPattern.ReplaceAllString(cleaned, "")
+	cleaned = stripSQLBlockComments(cleaned)
 
 	// Normalize whitespace but preserve line breaks for SQL
 	cleaned = strings.TrimSpace(cleaned)
@@ -1302,18 +1649,388 @@ func cleanSQL(sql string) string {
 // extractNestedTypesFromDoBlock extracts CREATE TYPE statements from DO blocks
 func extractNestedTypesFromDoBlock(doBlockSQL string) []string {
 	var nestedTypes []string
+	tokens := strings.FieldsFunc(doBlockSQL, func(r rune) bool {
+		return !(r == '_' || r == '.' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	})
 
-	// Pattern to match CREATE TYPE ... AS ENUM statements within DO blocks
-	enumPattern := regexp.MustCompile(`CREATE\s+TYPE\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s+ENUM`)
-	matches := enumPattern.FindAllStringSubmatch(doBlockSQL, -1)
-
-	for _, match := range matches {
-		if len(match) > 1 {
-			nestedTypes = append(nestedTypes, match[1]) // Type name
+	for i := 0; i+3 < len(tokens); i++ {
+		if !strings.EqualFold(tokens[i], "CREATE") || !strings.EqualFold(tokens[i+1], "TYPE") || !strings.EqualFold(tokens[i+3], "AS") {
+			continue
 		}
+
+		if i+4 >= len(tokens) || !strings.EqualFold(tokens[i+4], "ENUM") {
+			continue
+		}
+
+		typeName := strings.TrimSpace(tokens[i+2])
+		if typeName == "" {
+			continue
+		}
+
+		// Normalize schema-qualified names to bare type object for this detector.
+		if strings.Contains(typeName, ".") {
+			parts := strings.Split(typeName, ".")
+			typeName = parts[len(parts)-1]
+		}
+
+		nestedTypes = append(nestedTypes, typeName)
 	}
 
 	return nestedTypes
+}
+
+// truncateForLog truncates a string for logging purposes
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// extractAlterStatementsFromDoBlock extracts ALTER TABLE statements from DO blocks
+// This is critical for handling migrations that wrap ALTER statements in IF NOT EXISTS checks
+// Example:
+//
+//	DO $$ BEGIN
+//	  IF NOT EXISTS (...) THEN
+//	    ALTER TABLE foo ADD COLUMN bar TEXT;
+//	  END IF;
+//	END $$;
+//
+// Returns: ["ALTER TABLE foo ADD COLUMN bar TEXT;"]
+func extractAlterStatementsFromDoBlock(doBlockSQL string) []string {
+	var ddlStatements []string
+	candidates := scanDoBlockForDDLStatements(doBlockSQL)
+
+	// Helper to validate and append statements
+	addIfValid := func(stmt string) {
+		// Validation: Ensure the extracted statement is actual valid SQL
+		// This prevents regex from picking up garbage or partial strings
+		if _, err := pg_query.Parse(stmt); err == nil {
+			ddlStatements = append(ddlStatements, stmt)
+		} else {
+			// Log warning but don't fail, maybe it's valid but parser is too strict or it's a fragment
+			// For robustness we skip clearly invalid SQL to prevent downstream errors
+			utils.GetDefaultLogger().WithPrefix("PARSER").Debug("Skipping invalid extracted DDL: %s (Error: %v)", truncateForLog(stmt, 50), err)
+		}
+	}
+
+	for _, candidate := range candidates {
+		normalized := strings.TrimSpace(normalizeSQLWhitespace(candidate))
+		if normalized == "" {
+			continue
+		}
+
+		if !strings.HasSuffix(normalized, ";") {
+			normalized += ";"
+		}
+
+		addIfValid(normalized)
+	}
+
+	if len(ddlStatements) == 0 && strings.Contains(strings.ToUpper(doBlockSQL), "EXECUTE") && strings.Contains(strings.ToUpper(doBlockSQL), "FORMAT") {
+		utils.GetDefaultLogger().WithPrefix("PARSER").Warn(
+			"⚠️  DO block contains dynamic SQL (EXECUTE format()) which cannot be statically extracted. " +
+				"DDL created dynamically may not appear in squashed output.")
+	}
+
+	return ddlStatements
+}
+
+// ExtractStaticDDLFromDoBlock returns statically-declared DDL statements from
+// a PostgreSQL DO block. Dynamic EXECUTE expressions are intentionally not
+// returned because their final SQL cannot be proven without running the block.
+//
+// ParseMigration preserves the DO block itself; consolidation rules use this
+// helper when a safety level explicitly permits unwrapping static DDL.
+func ExtractStaticDDLFromDoBlock(doBlockSQL string) []string {
+	return extractAlterStatementsFromDoBlock(doBlockSQL)
+}
+
+func scanDoBlockForDDLStatements(doBlockSQL string) []string {
+	body := extractDoBlockBody(doBlockSQL)
+	if strings.TrimSpace(body) == "" {
+		body = doBlockSQL
+	}
+
+	body = stripSQLBlockComments(body)
+
+	statements := make([]string, 0)
+
+	captureStart := -1
+	inLineComment := false
+	inBlockComment := false
+	inSingleQuote := false
+	inDoubleQuote := false
+	inDollarQuote := false
+	dollarTag := ""
+
+	for i := 0; i < len(body); i++ {
+		ch := body[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+
+		if inBlockComment {
+			if ch == '*' && i+1 < len(body) && body[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+
+		if !inSingleQuote && !inDoubleQuote {
+			if !inDollarQuote && ch == '-' && i+1 < len(body) && body[i+1] == '-' {
+				inLineComment = true
+				i++
+				continue
+			}
+
+			if !inDollarQuote && ch == '/' && i+1 < len(body) && body[i+1] == '*' {
+				inBlockComment = true
+				i++
+				continue
+			}
+
+			if tag, ok := readDollarTag(body, i); ok {
+				if inDollarQuote {
+					if tag == dollarTag {
+						inDollarQuote = false
+						dollarTag = ""
+						i += len(tag) - 1
+						continue
+					}
+				} else {
+					inDollarQuote = true
+					dollarTag = tag
+					i += len(tag) - 1
+					continue
+				}
+			}
+		}
+
+		if inDollarQuote {
+			continue
+		}
+
+		if ch == '\'' && !inDoubleQuote {
+			if inSingleQuote && i+1 < len(body) && body[i+1] == '\'' {
+				i++
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+
+		if ch == '"' && !inSingleQuote {
+			if inDoubleQuote && i+1 < len(body) && body[i+1] == '"' {
+				i++
+				continue
+			}
+			inDoubleQuote = !inDoubleQuote
+			continue
+		}
+
+		if inSingleQuote || inDoubleQuote {
+			continue
+		}
+
+		if captureStart == -1 && isDoBlockDDLStart(body, i) {
+			captureStart = i
+			continue
+		}
+
+		if captureStart != -1 && ch == ';' {
+			statement := strings.TrimSpace(body[captureStart : i+1])
+			if statement != "" {
+				statements = append(statements, statement)
+			}
+			captureStart = -1
+		}
+	}
+
+	return statements
+}
+
+func extractDoBlockBody(doBlockSQL string) string {
+	trimmed := strings.TrimSpace(doBlockSQL)
+	if trimmed == "" {
+		return ""
+	}
+
+	startSearch := 0
+	if doIndex := strings.Index(strings.ToUpper(trimmed), "DO"); doIndex >= 0 {
+		startSearch = doIndex + 2
+	}
+
+	for i := startSearch; i < len(trimmed); i++ {
+		tag, ok := readDollarTag(trimmed, i)
+		if !ok {
+			continue
+		}
+
+		bodyStart := i + len(tag)
+		if bodyStart >= len(trimmed) {
+			return ""
+		}
+
+		if end := strings.LastIndex(trimmed[bodyStart:], tag); end >= 0 {
+			return trimmed[bodyStart : bodyStart+end]
+		}
+
+		break
+	}
+
+	return trimmed
+}
+
+func isDoBlockDDLStart(sql string, pos int) bool {
+	if hasKeywordSequenceAtCI(sql, pos, "ALTER", "TABLE") {
+		return true
+	}
+	if hasKeywordSequenceAtCI(sql, pos, "CREATE", "UNIQUE", "INDEX") {
+		return true
+	}
+	if hasKeywordSequenceAtCI(sql, pos, "CREATE", "INDEX") {
+		return true
+	}
+	if hasKeywordSequenceAtCI(sql, pos, "CREATE", "TYPE") {
+		return true
+	}
+
+	return false
+}
+
+func hasKeywordSequenceAtCI(sql string, pos int, words ...string) bool {
+	if pos < 0 || pos >= len(sql) || len(words) == 0 {
+		return false
+	}
+
+	if pos > 0 && isDoBlockIdentifierByte(sql[pos-1]) {
+		return false
+	}
+
+	index := pos
+	for _, word := range words {
+		index = skipDoBlockWhitespace(sql, index)
+		if index+len(word) > len(sql) {
+			return false
+		}
+
+		segment := sql[index : index+len(word)]
+		if !strings.EqualFold(segment, word) {
+			return false
+		}
+
+		end := index + len(word)
+		if end < len(sql) && isDoBlockIdentifierByte(sql[end]) {
+			return false
+		}
+
+		index = end
+	}
+
+	return true
+}
+
+func skipDoBlockWhitespace(sql string, pos int) int {
+	for pos < len(sql) {
+		switch sql[pos] {
+		case ' ', '\t', '\n', '\r', '\f', '\v':
+			pos++
+		default:
+			return pos
+		}
+	}
+	return pos
+}
+
+func readDollarTag(sql string, pos int) (string, bool) {
+	if pos < 0 || pos >= len(sql) || sql[pos] != '$' {
+		return "", false
+	}
+
+	index := pos + 1
+	for index < len(sql) && isDoBlockIdentifierByte(sql[index]) {
+		index++
+	}
+
+	if index < len(sql) && sql[index] == '$' {
+		return sql[pos : index+1], true
+	}
+
+	return "", false
+}
+
+func isDoBlockIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_'
+}
+
+func stripSQLBlockComments(sql string) string {
+	if sql == "" {
+		return sql
+	}
+
+	var b strings.Builder
+	b.Grow(len(sql))
+
+	inLineComment := false
+	inBlockComment := false
+	inSingleQuote := false
+	inDoubleQuote := false
+
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+				b.WriteByte(ch)
+			}
+			continue
+		}
+
+		if inBlockComment {
+			if ch == '*' && i+1 < len(sql) && sql[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+
+		if !inSingleQuote && !inDoubleQuote {
+			if ch == '-' && i+1 < len(sql) && sql[i+1] == '-' {
+				inLineComment = true
+				i++
+				continue
+			}
+
+			if ch == '/' && i+1 < len(sql) && sql[i+1] == '*' {
+				inBlockComment = true
+				i++
+				continue
+			}
+		}
+
+		if ch == '\'' && !inDoubleQuote {
+			inSingleQuote = !inSingleQuote
+		}
+		if ch == '"' && !inSingleQuote {
+			inDoubleQuote = !inDoubleQuote
+		}
+
+		b.WriteByte(ch)
+	}
+
+	return b.String()
+}
+
+func normalizeSQLWhitespace(sql string) string {
+	return strings.Join(strings.Fields(sql), " ")
 }
 
 // enrichStatementWithPlugins calls all active plugins to enrich statement metadata
@@ -1334,4 +2051,65 @@ func enrichStatementWithPlugins(ctx context.Context, stmt *types.Statement) {
 		// Log error but don't fail parsing
 		utils.GetDefaultLogger().WithPrefix("PARSER").Info("[parser] Plugin enrichment warning: %v", err)
 	}
+}
+
+// extractExpressionDependencies recursively extracts dependencies from expression nodes
+func extractExpressionDependencies(node *pg_query.Node, normalizer *ContextualNormalizer) []string {
+	var deps []string
+
+	if node == nil {
+		return deps
+	}
+
+	// Handle Function Calls
+	if funcCall := node.GetFuncCall(); funcCall != nil {
+		funcName := extractFunctionNameWithNormalization(funcCall.Funcname, normalizer)
+		if funcName != "" {
+			deps = append(deps, funcName)
+		}
+		// Recursively check arguments
+		for _, arg := range funcCall.Args {
+			deps = append(deps, extractExpressionDependencies(arg, normalizer)...)
+		}
+	}
+
+	// Handle Boolean Expressions (AND, OR, NOT)
+	if boolExpr := node.GetBoolExpr(); boolExpr != nil {
+		for _, arg := range boolExpr.Args {
+			deps = append(deps, extractExpressionDependencies(arg, normalizer)...)
+		}
+	}
+
+	// Handle Operator Expressions (A_Expr) e.g. a = b
+	if aExpr := node.GetAExpr(); aExpr != nil {
+		if aExpr.Lexpr != nil {
+			deps = append(deps, extractExpressionDependencies(aExpr.Lexpr, normalizer)...)
+		}
+		if aExpr.Rexpr != nil {
+			deps = append(deps, extractExpressionDependencies(aExpr.Rexpr, normalizer)...)
+		}
+	}
+
+	// Handle Null Test (IS NULL)
+	if nullTest := node.GetNullTest(); nullTest != nil {
+		if nullTest.Arg != nil {
+			deps = append(deps, extractExpressionDependencies(nullTest.Arg, normalizer)...)
+		}
+	}
+
+	// Handle SubLinks (e.g. EXISTS (SELECT ...))
+	if subLink := node.GetSubLink(); subLink != nil {
+		if subLink.Subselect != nil {
+			deps = append(deps, extractQueryDependencies(subLink.Subselect, normalizer)...)
+		}
+	}
+
+	// Handle Type Casts
+	if typeCast := node.GetTypeCast(); typeCast != nil {
+		if typeCast.Arg != nil {
+			deps = append(deps, extractExpressionDependencies(typeCast.Arg, normalizer)...)
+		}
+	}
+
+	return deps
 }

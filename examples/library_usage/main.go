@@ -6,11 +6,11 @@ import (
 	"log"
 	"os"
 
-	"github.com/CAPYSQUASH/pgsquash-engine/pkg/engine"
+	"github.com/capysquash/pgsquash-engine/pkg/engine"
 )
 
 func main() {
-	fmt.Println("=== pgsquash Library Usage Examples ===\n")
+	fmt.Println("=== pgsquash Library Usage Examples ===")
 
 	// Example 1: Basic squashing with defaults
 	example1()
@@ -47,7 +47,7 @@ func example1() {
 	fmt.Printf("☑ Success!\n")
 	fmt.Printf("   Files processed: %d\n", result.FilesProcessed)
 	fmt.Printf("   Warnings: %d\n", len(result.Warnings))
-	fmt.Printf("   SQL length: %d bytes\n", len(result.SQL))
+	fmt.Printf("   SQL length: %d bytes\n", len(result.BaselineSQL))
 	fmt.Println()
 }
 

@@ -15,14 +15,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Coming Soon
+### Added
 
-- PostgreSQL 18 support
-- Smart split feature (split squashed migrations into multiple organized files)
-- Additional auth plugins (Auth0, NextAuth, Firebase Auth)
-- Platform plugins (Neon, Railway, PlanetScale)
-- Comprehensive test suite (target: >60% coverage)
-- Performance benchmarks and CI enforcement
+- `pgsquash validate-external` for applying a migration path to a caller-owned
+  empty PostgreSQL database, capturing a portable catalog snapshot, and
+  comparing a second build against it. The command refuses non-empty databases,
+  supports DSNs through an environment variable, and emits the stable
+  `pgsquash.external-validation.v1` JSON contract.
+- Public catalog snapshot types and comparison helpers in `pkg/validation`.
+- Catalog signatures for sequences, custom types and domains, relation and
+  function ownership, row-security flags, policy roles, grants, and comments.
+
+### Changed
+
+- Migration execution now honors context cancellation for compatibility SQL and
+  every migration statement.
+- CLI diagnostics use stderr so JSON output on stdout remains machine-readable.
+- Release automation now publishes only native GitHub archives and checksums;
+  obsolete Homebrew and container-registry publication paths were removed.
+- Project documentation now describes the engine as a standalone OSS component
+  and documents CapyDB-managed validation.
+
+### Removed
+
+- The unused GitHub App/webhook package and its authentication dependencies.
+- The managed subscription feature catalog and `features` CLI command; these
+  described the retired hosted product rather than an OSS engine capability.
+- Archived CapySquash platform manifests, Docker publishing, and self-analysis
+  workflows from the engine repository.
+
+---
+
+## [0.9.7] - 2026-07-07
+
+Correctness overhaul across the safety ladder, validation, output pipeline, and public API.
+
+### Changed
+
+- **Safety ladder rebuilt**: safety levels now map to a single, consistent rule
+  set; `ParseSafetyLevel` is exposed on the public engine API and rules
+  configuration is available on `engine.Config`.
+- **Validation outcome semantics**: validation results now distinguish
+  infrastructure failures from genuine schema differences instead of collapsing
+  both into a generic failure.
+- **Schema comparison** is performed via catalog-signature queries
+  (`SchemaComparator`), not `pg_dump` text diffing; `SCHEMA_DIFF` mode is a real
+  implementation rather than a placeholder.
+- **Dry-run purity**: `--dry-run` no longer writes any files or mutates state.
+- **Staged atomic writes**: output files are written to a staging location and
+  moved into place atomically, so a failed run cannot leave partial output.
+- **Streaming guards**: streaming mode enforces memory-limit and batch-size
+  invariants instead of silently degrading.
+- **Config precedence** fixed: explicit `--config` > project config > embedded
+  defaults, applied uniformly across CLI and library entry points.
+- **Plugin detection delegates to the real plugins**
+  (`pkg/plugins.DetectPlugins`): migrations are parsed with the engine parser
+  and each built-in plugin's own `Detect` runs, replacing a divergent
+  substring-matching reimplementation that missed `auth.uid()` (Supabase) and
+  Clerk JWT v2 patterns.
+- **Plugin compatibility is computed, not hardcoded**
+  (`pkg/plugins.CheckCompatibility`): results come from the registry's
+  priority-based conflict resolution (Clerk 95 excludes Supabase 90;
+  Prisma/Drizzle mutually exclusive) via a new exported
+  `internal/plugins.ResolveConflicts`.
+- **Built-in plugins are registered by default** in library entry points;
+  `plugins.RegisterDefault()` remains for explicit initialization.
+- **go-github upgraded v57 → v88**, matching the version pulled by
+  `ghinstallation` v2.19.0 so binaries ship a single copy of the library.
+  (v89 exists but would reintroduce a duplicate until ghinstallation bumps.)
+- CI validation workflow now runs against `postgres:18`.
+- `cmd/pgsquash` consumes `pkg/errors` (public API) instead of
+  `internal/errors`; critical errors still exit with code 2.
+
+### Removed
+
+- Dead public surface in `pkg/github`: the personal-access-token `Client`,
+  `OAuthHandler`, `AppAuthHandler`/`InstallationConfig`, and the entire
+  `TokenStorage` family (zero consumers). The GitHub App / installation /
+  check-run path is unchanged.
+- `WebhookHandler` no longer embeds an analysis engine or PAT client; it is a
+  signature-verifying receiver (`NewWebhookHandler(secret)`). Webhook event
+  processing lives in capysquash-api.
+- Exported example functions from `pkg/validation` (runnable examples live in
+  `examples/`).
+- Hardcoded plugin metadata tables in `pkg/plugins` (descriptions, versions,
+  pattern strings); plugin info now derives from the plugin instances.
+- The AI analysis subsystem (`internal/ai`) and its configuration surface.
+
+### Fixed
+
+- `pkg/validation` violation-category constants now alias
+  `internal/validation` instead of shadowing them with duplicate literals.
+- Documentation: lowercase module path (`github.com/capysquash/...`) across all
+  docs, corrected TUI API references (`Launch`/`LaunchWithView`/`NewModel`),
+  corrected GitHub client method names, and architecture docs updated to match
+  the actual `pkg`/`internal` contract.
 
 ---
 
@@ -33,164 +120,216 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Terminal User Interface
 
 - **Full-featured TUI built with Bubble Tea** - Beautiful, interactive terminal interface for migration management
-  - **Dashboard View**: Migration statistics, detected plugins, configuration status
-  - **Analysis View**: Tabbed interface showing overview, lifecycle patterns, dependencies, and issues
-  - **Configuration Wizard**: Interactive field editing for safety levels, rules, and plugin settings
-  - **Dependency Graph**: Object dependency visualization with forward/reverse modes
-  - **Progress View**: Real-time squashing progress with statistics and completion summary
-  - **Help System**: Comprehensive keyboard shortcuts and usage information
+
+- **Dashboard View**: Migration statistics, detected plugins, configuration status
+
+- **Analysis View**: Tabbed interface showing overview, lifecycle patterns, dependencies, and issues
+
+- **Configuration Wizard**: Interactive field editing for safety levels, rules, and plugin settings
+
+- **Dependency Graph**: Object dependency visualization with forward/reverse modes
+
+- **Progress View**: Real-time squashing progress with statistics and completion summary
+
+- **Help System**: Comprehensive keyboard shortcuts and usage information
 
 - **Multiple access methods** for flexibility:
-  - `pgsquash tui [dir]` - Launch TUI dashboard
-  - `pgsquash analyze [files] --tui` - Launch in analysis view
-  - `pgsquash squash [files] --tui` - Launch in squashing view
-  - `pgsquash tui analyze [dir]` - Direct to analysis
-  - `pgsquash tui config` - Direct to configuration wizard
-  - `pgsquash tui deps [dir]` - Direct to dependency graph
+
+- `pgsquash tui [dir]` - Launch TUI dashboard
+
+- `pgsquash analyze [files] --tui` - Launch in analysis view
+
+- `pgsquash squash [files] --tui` - Launch in squashing view
+
+- `pgsquash tui analyze [dir]` - Direct to analysis
+
+- `pgsquash tui config` - Direct to configuration wizard
+
+- `pgsquash tui deps [dir]` - Direct to dependency graph
 
 - **Full keyboard navigation**:
-  - Global: `q/Ctrl+C` (quit), `ESC` (dashboard), `?` (help)
-  - Navigation: Arrow keys or `j/k/h/l` (vim-style)
-  - Actions: `Enter/Space` (select), `r` (refresh), `s` (save)
-  - Context-sensitive help in each view
+
+- Global: `q/Ctrl+C` (quit), `ESC` (dashboard), `?` (help)
+
+- Navigation: Arrow keys or `j/k/h/l` (vim-style)
+
+- Actions: `Enter/Space` (select), `r` (refresh), `s` (save)
+
+- Context-sensitive help in each view
 
 - **Modern styling with lipgloss**:
-  - Color-coded status (success/warning/error)
-  - Responsive layouts
-  - Progress bars and statistics
-  - Bordered containers with visual hierarchy
+
+- Color-coded status (success/warning/error)
+
+- Responsive layouts
+
+- Progress bars and statistics
+
+- Bordered containers with visual hierarchy
 
 ### Changed - Major Infrastructure Refactor (2025-10-18)
 
 #### Docker Infrastructure Cleanup
 
 - **Simplified Docker Compose Structure** - Reduced from bloated 11-service setup to clean modular architecture
-  - **Core services** reduced from 11 to 2 (pgsquash + postgres-primary)
-  - **Removed 7 non-integrated services**: Redis, MinIO, Grafana, Prometheus, Traefik (moved pgAdmin & Filebrowser to tools)
-  - **Created modular compose files**:
-    - `docker-compose.yml` - 2 core services (\~500MB RAM)
-    - `docker-compose.testing.yml` - PostgreSQL 17, 15, 13 for multi-version testing (+1GB RAM)
-    - `docker-compose.tools.yml` - pgAdmin + Filebrowser for development (+300MB RAM)
-  - **Performance improvements**: 75% faster startup (15s vs 60s), 75% less RAM usage
-  - **Better organization**: Each service now has clear purpose and integration status
+- **Core services** reduced from 11 to 2 (pgsquash + postgres-primary)
+- **Removed 7 non-integrated services**: Redis, MinIO, Grafana, Prometheus, Traefik (moved pgAdmin & Filebrowser to tools)
+- **Created modular compose files**:
+- `docker-compose.yml` - 2 core services (\~500MB RAM)
+- `docker-compose.testing.yml` - PostgreSQL 17, 15, 13 for multi-version testing (+1GB RAM)
+- `docker-compose.tools.yml` - pgAdmin + Filebrowser for development (+300MB RAM)
+- **Performance improvements**: 75% faster startup (15s vs 60s), 75% less RAM usage
+- **Better organization**: Each service now has clear purpose and integration status
 
 #### Documentation Overhaul
 
 - **Rewrote `docker/README.md`** (516 lines) - Complete rewrite reflecting new simplified structure
-  - Removed references to non-existent `docker/web-app/` directory (clarified separate repository)
-  - Added comprehensive tables showing all compose files and services
-  - Updated resource estimates and usage patterns
-  - Added migration guide references
+
+- Removed references to non-existent `docker/web-app/` directory (clarified separate repository)
+
+- Added comprehensive tables showing all compose files and services
+
+- Updated resource estimates and usage patterns
+
+- Added migration guide references
 
 - **Rewrote `docker/dev-environment/README.md`** (115 lines) - Simplified to redirect to root compose files
-  - Removed outdated 11-service documentation
-  - Clear usage instructions for new modular structure
-  - Links to comprehensive documentation
+
+- Removed outdated 11-service documentation
+
+- Clear usage instructions for new modular structure
+
+- Links to comprehensive documentation
 
 - **Archived 4 outdated Docker docs** to `archive/docker-old-docs/`:
-  - `DOCKER_INFRASTRUCTURE_AUDIT.md` (629 lines) - Referenced old 11-service setup
-  - `DOCKER_DEPLOYMENT_GUIDE.md` (1,021 lines) - Outdated deployment patterns
-  - `DOCKER_QUICK_REFERENCE.md` (492 lines) - Based on old structure
-  - `DOCKER_BEST_PRACTICES.md` (867 lines) - Referenced removed services
+
+- `DOCKER_INFRASTRUCTURE_AUDIT.md` (629 lines) - Referenced old 11-service setup
+
+- `DOCKER_DEPLOYMENT_GUIDE.md` (1,021 lines) - Outdated deployment patterns
+
+- `DOCKER_QUICK_REFERENCE.md` (492 lines) - Based on old structure
+
+- `DOCKER_BEST_PRACTICES.md` (867 lines) - Referenced removed services
 
 - **Created comprehensive audit documentation**:
-  - `DOCKER_INFRASTRUCTURE_CHANGES.md` - Complete migration guide (421 lines)
-  - `DOCKER_DEPLOYMENT_ANALYSIS.md` - Strategic analysis of deployment needs
-  - `DOCKER_AUDIT_EXECUTIVE_SUMMARY.md` - Executive summary of findings
-  - `DOCKER_DOCUMENTATION_AUDIT_REPORT.md` - Line-by-line documentation audit
-  - `DOCKER_SUBDIRECTORY_AUDIT_ACTION_PLAN.md` - Detailed action plan with code examples
-  - `DOCKER_CLEANUP_SUMMARY.md` - Summary of all cleanup operations
+
+- `DOCKER_INFRASTRUCTURE_CHANGES.md` - Complete migration guide (421 lines)
+
+- `DOCKER_DEPLOYMENT_ANALYSIS.md` - Strategic analysis of deployment needs
+
+- `DOCKER_AUDIT_EXECUTIVE_SUMMARY.md` - Executive summary of findings
+
+- `DOCKER_DOCUMENTATION_AUDIT_REPORT.md` - Line-by-line documentation audit
+
+- `DOCKER_SUBDIRECTORY_AUDIT_ACTION_PLAN.md` - Detailed action plan with code examples
+
+- `DOCKER_CLEANUP_SUMMARY.md` - Summary of all cleanup operations
 
 #### Error Handling Consolidation (Completed)
 
 - **Completed monolithic tracker refactor** - Finished what was "In Progress"
-  - Migrated 67 of 101 files to centralized `internal/errors/` package
-  - Removed 8 deprecated error files from old locations
-  - Deleted 3 backup files polluting source tree
-  - Removed 1 empty directory (`internal/tracking/lifecycle/`)
-  - Zero broken references after refactor
-  - Health score: 87/100 (Production Ready)
+
+- Migrated 67 of 101 files to centralized `internal/errors/` package
+
+- Removed 8 deprecated error files from old locations
+
+- Deleted 3 backup files polluting source tree
+
+- Removed 1 empty directory (`internal/tracking/lifecycle/`)
+
+- Zero broken references after refactor
+
+- Health score: 87/100 (Production Ready)
 
 - **Unified error taxonomy** across entire codebase
-  - Extended `internal/errors/errors.go` with 7 additional categories from WarningManager
-  - Refactored `internal/utils/warning_manager.go` to use `errors.StructuredError`
-  - Single source of truth for severity levels (Info/Warning/Error/Critical)
-  - Maintained backward compatibility via type aliases
+
+- Extended `internal/errors/errors.go` with 7 additional categories from WarningManager
+
+- Refactored `internal/utils/warning_manager.go` to use `errors.StructuredError`
+
+- Single source of truth for severity levels (Info/Warning/Error/Critical)
+
+- Maintained backward compatibility via type aliases
 
 #### Configuration & Testing Improvements
 
 - **Updated configuration documentation**:
-  - Added missing plugins section to `docs/configuration.md`
-  - Added validation configuration details
-  - Added AI configuration examples
-  - Documented all third-party integration options
+- Added missing plugins section to `docs/configuration.md`
+- Added validation configuration details
+- Added AI configuration examples
+- Documented all third-party integration options
 
 ### Fixed - Critical Bugs (2025-10-18)
 
 #### UUID Extension Detection Bug
 
-- **Fixed SCHEMA\_DIFF validation incorrectly requiring uuid-ossp extension**
-  - UUID datatype is built-in PostgreSQL since version 8.3 (no extension needed)
-  - Changed extension detection to only detect uuid-ossp when UUID _generation functions_ are used
-  - Updated `internal/validation/validator.go:1168-1247` to check for specific functions:
-    - `uuid_generate_v1()`, `uuid_generate_v1mc()`
-    - `uuid_generate_v3()`, `uuid_generate_v4()`, `uuid_generate_v5()`
-  - Removed incorrect `"uuid": "uuid-ossp"` alias mapping
-  - All validation modes (TWO\_CONTAINERS, TWO\_DATABASES, SCHEMA\_DIFF) now correctly identify extension requirements
+- **Fixed SCHEMA_DIFF validation incorrectly requiring uuid-ossp extension**
+- UUID datatype is built-in PostgreSQL since version 8.3 (no extension needed)
+- Changed extension detection to only detect uuid-ossp when UUID _generation functions_ are used
+- Updated `internal/validation/validator.go:1168-1247` to check for specific functions:
+- `uuid_generate_v1()`, `uuid_generate_v1mc()`
+- `uuid_generate_v3()`, `uuid_generate_v4()`, `uuid_generate_v5()`
+- Removed incorrect `"uuid": "uuid-ossp"` alias mapping
+- All validation modes (TWO_CONTAINERS, TWO_DATABASES, SCHEMA_DIFF) now correctly identify extension requirements
 
 #### Test Script Fixes
 
 - **Fixed Test 12.3.1 (Full Migration Workflow)**
-  - Removed invalid `--backup` and `--rollback` flags from `safe` command
-  - These features are built into the `safe` command workflow, not separate flags
-  - Test now passes successfully
+- Removed invalid `--backup` and `--rollback` flags from `safe` command
+- These features are built into the `safe` command workflow, not separate flags
+- Test now passes successfully
 
 ### Added - Clarifications (2025-10-18)
 
 #### Documentation Improvements
 
 - **Added UUID clarification to `docker/init-scripts/init-db.sql`**
-  - Comprehensive comment explaining UUID datatype vs uuid-ossp extension
-  - Clear guidance on when uuid-ossp extension is actually needed
-  - Educational content for developers
+
+- Comprehensive comment explaining UUID datatype vs uuid-ossp extension
+
+- Clear guidance on when uuid-ossp extension is actually needed
+
+- Educational content for developers
 
 - **Added docker-compose.testing.yml reference to `multi-version-test.sh`**
-  - Noted that users can also use modular testing compose for manual tests
-  - Clarified that script provides automated testing with more versions
+
+- Noted that users can also use modular testing compose for manual tests
+
+- Clarified that script provides automated testing with more versions
 
 #### API Server Documentation
 
 - **Created `docker/api-server/README.md`** (321 lines)
-  - Complete API endpoint documentation
-  - GitHub webhook setup guide
-  - OAuth flow explanation
-  - Production deployment examples
-  - Security best practices
-  - Environment variable reference
+- Complete API endpoint documentation
+- GitHub webhook setup guide
+- OAuth flow explanation
+- Production deployment examples
+- Security best practices
+- Environment variable reference
 
 ### Removed - Cleanup (2025-10-18)
 
 #### Duplicate Files
 
 - **Removed `docker/validation/init-scripts/`** (entire directory)
-  - Complete byte-for-byte duplicate of `docker/init-scripts/`
-  - Canonical location (`docker/init-scripts/`) maintained
+- Complete byte-for-byte duplicate of `docker/init-scripts/`
+- Canonical location (`docker/init-scripts/`) maintained
 
 #### Redundant Services
 
 - **Removed Redis from `docker/dev-environment/full-stack.yml`**
-  - Zero code integration confirmed (grep search across codebase)
-  - Removed service definition (21 lines)
-  - Removed redis-data volume
-  - Updated usage examples
+- Zero code integration confirmed (grep search across codebase)
+- Removed service definition (21 lines)
+- Removed redis-data volume
+- Updated usage examples
 
 ### Changed - Refactoring (2025-10-16)
 
 - **Internal Architecture**: Unified error taxonomy system across codebase
-  - Extended `internal/errors/errors.go` with 7 additional categories from WarningManager
-  - Refactored `internal/utils/warning_manager.go` to use `errors.StructuredError`
-  - Maintained backward compatibility via type aliases and deprecated markers
-  - Single source of truth for severity (Info/Warning/Error/Critical) and categories
+- Extended `internal/errors/errors.go` with 7 additional categories from WarningManager
+- Refactored `internal/utils/warning_manager.go` to use `errors.StructuredError`
+- Maintained backward compatibility via type aliases and deprecated markers
+- Single source of truth for severity (Info/Warning/Error/Critical) and categories
 
 ### Added - Infrastructure (2025-10-16)
 
@@ -212,7 +351,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 10. `5ccaf77` - Fix critical production-blocking bugs in AI workflows and consolidation (Oct 17, 12:18)
 11. `87e7980` - Add CAPYSQUASH/GitHub integration and refactor docs (Oct 20, 09:24)
 12. `4c7c3be` - Update .gitignore (Oct 20, 09:24)
-13. `805a72f` - Merge branch 'refactor' (Oct 20, 09:25)
+13. `805a72f` - Merge branch ‘refactor’ (Oct 20, 09:25)
 14. `93d26b8` - Update main.go (Oct 20, 09:26)
 15. `a9e8afa` - Update .gitignore and add symlink for api-server (Oct 20, 09:29)
 16. `b8d2de8` - Enable GitHub App multi-repo support and Azure OpenAI default (Oct 20, 10:24)
@@ -252,9 +391,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Validation System
 
 - Three validation modes:
-  - `TWO_CONTAINERS` - Most accurate (separate containers)
-  - `TWO_DATABASES` - Best balance (shared container)
-  - `SCHEMA_DIFF` - Fastest (SQL diff comparison)
+- `TWO_CONTAINERS` - Most accurate (separate containers)
+- `TWO_DATABASES` - Best balance (shared container)
+- `SCHEMA_DIFF` - Fastest (SQL diff comparison)
 - Automatic PostgreSQL extension detection and installation
 - Docker-based schema validation with isolation guarantees
 
@@ -297,14 +436,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fast` command - Development workflow (balanced optimization, quick validation)
 - `analyze-deep` command - Deep analysis without modifications
 
-#### CLI Commands
+#### CLI Commands (historical snapshot for this release section)
 
 - `analyze` - Analyze migrations without modifications
 - `squash` - Consolidate migrations with configurable safety
 - `validate` - Validate original vs squashed schemas
 - `init-config` - Generate default configuration
-- `ai-test` - Test AI provider connectivity
-- `ai-demo` - Demonstrate AI capabilities
+- `ai-test` - Historical preview command (not part of current OSS runtime command surface)
+- `ai-demo` - Historical preview command (not part of current OSS runtime command surface)
 - `health` - Health check endpoint
 - `version` - Display version information
 
@@ -332,7 +471,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Module renamed from initial structure to `github.com/CAPYSQUASH/pgsquash-engine`
+- Module renamed from initial structure to `github.com/capysquash/pgsquash-engine`
 - Project reorganized following standard Go project layout
 - Documentation restructured (public docs in `docs/`, internal in `docs/internal/`)
 
@@ -346,15 +485,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Technical Details
 
-- **Language**: Go 1.25.3+
+- **Language**: go 1.26.5+
 - **PostgreSQL Support**: Versions 12-17
 - **Key Dependencies**:
-  - `github.com/pganalyze/pg_query_go/v6` - PostgreSQL parser
-  - `github.com/spf13/cobra` - CLI framework
-  - `github.com/anthropics/anthropic-sdk-go` - Claude API
-  - `github.com/docker/docker` - Container validation
-  - `github.com/fatih/color` - Terminal output
-  - `github.com/lib/pq` - PostgreSQL driver
+- `github.com/pganalyze/pg_query_go/v6` - PostgreSQL parser
+- `github.com/spf13/cobra` - CLI framework
+- `github.com/anthropics/anthropic-sdk-go` - Claude API
+- `github.com/docker/docker` - Container validation
+- `github.com/fatih/color` - Terminal output
+- `github.com/lib/pq` - PostgreSQL driver
 
 ## Roadmap
 
@@ -380,10 +519,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Post-1.0.0 Features
 
 - **Smart Split Feature** (v1.3.0) - Split squashed migrations into multiple organized files
-  - Category-based, dependency-level, and size-based splitting strategies
-  - Enables better code review, parallel migrations, and incremental deployment
-  - CLI: `pgsquash squash --split category` or `--split hybrid`
+- Category-based, dependency-level, and size-based splitting strategies
+- Enables better code review, parallel migrations, and incremental deployment
+- CLI: `pgsquash squash --split category` or `--split hybrid`
 
-[unreleased]: https://github.com/CAPYSQUASH/pgsquash-engine/compare/v0.8.5-beta...HEAD
-[0.8.5-beta]: https://github.com/CAPYSQUASH/pgsquash-engine/compare/v0.8.2-beta...v0.8.5-beta
-[0.8.2-beta]: https://github.com/CAPYSQUASH/pgsquash-engine/releases/tag/v0.8.2-beta
+[Unreleased]: https://github.com/capysquash/pgsquash-engine/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/capysquash/pgsquash-engine/compare/v0.8.5-beta...v0.9.7
+[0.8.5-beta]: https://github.com/capysquash/pgsquash-engine/compare/v0.8.2-beta...v0.8.5-beta
+[0.8.2-beta]: https://github.com/capysquash/pgsquash-engine/releases/tag/v0.8.2-beta

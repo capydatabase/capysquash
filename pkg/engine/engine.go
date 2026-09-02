@@ -2,13 +2,15 @@
 package engine
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"strings"
 	"time"
 
-	internal_squasher "github.com/CAPYSQUASH/pgsquash-engine/internal/squasher"
-	internal_transformation "github.com/CAPYSQUASH/pgsquash-engine/internal/transformation"
-	internal_utils "github.com/CAPYSQUASH/pgsquash-engine/internal/utils"
+	internal_squasher "github.com/capysquash/pgsquash-engine/internal/squasher"
+	internal_transformation "github.com/capysquash/pgsquash-engine/internal/transformation"
+	internal_utils "github.com/capysquash/pgsquash-engine/internal/utils"
 )
 
 // Engine wraps the internal squashing engine and provides access to
@@ -59,6 +61,13 @@ func NewEngine(config *Config) (*Engine, error) {
 		config = DefaultConfig()
 	}
 
+	// Library callers must get the same plugin surface (Supabase, Clerk,
+	// Prisma, Drizzle rules) as the CLI binary. Registration is idempotent,
+	// and a failure to register is an error, never a silent degradation.
+	if err := ensureDefaultPlugins(); err != nil {
+		return nil, err
+	}
+
 	// Setup logger
 	logLevel := internal_utils.LogLevelInfo
 	if config.Verbose {
@@ -67,12 +76,28 @@ func NewEngine(config *Config) (*Engine, error) {
 	logger := internal_utils.NewLogger(logLevel, nil)
 	internal_utils.SetDefaultLogger(logger)
 
-	// Convert to internal config
-	internalCfg := convertConfig(config)
+	// Convert to internal config (rejects invalid safety levels and formats)
+	internalCfg, err := convertConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// DryRun suppresses every write the engine can perform (pg_dump backups
+	// and rollback plan files). The engine itself never writes squashed output
+	// files - callers receive SQL strings - so disabling these two features
+	// makes a dry run write nothing end to end.
+	enableBackup := config.EnableBackup
+	enableRollback := config.EnableRollback
+	if config.DryRun {
+		enableBackup = false
+		enableRollback = false
+	}
 
 	// Build internal engine config
 	engineConfig := internal_squasher.EngineConfig{
 		Config:              internalCfg,
+		Context:             config.Context,
+		Version:             config.Version,
 		EnableStreaming:     config.EnableStreaming,
 		BatchSize:           config.BatchSize,
 		WorkerCount:         config.WorkerCount,
@@ -81,9 +106,11 @@ func NewEngine(config *Config) (*Engine, error) {
 		ProgressCallback:    config.ProgressCallback,
 
 		// Transformation options
-		EnableBackup:   config.EnableBackup,
-		EnableRollback: config.EnableRollback,
-		RollbackPath:   config.RollbackPath,
+		EnableBackup:        enableBackup,
+		EnableRollback:      enableRollback,
+		RollbackPath:        config.RollbackPath,
+		BackupPath:          config.BackupPath,
+		BackupRetentionDays: config.BackupRetentionDays,
 
 		// Cycle detection
 		EnableCycleDetection: config.EnableCycleDetection,
@@ -92,7 +119,7 @@ func NewEngine(config *Config) (*Engine, error) {
 	}
 
 	// Set up transformation config if enabled
-	if config.EnableBackup {
+	if enableBackup {
 		engineConfig.BackupConfig = &internal_transformation.BackupConfig{
 			Type:          internal_transformation.SchemaAndData,
 			Format:        internal_transformation.SQLFormat,
@@ -106,7 +133,10 @@ func NewEngine(config *Config) (*Engine, error) {
 	}
 
 	// Create internal engine
-	internalEngine := internal_squasher.NewEngine(engineConfig)
+	internalEngine, err := internal_squasher.NewEngine(engineConfig)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Engine{
 		internal: internalEngine,
@@ -123,8 +153,12 @@ func NewEngine(config *Config) (*Engine, error) {
 //
 //	result, err := eng.SquashDirectory("./migrations")
 func (e *Engine) SquashDirectory(directory string) (*SquashResult, error) {
+	ctx := e.config.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Load migrations
-	migrations, err := loadMigrationsFromDir(directory)
+	migrations, err := loadMigrationsFromDirContext(ctx, directory)
 	if err != nil {
 		return nil, err
 	}
@@ -161,14 +195,13 @@ func (e *Engine) SquashFiles(migrations map[int]string) (*SquashResult, error) {
 	for id, value := range migrations {
 		// Check if this looks like a file path
 		if strings.HasSuffix(value, ".sql") && !strings.Contains(value, "\n") && !strings.Contains(value, ";") {
-			// Likely a file path, try to read it
+			// Likely a file path; an unreadable path is an error, never
+			// silently treated as SQL content.
 			content, err := os.ReadFile(value)
 			if err != nil {
-				// If reading fails, treat as SQL content anyway
-				contentMap[id] = value
-			} else {
-				contentMap[id] = string(content)
+				return nil, fmt.Errorf("failed to read migration file %s: %w", value, err)
 			}
+			contentMap[id] = string(content)
 		} else {
 			// Already SQL content
 			contentMap[id] = value
@@ -190,21 +223,21 @@ func (e *Engine) SquashFiles(migrations map[int]string) (*SquashResult, error) {
 	}
 
 	// Standard single-file mode
-	sql, warnings, err := e.internal.Squash(contentMap)
+	internalResult, err := e.internal.Squash(contentMap)
 	if err != nil {
 		return nil, err
 	}
 
 	stats := e.internal.GetStats()
 	result := &SquashResult{
-		SQL:                 sql,
-		BaselineSQL:         sql,
-		DataOperationsSQL:   "",
-		Warnings:            warnings,
-		FilesProcessed:      len(migrations),
-		ObjectsConsolidated: int(stats.ConsolidationsApplied),
-		ProcessingTime:      formatDuration(time.Since(startTime)),
-		Extensions:          []string{},
+		BaselineSQL:          internalResult.BaselineSQL,
+		DataOperationsSQL:    "",
+		Warnings:             internalResult.Warnings,
+		FilesProcessed:       len(migrations),
+		ObjectsConsolidated:  int(stats.ConsolidationsApplied),
+		ProcessingTime:       formatDuration(time.Since(startTime)),
+		Extensions:           internalResult.Extensions,
+		AuthCompatibilitySQL: internalResult.AuthCompatibilitySQL,
 	}
 
 	e.result = result
@@ -260,8 +293,7 @@ func (e *Engine) GetMemoryStats() MemoryStats {
 		LimitMB:        maxMB,
 		UsagePercent:   usagePercent,
 	}
-}// GetResult returns the most recent squashing result.
-//
+} // GetResult returns the most recent squashing result.
 // Returns nil if no squashing operation has been performed yet.
 func (e *Engine) GetResult() *SquashResult {
 	return e.result
@@ -328,6 +360,8 @@ func (e *Engine) GetWarnings() []string {
 // Close releases resources used by the engine.
 //
 // Always call this when done with the engine, preferably using defer.
+// A failure to release resources (e.g. closing the production database
+// connection) is returned, never swallowed.
 //
 // Example:
 //
@@ -338,7 +372,7 @@ func (e *Engine) GetWarnings() []string {
 //	defer eng.Close()
 func (e *Engine) Close() error {
 	if e.internal != nil {
-		e.internal.Close()
+		return e.internal.Close()
 	}
 	return nil
 }
@@ -357,70 +391,14 @@ func convertSquashResult(internal *internal_squasher.SquashResult, filesProcesse
 	}
 
 	return &SquashResult{
-		SQL:                 internal.BaselineSQL,
-		BaselineSQL:         internal.BaselineSQL,
-		DataOperationsSQL:   internal.DataOperationsSQL,
-		Warnings:            internal.Warnings,
-		FilesProcessed:      filesProcessed,
-		ObjectsConsolidated: int(stats.ConsolidationsApplied),
-		ProcessingTime:      formatDuration(stats.ProcessingTime),
-		Extensions:          internal.Extensions,
-		ProvenanceInfo:      provenanceInfo,
-		DetailedMetrics:     convertDetailedMetrics(internal.DetailedMetrics),
-		RecommendedActions:  convertRecommendedActions(internal.RecommendedActions),
+		BaselineSQL:          internal.BaselineSQL,
+		DataOperationsSQL:    internal.DataOperationsSQL,
+		Warnings:             internal.Warnings,
+		FilesProcessed:       filesProcessed,
+		ObjectsConsolidated:  int(stats.ConsolidationsApplied),
+		ProcessingTime:       formatDuration(stats.ProcessingTime),
+		Extensions:           internal.Extensions,
+		AuthCompatibilitySQL: internal.AuthCompatibilitySQL,
+		ProvenanceInfo:       provenanceInfo,
 	}
-}
-
-// Helper function to convert internal DetailedMetrics to public DetailedMetrics
-func convertDetailedMetrics(internal *internal_squasher.DetailedMetrics) *DetailedMetrics {
-	if internal == nil {
-		return nil
-	}
-
-	redundancies := make([]RedundancyDetail, len(internal.RedundanciesFound))
-	for i, r := range internal.RedundanciesFound {
-		redundancies[i] = RedundancyDetail{
-			Type:        r.Type,
-			ObjectName:  r.ObjectName,
-			ObjectType:  r.ObjectType,
-			Severity:    r.Severity,
-			Description: r.Description,
-			FileNumbers: r.FileNumbers,
-			Savings:     r.Savings,
-		}
-	}
-
-	return &DetailedMetrics{
-		TotalMigrations:             internal.TotalMigrations,
-		OptimizedMigrations:         internal.OptimizedMigrations,
-		ReductionPercentage:         internal.ReductionPercentage,
-		Operations: OperationBreakdown{
-			Creates:      internal.Operations.Creates,
-			Alters:       internal.Operations.Alters,
-			Drops:        internal.Operations.Drops,
-			Inserts:      internal.Operations.Inserts,
-			Updates:      internal.Operations.Updates,
-			Deletes:      internal.Operations.Deletes,
-			Consolidated: internal.Operations.Consolidated,
-		},
-		EstimatedTimeSavingsSeconds: internal.EstimatedTimeSavingsSeconds,
-		FileSizeReductionBytes:      internal.FileSizeReductionBytes,
-		FileSizeReductionPercent:    internal.FileSizeReductionPercent,
-		RedundanciesFound:           redundancies,
-	}
-}
-
-// Helper function to convert internal RecommendedAction to public RecommendedAction
-func convertRecommendedActions(internal []internal_squasher.RecommendedAction) []RecommendedAction {
-	actions := make([]RecommendedAction, len(internal))
-	for i, a := range internal {
-		actions[i] = RecommendedAction{
-			Action:      a.Action,
-			Reason:      a.Reason,
-			Priority:    a.Priority,
-			AutomateURL: a.AutomateURL,
-			RiskLevel:   a.RiskLevel,
-		}
-	}
-	return actions
 }
