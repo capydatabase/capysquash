@@ -1,8 +1,8 @@
 package views
 
 import (
-	"github.com/capysquash/pgsquash-engine/pkg/tui/styles"
-	"github.com/capysquash/pgsquash-engine/pkg/tui/viewtypes"
+	"github.com/capy-base/pgsquash-engine/pkg/tui/styles"
+	"github.com/capy-base/pgsquash-engine/pkg/tui/viewtypes"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -163,7 +163,7 @@ func (h *HelpView) renderAbout() string {
 		styles.MutedStyle.Render("    ► Docker-based schema validation"),
 		"",
 		styles.TextStyle.Render("  For more information:"),
-		styles.MutedStyle.Render("    ► GitHub: github.com/capysquash/pgsquash-engine"),
+		styles.MutedStyle.Render("    ► GitHub: github.com/capy-base/pgsquash-engine"),
 		styles.MutedStyle.Render("    ► Docs: See docs/ directory"),
 	}
 

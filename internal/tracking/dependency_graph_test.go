@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capy-base/pgsquash-engine/internal/types"
 )
 
 func TestDependencyGraphTopologicalSortDeterministic(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/utils"
+	"github.com/capy-base/pgsquash-engine/internal/utils"
 )
 
 // FixCallback is called when a fix is applied, allowing tracking of transformations.

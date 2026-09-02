@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
 )
 
 // SquashMap represents the complete mapping of a squash operation

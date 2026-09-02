@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
-	catalogsqlc "github.com/capysquash/pgsquash-engine/internal/metadata/sqlc"
-	schemamodel "github.com/capysquash/pgsquash-engine/internal/schema"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
+	catalogsqlc "github.com/capy-base/pgsquash-engine/internal/metadata/sqlc"
+	schemamodel "github.com/capy-base/pgsquash-engine/internal/schema"
 )
 
 // SchemaComparator compares two live PostgreSQL schemas using catalog signatures.

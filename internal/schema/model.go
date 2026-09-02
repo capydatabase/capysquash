@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/parser"
+	"github.com/capy-base/pgsquash-engine/internal/parser"
 )
 
 // NormalizedModel is a deterministic representation of schema state.

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capysquash/pgsquash-engine/internal/config"
-	engineapi "github.com/capysquash/pgsquash-engine/pkg/engine"
+	"github.com/capy-base/pgsquash-engine/internal/config"
+	engineapi "github.com/capy-base/pgsquash-engine/pkg/engine"
 )
 
 // TestSquashFlagValidationEndToEnd drives the real cobra command tree and

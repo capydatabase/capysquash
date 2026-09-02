@@ -3,9 +3,9 @@ package postprocessing
 import (
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/config"
-	"github.com/capysquash/pgsquash-engine/internal/postprocessing/ast"
-	"github.com/capysquash/pgsquash-engine/internal/utils"
+	"github.com/capy-base/pgsquash-engine/internal/config"
+	"github.com/capy-base/pgsquash-engine/internal/postprocessing/ast"
+	"github.com/capy-base/pgsquash-engine/internal/utils"
 )
 
 // ProcessorAST orchestrates AST-based post-processing operations.

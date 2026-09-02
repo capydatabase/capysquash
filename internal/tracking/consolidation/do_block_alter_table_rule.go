@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
-	"github.com/capysquash/pgsquash-engine/internal/parser"
-	"github.com/capysquash/pgsquash-engine/internal/tracking"
-	"github.com/capysquash/pgsquash-engine/internal/types"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
+	"github.com/capy-base/pgsquash-engine/internal/parser"
+	"github.com/capy-base/pgsquash-engine/internal/tracking"
+	"github.com/capy-base/pgsquash-engine/internal/types"
 )
 
 // DOBlockAlterTableRule extracts ALTER TABLE statements from DO blocks

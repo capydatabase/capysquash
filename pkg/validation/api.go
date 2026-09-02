@@ -64,8 +64,8 @@ import (
 	"maps"
 	"time"
 
-	"github.com/capysquash/pgsquash-engine/internal/config"
-	internal_validation "github.com/capysquash/pgsquash-engine/internal/validation"
+	"github.com/capy-base/pgsquash-engine/internal/config"
+	internal_validation "github.com/capy-base/pgsquash-engine/internal/validation"
 )
 
 // Re-export types from internal package

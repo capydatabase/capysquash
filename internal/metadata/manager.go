@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/capysquash/pgsquash-engine/internal/errors"
-	catalogsqlc "github.com/capysquash/pgsquash-engine/internal/metadata/sqlc"
-	"github.com/capysquash/pgsquash-engine/internal/parser"
-	"github.com/capysquash/pgsquash-engine/internal/utils"
+	"github.com/capy-base/pgsquash-engine/internal/errors"
+	catalogsqlc "github.com/capy-base/pgsquash-engine/internal/metadata/sqlc"
+	"github.com/capy-base/pgsquash-engine/internal/parser"
+	"github.com/capy-base/pgsquash-engine/internal/utils"
 )
 
 // MetadataManager provides comprehensive PostgreSQL metadata management

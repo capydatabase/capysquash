@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	pkgplugins "github.com/capysquash/pgsquash-engine/pkg/plugins"
+	pkgplugins "github.com/capy-base/pgsquash-engine/pkg/plugins"
 )
 
 // TestMain registers the default plugin set once for the whole package.

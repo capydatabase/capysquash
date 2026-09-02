@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	internalparser "github.com/capysquash/pgsquash-engine/internal/parser"
-	internaltypes "github.com/capysquash/pgsquash-engine/internal/types"
-	harnesscontract "github.com/capysquash/pgsquash-engine/pkg/harness"
-	publicvalidation "github.com/capysquash/pgsquash-engine/pkg/validation"
+	internalparser "github.com/capy-base/pgsquash-engine/internal/parser"
+	internaltypes "github.com/capy-base/pgsquash-engine/internal/types"
+	harnesscontract "github.com/capy-base/pgsquash-engine/pkg/harness"
+	publicvalidation "github.com/capy-base/pgsquash-engine/pkg/validation"
 )
 
 const DeterministicHarnessArtifactV1Version = "1.0.0"

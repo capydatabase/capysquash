@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/capysquash/pgsquash-engine/internal/config"
-	"github.com/capysquash/pgsquash-engine/pkg/tui/styles"
-	"github.com/capysquash/pgsquash-engine/pkg/tui/viewtypes"
+	"github.com/capy-base/pgsquash-engine/internal/config"
+	"github.com/capy-base/pgsquash-engine/pkg/tui/styles"
+	"github.com/capy-base/pgsquash-engine/pkg/tui/viewtypes"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )

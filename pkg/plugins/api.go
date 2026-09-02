@@ -64,7 +64,7 @@
 package plugins
 
 import (
-	internal_plugins "github.com/capysquash/pgsquash-engine/internal/plugins"
+	internal_plugins "github.com/capy-base/pgsquash-engine/internal/plugins"
 )
 
 // RegisterDefault registers all built-in pgsquash plugins with the global
@@ -93,4 +93,4 @@ func RegisterDefault() error {
 // Note: Custom plugin registration is not exposed in the public API.
 // The Plugin interface is complex and considered internal.
 // If you need custom plugin support, please file an issue at:
-// https://github.com/capysquash/pgsquash-engine/issues
+// https://github.com/capy-base/pgsquash-engine/issues

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/capysquash/pgsquash-engine/pkg/engine"
+	"github.com/capy-base/pgsquash-engine/pkg/engine"
 	"github.com/stretchr/testify/assert"
 )
 
