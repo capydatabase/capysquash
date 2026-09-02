@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-02
+
 ### Added
 
 - `pgsquash validate-external` for applying a migration path to a caller-owned
@@ -523,7 +525,8 @@ Correctness overhaul across the safety ladder, validation, output pipeline, and 
 - Enables better code review, parallel migrations, and incremental deployment
 - CLI: `pgsquash squash --split category` or `--split hybrid`
 
-[Unreleased]: https://github.com/capysquash/pgsquash-engine/compare/v0.9.7...HEAD
-[0.9.7]: https://github.com/capysquash/pgsquash-engine/compare/v0.8.5-beta...v0.9.7
-[0.8.5-beta]: https://github.com/capysquash/pgsquash-engine/compare/v0.8.2-beta...v0.8.5-beta
-[0.8.2-beta]: https://github.com/capysquash/pgsquash-engine/releases/tag/v0.8.2-beta
+[Unreleased]: https://github.com/capy-base/pgsquash-engine/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/capy-base/pgsquash-engine/compare/v0.9.7...v0.10.0
+[0.9.7]: https://github.com/capy-base/pgsquash-engine/compare/v0.8.5-beta...v0.9.7
+[0.8.5-beta]: https://github.com/capy-base/pgsquash-engine/compare/v0.8.2-beta...v0.8.5-beta
+[0.8.2-beta]: https://github.com/capy-base/pgsquash-engine/releases/tag/v0.8.2-beta
