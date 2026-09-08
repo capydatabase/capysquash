@@ -66,6 +66,7 @@ config/
 
 # Docker files (not needed inside image)
 Dockerfile*
+compose*.yaml
 docker-compose*.yml
 .dockerignore
 

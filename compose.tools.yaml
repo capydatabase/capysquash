@@ -1,0 +1,67 @@
+# pgsquash — optional development tools (pgAdmin, Filebrowser).
+# Overlay for compose.yaml. Both sit behind the `tools` profile, so they only
+# start when you ask for them.
+#
+#   docker compose -f compose.yaml -f compose.tools.yaml --profile tools up -d
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    pull_policy: weekly
+    profiles: [tools]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    logging: *logging
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@pgsquash.localhost}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-pgsquash_pgadmin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    networks: [pgsquash-net]
+    ports:
+      - target: 80
+        published: "${PGADMIN_PORT:-5050}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { memory: 512M }
+
+  # Browses the whole repository, so it is loopback-only and profile-gated.
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    pull_policy: weekly
+    profiles: [tools]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    logging: *logging
+    environment:
+      FB_DATABASE: /database/filebrowser.db
+      FB_ROOT: /srv
+    volumes:
+      - ./:/srv
+      - filebrowser-data:/database
+    networks: [pgsquash-net]
+    ports:
+      - target: 80
+        published: "${FILEBROWSER_PORT:-8081}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    deploy:
+      resources:
+        limits: { memory: 512M }
+
+volumes:
+  pgadmin-data:
+  filebrowser-data:

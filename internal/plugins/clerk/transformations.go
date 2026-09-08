@@ -3,8 +3,8 @@ package clerk
 import (
 	"context"
 
-	"github.com/capy-base/pgsquash-engine/internal/plugins/auth"
-	"github.com/capy-base/pgsquash-engine/internal/plugins/volatility"
+	"github.com/capydatabase/pgsquash-engine/internal/plugins/auth"
+	"github.com/capydatabase/pgsquash-engine/internal/plugins/volatility"
 )
 
 // InjectCompatibilityLayer returns SQL to mock Clerk authentication for validation

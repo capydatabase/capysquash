@@ -15,6 +15,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The development stack could not start PostgreSQL at all.** `postgres:18`
+  images place the cluster in a major-version subdirectory below a single mount
+  at `/var/lib/postgresql`; the compose files still mounted the data volume at
+  `/var/lib/postgresql/data` (the pre-18 convention), so the entrypoint aborted
+  and the container restart-looped. The primary database and the dev-environment
+  stack now mount at `/var/lib/postgresql`. The 15/16/17 services in
+  `compose.testing.yaml` correctly keep the old path.
+- The `pgsquash` service is a one-shot CLI - it runs a command and exits - but
+  carried `restart: unless-stopped` and a healthcheck, which crash-looped it
+  under `docker compose up`. It is now `restart: "no"` with no healthcheck, and
+  the files document `docker compose run --rm pgsquash <command>` as the way to
+  drive it.
+- Build arguments defaulted to `${BUILD_DATE:-$(date -u ...)}` and
+  `${GIT_COMMIT:-$(git rev-parse ...)}`. Compose does not run subshells, so
+  those command substitutions were baked into the image as literal strings.
+  They are static defaults (`unknown`) now; CI passes real values.
+- `docker/postgres/Dockerfile` referenced `${PG_VERSION}` in its `LABEL`
+  without re-declaring the argument inside the stage, so
+  `org.pgsquash.postgres.version` was always empty.
+
+### Changed
+
+- **Every Dockerfile and Compose file was rebuilt on current Docker conventions
+  (Engine 29 / Compose 5 / BuildKit 0.33).** The main `Dockerfile` is now a
+  proper multi-stage build (`base` → `deps` → `build` → `runtime`) behind a
+  `# syntax=docker/dockerfile:1` frontend - which previously sat below a banner
+  comment and was therefore inert. It uses a read-only bind mount of the source
+  instead of `COPY . .` and BuildKit cache mounts for the module and build
+  caches, and it takes its Go toolchain from `golang:1.27.1-trixie` rather than
+  installing an out-of-date Go tarball into Ubuntu with `wget`. Everything that
+  ships is staged into `/out` by the build stage. CGO stays enabled and the
+  image is deliberately *not* cross-compiled, because `pg_query_go` links
+  `libpg_query`. The runtime user is now a numeric uid/gid (10001).
+- `docker-compose.yml`, `docker-compose.testing.yml` and
+  `docker-compose.tools.yml` are now `compose.yaml`, `compose.testing.yaml` and
+  `compose.tools.yaml` - the canonical filenames, so the core stack needs no
+  `-f` flag. Obsolete `version:` keys, hard-coded `container_name`s and the
+  fixed `172.20.0.0/16` subnet are gone; services gained `no-new-privileges`,
+  `cap_drop: [ALL]` where the workload allows it, rotating `local` log drivers,
+  memory limits, `init: true`, and healthchecks with `start_interval` so a
+  database is marked healthy as soon as it is ready. Published ports are bound
+  to `127.0.0.1` instead of every interface, and pgAdmin and Filebrowser now sit
+  behind a `tools` profile so they do not start by default.
+- The overlays under `docker/` (`dev-environment/full-stack.yml`,
+  `engine/quick-start.yml`, `validation/with-validation.yml`) got the same
+  treatment. Their filenames are unchanged, since they are always invoked with
+  `-f` and are referenced by name from the READMEs.
+
+### Known issues
+
+- `docker/api-server/` (its `Dockerfile` and `docker-compose.yml`) builds
+  `./cmd/api-server`, which no longer exists in this repository. It has been
+  left untouched rather than modernized or deleted - it is dead as it stands.
+
 ## [0.10.0] - 2026-09-02
 
 ### Added

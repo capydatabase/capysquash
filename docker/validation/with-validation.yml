@@ -1,62 +1,57 @@
-version: '3.8'
+# pgsquash — CLI with Docker-based validation.
+# Needs access to /var/run/docker.sock (Docker Desktop running on macOS/Windows;
+# membership of the `docker` group on Linux).
+#
+#   docker compose -f docker/validation/with-validation.yml run --rm pgsquash validate --docker /app/migrations
+#   docker compose -f docker/validation/with-validation.yml run --rm pgsquash workflow --validate
+#   docker compose -f docker/validation/with-validation.yml run --rm pgsquash squash /app/migrations --validate
+#   docker compose -f docker/validation/with-validation.yml run --rm \
+#     -e PGSQUASH_POSTGRES_VERSION=17 pgsquash validate --docker
+#
+# `run`, not `up`: this is a one-shot CLI that exits when its command finishes.
 
-# With Validation - CLI tool with Docker-based validation
-# Requires Docker socket access for validation containers
+name: pgsquash-validation
 
 services:
   pgsquash:
     build:
       context: ../..
       dockerfile: Dockerfile
+      target: runtime
+      provenance: false
+      sbom: false
     image: pgsquash:latest
-    container_name: pgsquash-validator
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    init: true
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "5"
     environment:
-      - PGSQUASH_SAFETY_LEVEL=${PGSQUASH_SAFETY_LEVEL:-standard}
-      - PGSQUASH_LOG_LEVEL=${PGSQUASH_LOG_LEVEL:-debug}
-      - PGSQUASH_DOCKER_ENABLED=true
-      - PGSQUASH_AUTO_VALIDATE=true
-      - DOCKER_HOST=unix:///var/run/docker.sock
+      PGSQUASH_SAFETY_LEVEL: ${PGSQUASH_SAFETY_LEVEL:-standard}
+      PGSQUASH_LOG_LEVEL: ${PGSQUASH_LOG_LEVEL:-debug}
+      PGSQUASH_DOCKER_ENABLED: "true"
+      PGSQUASH_AUTO_VALIDATE: "true"
+      DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ${MIGRATIONS_DIR:-./migrations}:/app/migrations:ro
       - ${OUTPUT_DIR:-./output}:/app/output
       - ${CONFIG_DIR:-./config}:/app/config:ro
-      # Docker socket for validation
+      # Validation spawns throwaway Postgres containers on the host daemon.
+      # That is full control of the daemon - development use only.
       - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - validation-net
     working_dir: /app
-    # Higher limits for validation
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    networks: [validation-net]
     deploy:
       resources:
-        limits:
-          cpus: '2.0'
-          memory: 1G
-        reservations:
-          cpus: '1.0'
-          memory: 512M
+        limits: { cpus: "2", memory: 1G }
+        reservations: { cpus: "1", memory: 512M }
 
 networks:
   validation-net:
     driver: bridge
-    labels:
-      - "pgsquash.network=validation"
-
-# Usage Examples:
-#
-# 1. Validate migrations:
-#    docker-compose -f docker/validation/with-validation.yml run --rm pgsquash validate --docker /app/migrations/
-#
-# 2. Complete workflow with validation:
-#    docker-compose -f docker/validation/with-validation.yml run --rm pgsquash workflow --validate
-#
-# 3. Squash and validate:
-#    docker-compose -f docker/validation/with-validation.yml run --rm pgsquash squash /app/migrations/*.sql --validate
-#
-# 4. Use specific PostgreSQL version for validation:
-#    docker-compose -f docker/validation/with-validation.yml run --rm \
-#      -e PGSQUASH_POSTGRES_VERSION=17 \
-#      pgsquash validate --docker
-#
-# Note: This requires access to /var/run/docker.sock
-# On macOS/Windows, ensure Docker Desktop is running
-# On Linux, user must be in docker group

@@ -1,0 +1,140 @@
+# pgsquash — core development stack.
+#
+#   docker compose run --rm pgsquash squash /app/migrations
+#   docker compose up -d postgres-primary          # just the validation database
+#   docker compose down --volumes
+#
+# The pgsquash service is a one-shot CLI, not a daemon: drive it with
+# `docker compose run`, not `up`.
+#
+# Companion files:
+#   compose.testing.yaml  - PostgreSQL 15/16/17 alongside the primary
+#   compose.tools.yaml    - pgAdmin + Filebrowser
+#   docker compose -f compose.yaml -f compose.testing.yaml up -d
+
+name: pgsquash
+
+# ── reusable fragments ───────────────────────────────────────────────────────
+x-logging: &logging
+  driver: local # rotating by default; json-file is not
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-hardening: &hardening
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+
+x-healthy: &healthy-timing
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+  start_interval: 2s # faster probes inside start_period (Engine >= 25)
+
+x-postgres-env: &postgres-env
+  POSTGRES_USER: pgsquash
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsquash_secure_password}
+  POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+
+# ── services ─────────────────────────────────────────────────────────────────
+services:
+  pgsquash:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        # Static defaults only - Compose does not run subshells, so a
+        # `$(date ...)` default would be passed through as a literal string.
+        BUILD_VERSION: ${BUILD_VERSION:-dev}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      provenance: false
+      sbom: false
+    image: pgsquash:${BUILD_VERSION:-dev}
+    <<: *hardening
+    # One-shot CLI: it runs a command and exits. No restart policy (that would
+    # crash-loop it) and no healthcheck (a process that exits is never healthy).
+    restart: "no"
+    read_only: false # writes to $HOME for git/ssh, and to the mounted /app dirs
+    logging: *logging
+    init: true
+    environment:
+      PGSQUASH_SAFETY_LEVEL: ${PGSQUASH_SAFETY_LEVEL:-standard}
+      PGSQUASH_AUTO_VALIDATE: ${PGSQUASH_AUTO_VALIDATE:-true}
+      PGSQUASH_DOCKER_ENABLED: "true"
+      PGSQUASH_AUTO_SETUP: "true"
+      PGSQUASH_LOG_LEVEL: ${PGSQUASH_LOG_LEVEL:-info}
+      PGSQUASH_LOG_FORMAT: json
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ./migrations:/app/migrations:ro
+      - ./output:/app/output
+      - ./config:/app/config
+      - pgsquash-logs:/app/logs
+      - pgsquash-cache:/app/.cache
+      # Docker-out-of-Docker for the validation features. This hands the
+      # container full control of the host daemon - it is why this stack is
+      # development-only.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Optional: SSH keys for git operations over ssh.
+      - ${SSH_DIR:-~/.ssh}:/home/pgsquash/.ssh:ro
+    networks: [pgsquash-net]
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 2G }
+
+  # PostgreSQL 18 with PostGIS, for validation and testing.
+  postgres-primary:
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+      args:
+        PG_VERSION: "18"
+      provenance: false
+      sbom: false
+    image: pgsquash-postgres:18
+    <<: *hardening
+    cap_drop: [] # initdb needs CHOWN/SETUID/SETGID/FOWNER before dropping privileges
+    restart: unless-stopped
+    logging: *logging
+    stop_grace_period: 30s
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: pgsquash_primary
+    volumes:
+      # PostgreSQL 18+ images want a single mount at /var/lib/postgresql and
+      # place the cluster in a major-version subdirectory below it. Mounting at
+      # /var/lib/postgresql/data (the pre-18 convention) makes the entrypoint
+      # abort. The 15/16/17 services in compose.testing.yaml still use /data.
+      - postgres-primary-data:/var/lib/postgresql
+      - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
+      - ./docker/init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+      - pgsquash-logs:/var/log/postgresql
+    networks: [pgsquash-net]
+    ports:
+      - target: 5432
+        published: "${POSTGRES_PRIMARY_PORT:-5432}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      # $$ escapes Compose interpolation so the container shell expands it.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      <<: *healthy-timing
+    deploy:
+      resources:
+        limits: { memory: 2G }
+
+# ── top-level resources ──────────────────────────────────────────────────────
+volumes:
+  postgres-primary-data:
+  pgsquash-logs:
+  pgsquash-cache:
+
+networks:
+  pgsquash-net:
+    driver: bridge

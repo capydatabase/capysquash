@@ -1,77 +1,81 @@
-# =============================================================================
-# pgsquash-engine Dockerfile
-# ======================================================================
+# syntax=docker/dockerfile:1
+# ═════════════════════════════════════════════════════════════════════════════
+# pgsquash-engine — PostgreSQL migration squasher.
+#
+#   docker build .                  → runtime image (default target)
+#   docker compose up -d            → engine + a Postgres to validate against
+#
+# CGO is mandatory (github.com/pganalyze/pg_query_go links libpg_query), so
+# this image is NOT cross-compiled: no --platform=$BUILDPLATFORM here. Build
+# per-architecture on a native builder, or accept QEMU emulation.
+# ═════════════════════════════════════════════════════════════════════════════
 
-# Build arguments
-ARG GO_VERSION=1.26.5
+# ── build-time knobs (override with --build-arg or compose build.args) ───────
+ARG BUILD_IMAGE=golang:1.27.1-trixie
+ARG RUNTIME_IMAGE=ubuntu:resolute
+
+ARG APP_PORT=8080
+ARG APP_UID=10001
+ARG APP_GID=10001
+
 ARG BUILD_VERSION=dev
-ARG BUILD_DATE
-ARG GIT_COMMIT
+ARG BUILD_DATE=unknown
+ARG GIT_COMMIT=unknown
 
-# Build stage
+# ─────────────────────────────────────────────────────────────────────────────
+# base — Go toolchain plus the C toolchain pg_query_go needs
+# ─────────────────────────────────────────────────────────────────────────────
+FROM ${BUILD_IMAGE} AS base
+ENV CGO_ENABLED=1 GOFLAGS=-mod=readonly GOTOOLCHAIN=local
+WORKDIR /src
 
-# Alternative: golang:1.26.4 (Debian) works fine for building
-FROM ubuntu:resolute AS builder
+# ─────────────────────────────────────────────────────────────────────────────
+# deps — module download + verify, warmed into a persistent builder cache
+# ─────────────────────────────────────────────────────────────────────────────
+FROM base AS deps
+RUN --mount=type=bind,source=.,target=.,ro \
+    --mount=type=cache,target=/go/pkg/mod,id=gomod \
+    go mod download && go mod verify
 
-# Re-declare ARGs for this stage
-ARG GO_VERSION
-ARG BUILD_VERSION
-ARG BUILD_DATE
-ARG GIT_COMMIT
+# ─────────────────────────────────────────────────────────────────────────────
+# build — compile and stage everything that ships into /out
+# ─────────────────────────────────────────────────────────────────────────────
+FROM deps AS build
 ARG TARGETARCH
+ARG BUILD_VERSION BUILD_DATE GIT_COMMIT
+RUN --mount=type=bind,source=.,target=.,ro \
+    --mount=type=cache,target=/go/pkg/mod,id=gomod \
+    --mount=type=cache,target=/root/.cache/go-build,id=gobuild-pgsquash-${TARGETARCH} \
+    mkdir -p /out/bin /out/app && \
+    go build -trimpath \
+      -ldflags="-s -w \
+        -X 'main.version=${BUILD_VERSION}' \
+        -X 'main.buildDate=${BUILD_DATE}' \
+        -X 'main.gitCommit=${GIT_COMMIT}'" \
+      -o /out/bin/pgsquash ./cmd/pgsquash && \
+    cp -r docker/init-scripts /out/app/scripts && \
+    cp -r docker/config-templates /out/app/templates && \
+    cp docker/entrypoint.sh /out/app/entrypoint.sh && \
+    chmod +x /out/app/entrypoint.sh /out/app/scripts/*.sh
 
-# Install Go with architecture-specific binary
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    ca-certificates \
-    && ARCH=$(dpkg --print-architecture) \
-    && wget https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz \
-    && tar -C /usr/local -xzf go${GO_VERSION}.linux-${ARCH}.tar.gz \
-    && rm go${GO_VERSION}.linux-${ARCH}.tar.gz \
-    && rm -rf /var/lib/apt/lists/*
+# ─────────────────────────────────────────────────────────────────────────────
+# runtime — default target
+#   Not distroless: the entrypoint is bash, and the validation features shell
+#   out to psql, git and the docker CLI.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM ${RUNTIME_IMAGE} AS runtime
+ARG APP_PORT APP_UID APP_GID BUILD_VERSION BUILD_DATE GIT_COMMIT
 
-ENV PATH="/usr/local/go/bin:${PATH}"
-ENV GOPATH="/go"
-ENV PATH="${GOPATH}/bin:${PATH}"
+LABEL org.opencontainers.image.title="pgsquash-engine" \
+      org.opencontainers.image.description="PostgreSQL migration squasher and optimizer" \
+      org.opencontainers.image.version="${BUILD_VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.vendor="CAPYSQUASH" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/capysquash/pgsquash-engine" \
+      org.opencontainers.image.documentation="https://github.com/capysquash/pgsquash-engine/blob/main/README.md"
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    tzdata \
-    gcc \
-    libc6-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
-WORKDIR /app
-
-# Copy go mod files
-COPY go.mod go.sum ./
-
-# Download dependencies
-RUN go mod download && go mod verify
-
-# Copy source code
-COPY . .
-
-# Build the application with version information
-RUN CGO_ENABLED=1 go build \
-    -ldflags="-w -s \
-    -X 'main.version=${BUILD_VERSION}' \
-    -X 'main.buildDate=${BUILD_DATE}' \
-    -X 'main.gitCommit=${GIT_COMMIT}'" \
-    -o pgsquash ./cmd/pgsquash
-
-# Runtime stage
-FROM ubuntu:resolute AS runtime
-
-# Re-declare build metadata for labels
-ARG BUILD_VERSION
-ARG BUILD_DATE
-ARG GIT_COMMIT
-
-# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
@@ -81,51 +85,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     jq \
     git \
-    && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd -g ${APP_GID} pgsquash \
+  && useradd -u ${APP_UID} -g pgsquash -s /bin/bash -m -d /home/pgsquash pgsquash \
+  && mkdir -p /app/migrations /app/output /app/config /app/logs \
+  && chown -R ${APP_UID}:${APP_GID} /app
 
-# Create non-root user (Ubuntu syntax) - use non-conflicting UID
-RUN groupadd -r pgsquash && \
-    useradd -r -g pgsquash -s /bin/bash -m pgsquash
+COPY --from=build --chown=${APP_UID}:${APP_GID} /out/bin/ /usr/local/bin/
+COPY --from=build --chown=${APP_UID}:${APP_GID} /out/app/ /app/
 
-# Create necessary directories
-RUN mkdir -p /app/migrations /app/output /app/config /app/logs && \
-    chown -R pgsquash:pgsquash /app
-
-# Copy binary from builder
-COPY --from=builder /app/pgsquash /usr/local/bin/pgsquash
-
-# Copy configuration templates and scripts
-COPY docker/init-scripts/ /app/scripts/
-COPY docker/config-templates/ /app/templates/
-COPY docker/entrypoint.sh /app/entrypoint.sh
-
-# Make scripts executable
-RUN chmod +x /app/entrypoint.sh /app/scripts/*.sh
-
-# Set user
-USER pgsquash
-
-# Set working directory
+USER ${APP_UID}:${APP_GID}
 WORKDIR /app
+EXPOSE ${APP_PORT}
 
-# Add OCI labels
-LABEL org.opencontainers.image.title="pgsquash-engine" \
-      org.opencontainers.image.description="PostgreSQL migration squasher and optimizer" \
-      org.opencontainers.image.version="${BUILD_VERSION}" \
-      org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.revision="${GIT_COMMIT}" \
-      org.opencontainers.image.vendor="CAPYSQUASH" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/CAPYSQUASH/pgsquash-engine" \
-      org.opencontainers.image.documentation="https://github.com/CAPYSQUASH/pgsquash-engine/blob/main/README.md"
-
-# Health check - using dedicated health endpoint
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD pgsquash health || exit 1
-
-# Expose ports (for web UI and API)
-EXPOSE 8080
-
-# Default command
+# Healthcheck lives in compose so it can be tuned per environment.
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["--help"]

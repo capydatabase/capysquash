@@ -1,0 +1,129 @@
+# pgsquash — multi-version PostgreSQL testing.
+# Overlay for compose.yaml; adds PostgreSQL 15, 16 and 17 next to the primary.
+#
+#   docker compose -f compose.yaml -f compose.testing.yaml up -d
+#   docker compose -f compose.yaml -f compose.testing.yaml down --volumes
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-healthy: &healthy-timing
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+  start_interval: 2s
+
+x-postgres-env: &postgres-env
+  POSTGRES_USER: pgsquash
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsquash_secure_password}
+  POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+
+# initdb needs CHOWN/SETUID/SETGID/FOWNER, so no cap_drop here.
+x-postgres-test: &postgres-test
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+  stop_grace_period: 30s
+  logging: *logging
+  networks: [pgsquash-net]
+  deploy:
+    resources:
+      limits: { memory: 1G }
+
+services:
+  pgsquash:
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      postgres-17:
+        condition: service_healthy
+      postgres-16:
+        condition: service_healthy
+      postgres-15:
+        condition: service_healthy
+
+  postgres-17:
+    <<: *postgres-test
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+      args:
+        PG_VERSION: "17"
+      provenance: false
+      sbom: false
+    image: pgsquash-postgres:17
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: pgsquash_test_17
+    volumes:
+      - postgres-17-data:/var/lib/postgresql/data
+      - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
+      - ./docker/init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+    ports:
+      - target: 5432
+        published: "${POSTGRES_17_PORT:-5417}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      <<: *healthy-timing
+
+  postgres-16:
+    <<: *postgres-test
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+      args:
+        PG_VERSION: "16"
+      provenance: false
+      sbom: false
+    image: pgsquash-postgres:16
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: pgsquash_test_16
+    volumes:
+      - postgres-16-data:/var/lib/postgresql/data
+      - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
+      - ./docker/init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+    ports:
+      - target: 5432
+        published: "${POSTGRES_16_PORT:-5416}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      <<: *healthy-timing
+
+  postgres-15:
+    <<: *postgres-test
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+      args:
+        PG_VERSION: "15"
+      provenance: false
+      sbom: false
+    image: pgsquash-postgres:15
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: pgsquash_test_15
+    volumes:
+      - postgres-15-data:/var/lib/postgresql/data
+      - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
+      - ./docker/init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+    ports:
+      - target: 5432
+        published: "${POSTGRES_15_PORT:-5415}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      <<: *healthy-timing
+
+volumes:
+  postgres-17-data:
+  postgres-16-data:
+  postgres-15-data:

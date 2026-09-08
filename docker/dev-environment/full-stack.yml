@@ -1,118 +1,130 @@
-version: '3.8'
+# pgsquash — full development stack: engine + PostgreSQL (+ pgAdmin on demand).
+# A simplified alternative to the root compose.yaml / compose.tools.yaml pair.
+#
+#   docker compose -f docker/dev-environment/full-stack.yml up -d postgres
+#   docker compose -f docker/dev-environment/full-stack.yml run --rm pgsquash squash /app/migrations
+#   docker compose -f docker/dev-environment/full-stack.yml --profile management up -d
+#   docker compose -f docker/dev-environment/full-stack.yml down --volumes
+#
+# pgAdmin: http://127.0.0.1:5050   PostgreSQL: 127.0.0.1:5432
 
-# Full Stack - Complete development environment
-# Includes: pgsquash + PostgreSQL + pgAdmin (optional)
+name: pgsquash-dev
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-healthy: &healthy-timing
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+  start_interval: 2s
 
 services:
   pgsquash:
     build:
       context: ../..
       dockerfile: Dockerfile
+      target: runtime
+      provenance: false
+      sbom: false
     image: pgsquash:latest
-    container_name: pgsquash-dev
-    restart: unless-stopped
+    # One-shot CLI: drive it with `compose run`, never `up`. A restart policy
+    # here would crash-loop it, since it exits as soon as its command finishes.
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logging
+    init: true
     environment:
-      - PGSQUASH_SAFETY_LEVEL=${PGSQUASH_SAFETY_LEVEL:-standard}
-      - PGSQUASH_LOG_LEVEL=${PGSQUASH_LOG_LEVEL:-info}
-      - PGSQUASH_DOCKER_ENABLED=true
-      - DATABASE_URL=${DATABASE_URL:-postgresql://pgsquash:pgsquash@postgres:5432/pgsquash}
-      - DOCKER_HOST=unix:///var/run/docker.sock
+      PGSQUASH_SAFETY_LEVEL: ${PGSQUASH_SAFETY_LEVEL:-standard}
+      PGSQUASH_LOG_LEVEL: ${PGSQUASH_LOG_LEVEL:-info}
+      PGSQUASH_DOCKER_ENABLED: "true"
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pgsquash:pgsquash@postgres:5432/pgsquash}
+      DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ${MIGRATIONS_DIR:-./migrations}:/app/migrations
       - ${OUTPUT_DIR:-./output}:/app/output
       - ${CONFIG_DIR:-./config}:/app/config
-      - /var/run/docker.sock:/var/run/docker.sock
       - pgsquash-logs:/app/logs
-    networks:
-      - pgsquash-net
+      # Docker-out-of-Docker for the validation features: full control of the
+      # host daemon, which is why this stack is development-only.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [pgsquash-net]
     depends_on:
       postgres:
         condition: service_healthy
     deploy:
       resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
+        limits: { cpus: "2", memory: 2G }
 
   postgres:
     image: postgres:18
-    container_name: pgsquash-postgres
+    pull_policy: weekly
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    logging: *logging
+    stop_grace_period: 30s
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-pgsquash}
-      - POSTGRES_USER=${POSTGRES_USER:-pgsquash}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pgsquash}
-      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+      POSTGRES_DB: ${POSTGRES_DB:-pgsquash}
+      POSTGRES_USER: ${POSTGRES_USER:-pgsquash}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsquash}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # PostgreSQL 18+ wants a single mount at /var/lib/postgresql and places
+      # the cluster in a major-version subdirectory; mounting at .../data (the
+      # pre-18 convention) makes the entrypoint abort.
+      - postgres-data:/var/lib/postgresql
       - ../init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
       - ../init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
-    networks:
-      - pgsquash-net
+    networks: [pgsquash-net]
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - target: 5432
+        published: "${POSTGRES_PORT:-5432}"
+        host_ip: 127.0.0.1
+        protocol: tcp
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pgsquash -d pgsquash"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      # $$ escapes Compose interpolation so the container shell expands it.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      <<: *healthy-timing
     deploy:
       resources:
-        limits:
-          cpus: '2.0'
-          memory: 1G
+        limits: { cpus: "2", memory: 1G }
 
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: pgsquash-pgadmin
+    pull_policy: weekly
+    profiles: [management]
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    logging: *logging
     environment:
-      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL:-admin@pgsquash.local}
-      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD:-admin}
-      - PGADMIN_LISTEN_PORT=80
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@pgsquash.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_LISTEN_PORT: 80
     volumes:
       - pgadmin-data:/var/lib/pgadmin
-    networks:
-      - pgsquash-net
+    networks: [pgsquash-net]
     ports:
-      - "${PGADMIN_PORT:-5050}:80"
-    profiles:
-      - "management"
+      - target: 80
+        published: "${PGADMIN_PORT:-5050}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { memory: 512M }
 
 volumes:
   postgres-data:
-    driver: local
-    labels:
-      - "pgsquash.volume=postgres"
   pgsquash-logs:
-    driver: local
-    labels:
-      - "pgsquash.volume=logs"
   pgadmin-data:
-    driver: local
-    labels:
-      - "pgsquash.volume=pgadmin"
 
 networks:
   pgsquash-net:
     driver: bridge
-    labels:
-      - "pgsquash.network=main"
-
-# Usage Examples:
-#
-# 1. Start core services (pgsquash + PostgreSQL):
-#    docker compose -f docker/dev-environment/full-stack.yml up -d
-#
-# 2. With management tools (pgAdmin):
-#    docker compose -f docker/dev-environment/full-stack.yml --profile management up -d
-#
-# 3. Run pgsquash command:
-#    docker compose -f docker/dev-environment/full-stack.yml exec pgsquash squash /app/migrations/*.sql
-#
-# 4. Access services:
-#    - pgAdmin: http://localhost:5050
-#    - PostgreSQL: localhost:5432
-#
-# 5. Stop all:
-#    docker compose -f docker/dev-environment/full-stack.yml down

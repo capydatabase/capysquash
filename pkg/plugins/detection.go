@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	internal_plugins "github.com/capy-base/pgsquash-engine/internal/plugins"
-	"github.com/capy-base/pgsquash-engine/internal/plugins/clerk"
-	"github.com/capy-base/pgsquash-engine/internal/plugins/drizzle"
-	"github.com/capy-base/pgsquash-engine/internal/plugins/prisma"
-	"github.com/capy-base/pgsquash-engine/internal/plugins/supabase"
-	"github.com/capy-base/pgsquash-engine/internal/parser"
-	"github.com/capy-base/pgsquash-engine/internal/types"
+	"github.com/capydatabase/pgsquash-engine/internal/parser"
+	internal_plugins "github.com/capydatabase/pgsquash-engine/internal/plugins"
+	"github.com/capydatabase/pgsquash-engine/internal/plugins/clerk"
+	"github.com/capydatabase/pgsquash-engine/internal/plugins/drizzle"
+	"github.com/capydatabase/pgsquash-engine/internal/plugins/prisma"
+	"github.com/capydatabase/pgsquash-engine/internal/plugins/supabase"
+	"github.com/capydatabase/pgsquash-engine/internal/types"
 )
 
 // PluginInfo describes a plugin as reported by the plugin implementation itself.
