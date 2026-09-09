@@ -22,6 +22,14 @@ services:
       sbom: false
     image: pgsquash:latest
     restart: "no"
+    # The socket is root:root 0660, so a non-root uid simply cannot open it -
+    # the image's own uid 10001 gets "permission denied" and validation dies.
+    # Mounting the socket already confers host-root, so running this one
+    # service as root gives away nothing that the mount had not already given;
+    # no-new-privileges and cap_drop stay on (root owns the socket, so no
+    # CAP_DAC_OVERRIDE is needed). Files written into ./output will be
+    # root-owned on Linux hosts.
+    user: "0:0"
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     init: true

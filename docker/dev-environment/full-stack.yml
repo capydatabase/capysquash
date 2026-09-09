@@ -52,6 +52,9 @@ services:
       - pgsquash-logs:/app/logs
       # Docker-out-of-Docker for the validation features: full control of the
       # host daemon, which is why this stack is development-only.
+      # NOTE: this service runs as uid 10001, which cannot open the
+      # root:root 0660 socket - Docker-based validation needs
+      # docker/validation/with-validation.yml, which runs as root.
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [pgsquash-net]
     depends_on:
@@ -102,14 +105,16 @@ services:
     security_opt: [no-new-privileges:true]
     logging: *logging
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@pgsquash.local}
+      # pgAdmin rejects reserved domains (.localhost/.local) outright and exits.
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@pgsquash.dev}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
-      PGADMIN_LISTEN_PORT: 80
+      # Under no-new-privileges pgAdmin cannot bind the privileged port 80.
+      PGADMIN_LISTEN_PORT: 8080
     volumes:
       - pgadmin-data:/var/lib/pgadmin
     networks: [pgsquash-net]
     ports:
-      - target: 80
+      - target: 8080
         published: "${PGADMIN_PORT:-5050}"
         host_ip: 127.0.0.1
         protocol: tcp

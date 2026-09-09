@@ -3,7 +3,7 @@ module github.com/capydatabase/pgsquash-engine
 go 1.27.1
 
 require (
-	github.com/capy-base/pgsquash-engine v0.10.0
+	github.com/capydatabase/pgsquash-engine v0.10.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/docker/docker v28.5.2+incompatible

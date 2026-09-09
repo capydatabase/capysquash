@@ -77,9 +77,12 @@ services:
       # Docker-out-of-Docker for the validation features. This hands the
       # container full control of the host daemon - it is why this stack is
       # development-only.
+      # NOTE: this service runs as uid 10001, which cannot open the
+      # root:root 0660 socket - Docker-based validation needs
+      # docker/validation/with-validation.yml, which runs as root.
       - /var/run/docker.sock:/var/run/docker.sock
       # Optional: SSH keys for git operations over ssh.
-      - ${SSH_DIR:-~/.ssh}:/home/pgsquash/.ssh:ro
+      - ~/.ssh:/home/pgsquash/.ssh:ro
     networks: [pgsquash-net]
     depends_on:
       postgres-primary:

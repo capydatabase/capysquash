@@ -19,15 +19,19 @@ services:
     security_opt: [no-new-privileges:true]
     logging: *logging
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@pgsquash.localhost}
+      # pgAdmin rejects reserved domains (.localhost/.local) outright and exits,
+      # so this default has to be a real-looking address.
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@pgsquash.dev}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-pgsquash_pgadmin}
       PGADMIN_CONFIG_SERVER_MODE: "False"
+      # Under no-new-privileges pgAdmin cannot bind the privileged port 80 and
+      # silently falls back to 8080; pin it so the published port matches.
+      PGADMIN_LISTEN_PORT: 8080
     volumes:
       - pgadmin-data:/var/lib/pgadmin
-      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
     networks: [pgsquash-net]
     ports:
-      - target: 80
+      - target: 8080
         published: "${PGADMIN_PORT:-5050}"
         host_ip: 127.0.0.1
         protocol: tcp

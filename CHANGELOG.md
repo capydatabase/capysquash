@@ -36,14 +36,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docker/postgres/Dockerfile` referenced `${PG_VERSION}` in its `LABEL`
   without re-declaring the argument inside the stage, so
   `org.pgsquash.postgres.version` was always empty.
+- **pgAdmin could never start.** `PGADMIN_EMAIL` defaulted to
+  `admin@pgsquash.localhost` (and `admin@pgsquash.local` in the dev-environment
+  stack); pgAdmin rejects reserved domains outright - "the part after the
+  @-sign is a special-use or reserved name" - and exits, so the container
+  restart-looped forever. The default is now `admin@pgsquash.dev`, in the
+  compose files and in `.env.example`.
+- pgAdmin also published the wrong port: it cannot bind the privileged port 80
+  under `no-new-privileges` and silently falls back to 8080, so the published
+  mapping pointed at a port nothing was listening on. `PGADMIN_LISTEN_PORT` is
+  now pinned to 8080 and the mapping matches.
+- Removed the `./docker/pgadmin/servers.json` bind mount. That file has never
+  existed in the repository, so Docker created an empty *directory* at the
+  source path and mounted it over pgAdmin's config file.
+- **Docker-based validation could never reach the Docker daemon.** The socket is
+  `root:root` mode 0660 and the image runs as uid 10001, so
+  `docker/validation/with-validation.yml` - whose entire purpose is
+  Docker-driven validation - got "permission denied". That service now runs as
+  `user: "0:0"`. Mounting the socket already confers host-root, so this gives
+  away nothing the mount had not; `no-new-privileges` and `cap_drop: [ALL]`
+  stay on. The core and dev-environment stacks keep their non-root uid (they
+  mount `~/.ssh` into `/home/pgsquash`) and now say so where the socket is
+  mounted.
 
 ### Changed
 
 - **Every Dockerfile and Compose file was rebuilt on current Docker conventions
   (Engine 29 / Compose 5 / BuildKit 0.33).** The main `Dockerfile` is now a
   proper multi-stage build (`base` → `deps` → `build` → `runtime`) behind a
-  `# syntax=docker/dockerfile:1` frontend - which previously sat below a banner
-  comment and was therefore inert. It uses a read-only bind mount of the source
+  `# syntax=docker/dockerfile:1` frontend, which the file previously lacked
+  entirely. It uses a read-only bind mount of the source
   instead of `COPY . .` and BuildKit cache mounts for the module and build
   caches, and it takes its Go toolchain from `golang:1.27.1-trixie` rather than
   installing an out-of-date Go tarball into Ubuntu with `wget`. Everything that

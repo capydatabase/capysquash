@@ -44,7 +44,7 @@ jobs:
             -w /work \
             -e GITHUB_TOKEN \
             --entrypoint /bin/sh \
-            ghcr.io/goreleaser/goreleaser-cross:v1.26.4 \
+            ghcr.io/goreleaser/goreleaser-cross:v1.27.1 \
             -c 'git config --global --add safe.directory /work && goreleaser release --clean'
 
       - name: Upload artifacts
