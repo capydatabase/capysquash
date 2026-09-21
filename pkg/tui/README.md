@@ -355,7 +355,7 @@ go run pkg/tui/examples/advanced/main.go tui analyze ./migrations
 
 ## Architecture
 
-```
+```tree
 pkg/tui/              # Fully public TUI implementation
 
 ├── api.go            # Convenience functions (Launch, LaunchWithView)

@@ -72,30 +72,13 @@ docker compose up
 
 ## The CAPYSQUASH Ecosystem
 
-```
-┌─────────────────────────────────────┐
-│  CAPYSQUASH Platform                │  ← Web application
-│  https://capysquash.dev             │
-└──────────┬──────────────────────────┘
-           │
-           ├── HTTP API
-           │
-┌──────────▼──────────┐
-│   capysquash-api    │  ← Separate repository (NEW LOCATION)
-│   REST API Server   │
-│   - JWT auth        │
-│   - GitHub webhooks │
-│   - AI analysis     │
-└──────────┬──────────┘
-           │
-           ├── Uses pkg/ APIs
-           │
-┌──────────▼──────────┐
-│  pgsquash-engine    │  ← This repository
-│  - SQL parsing      │
-│  - Consolidation    │
-│  - Validation       │
-└─────────────────────┘
+```mermaid
+flowchart TD
+    A["CAPYSQUASH Platform<br/>https://capysquash.dev<br/>← Web application"]
+    B["capysquash-api<br/>REST API Server<br/>- JWT auth<br/>- GitHub webhooks<br/>- AI analysis<br/>← Separate repository (NEW LOCATION)"]
+    C["pgsquash-engine<br/>- SQL parsing<br/>- Consolidation<br/>- Validation<br/>← This repository"]
+    A -->|HTTP API| B
+    B -->|"Uses pkg/ APIs"| C
 ```
 
 ---

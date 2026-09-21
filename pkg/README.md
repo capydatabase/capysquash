@@ -295,7 +295,7 @@ func main() {
 
 ## Architecture
 
-```
+```tree
 pkg/                      # Public API
 
 ├── cli/                  # CLI execution: Execute(), SetVersionInfo(), SetBrandName()

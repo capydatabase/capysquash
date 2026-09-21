@@ -6,7 +6,7 @@ This directory contains comprehensive test fixtures for validating pgsquash func
 
 Each fixture follows a consistent structure:
 
-```
+```tree
 fixture_name/
 ├── original/           # Original migration files
 

@@ -344,7 +344,7 @@ go test ./...
 
 The codebase is organized as:
 
-```
+```tree
 cmd/
 └── pgsquash/           # CLI entry point
 

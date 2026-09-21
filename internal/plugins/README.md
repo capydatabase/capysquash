@@ -232,7 +232,7 @@ CREATE TABLE "products" (
 
 ## 🏗️ Directory Structure
 
-```
+```tree
 internal/plugins/
 ├── plugin.go             # Plugin interface (12 lifecycle hooks)
 

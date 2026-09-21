@@ -251,21 +251,13 @@ Understanding the architecture will help you contribute effectively:
 
 ### Core Pipeline (5 Phases)
 
-```
-1. PARSING (internal/parser/)
-   ↓ Uses pg_query_go for PostgreSQL AST
-
-2. TRACKING (internal/tracking/)
-   ↓ Tracks object lifecycles and dependencies
-
-3. ANALYSIS (internal/squasher/)
-   ↓ Resolves dependencies, detects cycles
-
-4. CONSOLIDATION (internal/squasher/)
-   ↓ Applies safety-level-appropriate rules
-
-5. GENERATION (internal/builder/)
-   ↓ Outputs organized SQL
+```mermaid
+flowchart TD
+    A["1. PARSING (internal/parser/)"] -->|"Uses pg_query_go for PostgreSQL AST"| B["2. TRACKING (internal/tracking/)"]
+    B -->|"Tracks object lifecycles and dependencies"| C["3. ANALYSIS (internal/squasher/)"]
+    C -->|"Resolves dependencies, detects cycles"| D["4. CONSOLIDATION (internal/squasher/)"]
+    D -->|"Applies safety-level-appropriate rules"| E["5. GENERATION (internal/builder/)"]
+    E -->|"Outputs organized SQL"| F[" "]
 ```
 
 ### Key Packages

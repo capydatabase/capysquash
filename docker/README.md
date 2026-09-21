@@ -76,7 +76,7 @@ See [docker/api-server/README.md](api-server/README.md) in this repository for m
 
 ## Directory Structure
 
-```
+```tree
 /Dockerfile                       # ← Main application Dockerfile
 
 /docker-compose.yml               # ← Core services (2)
