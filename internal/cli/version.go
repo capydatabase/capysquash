@@ -8,7 +8,7 @@ var versionInfo = struct {
 	buildDate string
 	gitCommit string
 }{
-	version:   "dev",
+	version:   "1.0.0",
 	buildDate: "unknown",
 	gitCommit: "unknown",
 }

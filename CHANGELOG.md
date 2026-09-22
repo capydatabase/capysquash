@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-22
+
 The CapySquash product this engine grew out of is retired, and the engine
 takes its name: the module is `github.com/capydatabase/capysquash` and the
 binary is `capysquash`. Everything that only existed for the product is gone;
@@ -36,8 +38,8 @@ what is left is a standalone CLI.
 - The container image runs `capysquash` directly (`ENTRYPOINT ["capysquash"]`)
   instead of a setup entrypoint, and the compose files only pass
   `CAPYSQUASH_LOG_LEVEL` (the other `PGSQUASH_*` variables were read by nothing).
-- The version baked into a `go build` without ldflags is `dev` instead of a
-  stale `0.9.7`.
+- The version baked into a `go build` without ldflags is the current release
+  (`1.0.0`) instead of a stale `0.9.7`; release builds stamp the tag via ldflags.
 - CI is one workflow: build, vet, race tests and a binary smoke test on the
   `go.mod` toolchain, `validate-external` against PostgreSQL 15-18, and
   golangci-lint. The release workflow reads its Go version from `go.mod`;
@@ -674,7 +676,8 @@ Correctness overhaul across the safety ladder, validation, output pipeline, and 
 - Enables better code review, parallel migrations, and incremental deployment
 - CLI: `pgsquash squash --split category` or `--split hybrid`
 
-[Unreleased]: https://github.com/capydatabase/capysquash/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/capydatabase/capysquash/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/capydatabase/capysquash/compare/v0.11.0...v1.0.0
 [0.11.0]: https://github.com/capydatabase/capysquash/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/capydatabase/capysquash/compare/v0.9.7...v0.10.0
 [0.9.7]: https://github.com/capydatabase/capysquash/compare/v0.8.5-beta...v0.9.7

@@ -13,7 +13,7 @@ import (
 //
 //	-ldflags "-X main.version=x.y.z -X main.buildDate=... -X main.gitCommit=..."
 var (
-	version   = "dev"
+	version   = "1.0.0"
 	buildDate = "unknown"
 	gitCommit = "unknown"
 )

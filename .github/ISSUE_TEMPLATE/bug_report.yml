@@ -13,7 +13,7 @@ body:
     attributes:
       label: Version
       description: What version of capysquash are you using?
-      placeholder: "0.11.0"
+      placeholder: "1.0.0"
     validations:
       required: true
 

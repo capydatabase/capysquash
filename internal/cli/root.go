@@ -88,7 +88,7 @@ var (
 var rootCmd = &cobra.Command{
 	Use:     "capysquash",
 	Short:   "capysquash - Intelligent PostgreSQL migration consolidation",
-	Version: "dev",
+	Version: "1.0.0",
 	Long: `capysquash consolidates PostgreSQL migration files into clean,
 production-ready SQL while preserving data integrity, respecting dependencies,
 and validating safety at every step.`,
