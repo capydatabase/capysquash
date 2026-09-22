@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `govulncheck` is clean. The Docker validation path moved from the frozen
+  `github.com/docker/docker` client (GO-2026-4887, GO-2026-4883, no fix will
+  ever land on that module path) to `github.com/moby/moby/client` v0.6 and
+  `github.com/moby/moby/api` v1.56. Same container lifecycle, same exec and
+  port handling; a failed image pull is now reported instead of being
+  swallowed by the progress loop. CI runs govulncheck on every push.
 - CI lint job: golangci-lint v2.12.2 is built with Go 1.26 and refuses a `go 1.27.1`
   module before linting anything; the pin is now v2.13.2.
 - golangci-lint is clean (it had 66 findings once it could run): unchecked `Close`

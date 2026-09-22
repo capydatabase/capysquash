@@ -21,12 +21,12 @@ import (
 	"github.com/capydatabase/capysquash/internal/plugins"
 	"github.com/capydatabase/capysquash/internal/types"
 	"github.com/capydatabase/capysquash/internal/utils"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/fatih/color"
 	_ "github.com/lib/pq"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 )
 
 // ValidationLevel represents the level of validation to perform
@@ -207,6 +207,9 @@ type ValidationStatistics struct {
 	WarningsFound        int `json:"warnings_found"`
 }
 
+// postgresContainerPort is the PostgreSQL port exposed by validation containers.
+var postgresContainerPort = network.MustParsePort("5432/tcp")
+
 // SchemaValidator performs comprehensive schema validation including Docker-based validation
 type SchemaValidator struct {
 	config       *ValidationConfig
@@ -225,7 +228,7 @@ func NewSchemaValidator(config *ValidationConfig, db *sql.DB, reporter performan
 	// Initialize Docker client if needed
 	var dockerClient *client.Client
 	if config.DockerApproach != "" {
-		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		cli, err := client.New(client.FromEnv)
 		if err != nil {
 			utils.GetDefaultLogger().Warn("Failed to create Docker client: %v", err)
 			dockerClient = nil
@@ -1630,39 +1633,43 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 	}
 
 	// Create container with PostgreSQL and extensions
-	resp, err := sv.dockerClient.ContainerCreate(ctx, &container.Config{
-		Image: postgresImage,
-		Env: []string{
-			"POSTGRES_DB=postgres",
-			"POSTGRES_USER=postgres",
-			"POSTGRES_PASSWORD=postgres",
-			"POSTGRES_INITDB_ARGS=--auth-host=trust",
+	resp, err := sv.dockerClient.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Name: fmt.Sprintf("capysquash-validation-%s", sessionID),
+		Config: &container.Config{
+			Image: postgresImage,
+			Env: []string{
+				"POSTGRES_DB=postgres",
+				"POSTGRES_USER=postgres",
+				"POSTGRES_PASSWORD=postgres",
+				"POSTGRES_INITDB_ARGS=--auth-host=trust",
+			},
+			ExposedPorts: network.PortSet{
+				postgresContainerPort: struct{}{},
+			},
+			Cmd: []string{"postgres", "-c", "shared_preload_libraries=pg_stat_statements"},
+			Labels: map[string]string{
+				"capysquash.type":    "validation",
+				"capysquash.session": sessionID,
+				"capysquash.cleanup": "auto",
+				"capysquash.created": time.Now().Format(time.RFC3339),
+			},
 		},
-		ExposedPorts: nat.PortSet{
-			"5432/tcp": struct{}{},
+		HostConfig: &container.HostConfig{
+			PortBindings: network.PortMap{
+				// Use "0" to let Docker assign a random available port dynamically
+				postgresContainerPort: []network.PortBinding{{HostPort: "0"}},
+			},
+			// Resource limits for security and stability
+			Resources: container.Resources{
+				Memory:   512 * 1024 * 1024, // 512MB
+				NanoCPUs: 1000000000,        // 1 CPU
+			},
+			// Security options
+			SecurityOpt: []string{
+				"no-new-privileges",
+			},
 		},
-		Cmd: []string{"postgres", "-c", "shared_preload_libraries=pg_stat_statements"},
-		Labels: map[string]string{
-			"capysquash.type":    "validation",
-			"capysquash.session": sessionID,
-			"capysquash.cleanup": "auto",
-			"capysquash.created": time.Now().Format(time.RFC3339),
-		},
-	}, &container.HostConfig{
-		PortBindings: nat.PortMap{
-			// Use "0" to let Docker assign a random available port dynamically
-			"5432/tcp": []nat.PortBinding{{HostPort: "0"}},
-		},
-		// Resource limits for security and stability
-		Resources: container.Resources{
-			Memory:   512 * 1024 * 1024, // 512MB
-			NanoCPUs: 1000000000,        // 1 CPU
-		},
-		// Security options
-		SecurityOpt: []string{
-			"no-new-privileges",
-		},
-	}, nil, nil, fmt.Sprintf("capysquash-validation-%s", sessionID))
+	})
 
 	if err != nil {
 		return nil, errors.NewError(
@@ -1673,7 +1680,7 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		).WithInnerError(err).WithSuggestion("Ensure Docker daemon is running and has sufficient resources")
 	}
 
-	if err := sv.dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+	if _, err := sv.dockerClient.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
 		return nil, errors.NewError(
 			errors.ErrorCodeValidationFailed,
 			"failed to start container",
@@ -1683,7 +1690,7 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 	}
 
 	// Inspect container to get the dynamically assigned port
-	containerJSON, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+	containerJSON, err := sv.dockerClient.ContainerInspect(ctx, resp.ID, client.ContainerInspectOptions{})
 	if err != nil {
 		sv.stopAndRemoveContainer(ctx, resp.ID)
 		return nil, errors.NewError(
@@ -1696,7 +1703,7 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 
 	// Extract the assigned host port from the container inspection
 	assignedPort := 0
-	if bindings, ok := containerJSON.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+	if bindings, ok := containerJSON.Container.NetworkSettings.Ports[postgresContainerPort]; ok && len(bindings) > 0 {
 		// Parse the assigned port
 		portStr := bindings[0].HostPort
 		assignedPort, err = strconv.Atoi(portStr)
@@ -1725,9 +1732,9 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 	// Re-inspect after a brief delay to get the actual bound port
 	// Docker may not have fully bound the port when we first inspect
 	time.Sleep(500 * time.Millisecond)
-	containerJSON2, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+	containerJSON2, err := sv.dockerClient.ContainerInspect(ctx, resp.ID, client.ContainerInspectOptions{})
 	if err == nil {
-		if bindings, ok := containerJSON2.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+		if bindings, ok := containerJSON2.Container.NetworkSettings.Ports[postgresContainerPort]; ok && len(bindings) > 0 {
 			portStr := bindings[0].HostPort
 			if actualPort, err := strconv.Atoi(portStr); err == nil && actualPort != assignedPort {
 				sv.Infof("⚠️  Port changed from %d to %d after inspection, updating...", assignedPort, actualPort)
@@ -1770,7 +1777,7 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		// PostGIS and other extensions with shared libraries need this
 		sv.Infof("🔄 Restarting PostgreSQL to load extension libraries...")
 		stopTimeout := 10
-		if err := sv.dockerClient.ContainerRestart(ctx, resp.ID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+		if _, err := sv.dockerClient.ContainerRestart(ctx, resp.ID, client.ContainerRestartOptions{Timeout: &stopTimeout}); err != nil {
 			sv.Infof("⚠️  Warning: Failed to restart container: %v", err)
 		} else {
 			sv.Infof("☑ Container restarted successfully")
@@ -1781,9 +1788,9 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 
 			// Re-inspect port after container restart
 			// Docker may reassign the port binding when the container restarts
-			containerJSON3, err := sv.dockerClient.ContainerInspect(ctx, resp.ID)
+			containerJSON3, err := sv.dockerClient.ContainerInspect(ctx, resp.ID, client.ContainerInspectOptions{})
 			if err == nil {
-				if bindings, ok := containerJSON3.NetworkSettings.Ports["5432/tcp"]; ok && len(bindings) > 0 {
+				if bindings, ok := containerJSON3.Container.NetworkSettings.Ports[postgresContainerPort]; ok && len(bindings) > 0 {
 					portStr := bindings[0].HostPort
 					if actualPort, err := strconv.Atoi(portStr); err == nil && actualPort != containerInfo.Port {
 						sv.Infof("⚠️  Port changed from %d to %d after container restart, updating...", containerInfo.Port, actualPort)
@@ -1839,14 +1846,14 @@ func (sv *SchemaValidator) ensureDockerImageAvailable(ctx context.Context, image
 	}
 
 	// Image not found locally, pull it
-	if strings.Contains(err.Error(), "No such image") {
+	if cerrdefs.IsNotFound(err) {
 		sv.Infof("📦 Docker image '%s' not found locally", imageName)
 		if sv.config.Verbose {
 			color.Cyan("   Pulling image... (this may take a few minutes on first run)\n")
 		}
 
 		// Pull the image
-		reader, err := sv.dockerClient.ImagePull(ctx, imageName, image.PullOptions{})
+		reader, err := sv.dockerClient.ImagePull(ctx, imageName, client.ImagePullOptions{})
 		if err != nil {
 			if sv.config.Verbose {
 				color.Red("☒ Failed to pull Docker image '%s'\n", imageName)
@@ -1866,24 +1873,19 @@ func (sv *SchemaValidator) ensureDockerImageAvailable(ctx context.Context, image
 			}
 		}()
 
-		// Show simple progress indicator
-		// Note: Full progress parsing would require jsonmessage decoding
-		// For now, we just show that pulling is happening
+		// Wait drains the progress stream and surfaces a failed pull, which
+		// the old byte-reading loop silently swallowed.
 		sv.Infof("⏳ Downloading image layers...")
-
-		// Copy output to show progress (basic approach)
-		// In production, we'd parse JSON progress messages
-		buf := make([]byte, 1024)
-		lastUpdate := time.Now()
-		for {
-			n, err := reader.Read(buf)
-			if n > 0 && time.Since(lastUpdate) > 2*time.Second {
-				sv.Infof("   Still pulling...")
-				lastUpdate = time.Now()
+		if err := reader.Wait(ctx); err != nil {
+			if sv.config.Verbose {
+				color.Red("☒ Failed to pull Docker image '%s'\n", imageName)
 			}
-			if err != nil {
-				break
-			}
+			return errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				fmt.Sprintf("failed to pull image %s", imageName),
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithInnerError(err).WithSuggestion(fmt.Sprintf("Pull the image manually: docker pull %s", imageName))
 		}
 
 		if sv.config.Verbose {
@@ -1903,9 +1905,9 @@ func (sv *SchemaValidator) ensureDockerImageAvailable(ctx context.Context, image
 
 func (sv *SchemaValidator) stopAndRemoveContainer(ctx context.Context, containerID string) {
 	// Check if container exists before trying to stop/remove
-	_, err := sv.dockerClient.ContainerInspect(ctx, containerID)
+	_, err := sv.dockerClient.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 	if err != nil {
-		if strings.Contains(err.Error(), "No such container") {
+		if cerrdefs.IsNotFound(err) {
 			// Container already removed, nothing to do
 			return
 		}
@@ -1915,19 +1917,19 @@ func (sv *SchemaValidator) stopAndRemoveContainer(ctx context.Context, container
 
 	// Try to stop container
 	stopTimeout := 10
-	if err := sv.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
-		if !strings.Contains(err.Error(), "No such container") {
+	if _, err := sv.dockerClient.ContainerStop(ctx, containerID, client.ContainerStopOptions{Timeout: &stopTimeout}); err != nil {
+		if !cerrdefs.IsNotFound(err) {
 			sv.Infof("⚠️  Failed to stop container %s: %v", containerID, err)
 		}
 		// Continue to removal attempt
 	}
 
 	// Try to remove container
-	if err := sv.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{
+	if _, err := sv.dockerClient.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{
 		Force:         true,
 		RemoveVolumes: true,
 	}); err != nil {
-		if !strings.Contains(err.Error(), "No such container") {
+		if !cerrdefs.IsNotFound(err) {
 			sv.Infof("⚠️  Failed to remove container %s: %v", containerID, err)
 		}
 	} else {
@@ -1952,11 +1954,11 @@ func (sv *SchemaValidator) waitForContainerStart(ctx context.Context, containerI
 				errors.CategoryValidation,
 			).WithSuggestion("Container may be stuck - check Docker logs or increase timeout")
 		case <-ticker.C:
-			inspect, err := sv.dockerClient.ContainerInspect(ctx, containerInfo.ID)
+			inspect, err := sv.dockerClient.ContainerInspect(ctx, containerInfo.ID, client.ContainerInspectOptions{})
 			if err != nil {
 				continue
 			}
-			if inspect.State.Running {
+			if inspect.Container.State != nil && inspect.Container.State.Running {
 				return nil
 			}
 		}
@@ -2188,13 +2190,13 @@ func (sv *SchemaValidator) installExtensionsViaPackageManager(ctx context.Contex
 // NOTE: This implementation could be enhanced to capture stdout/stderr for better error messages
 // in Solution 3 migration
 func (sv *SchemaValidator) execInContainer(ctx context.Context, containerID string, cmd []string) error {
-	execConfig := container.ExecOptions{
+	execConfig := client.ExecCreateOptions{
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
 	}
 
-	execIDResp, err := sv.dockerClient.ContainerExecCreate(ctx, containerID, execConfig)
+	execIDResp, err := sv.dockerClient.ExecCreate(ctx, containerID, execConfig)
 	if err != nil {
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
@@ -2205,7 +2207,7 @@ func (sv *SchemaValidator) execInContainer(ctx context.Context, containerID stri
 	}
 
 	// Start the exec
-	if err := sv.dockerClient.ContainerExecStart(ctx, execIDResp.ID, container.ExecStartOptions{}); err != nil {
+	if _, err := sv.dockerClient.ExecStart(ctx, execIDResp.ID, client.ExecStartOptions{}); err != nil {
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
 			"failed to start exec",
@@ -2229,7 +2231,7 @@ func (sv *SchemaValidator) execInContainer(ctx context.Context, containerID stri
 				errors.CategoryValidation,
 			).WithSuggestion("Command took too long to execute - check container performance")
 		case <-ticker.C:
-			inspectResp, err := sv.dockerClient.ContainerExecInspect(ctx, execIDResp.ID)
+			inspectResp, err := sv.dockerClient.ExecInspect(ctx, execIDResp.ID, client.ExecInspectOptions{})
 			if err != nil {
 				return errors.NewError(
 					errors.ErrorCodeValidationFailed,
