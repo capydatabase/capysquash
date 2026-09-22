@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-09-22
 
-The CapySquash product this engine grew out of is retired, and the engine
-takes its name: the module is `github.com/capydatabase/capysquash` and the
+First stable release. The CapySquash product this engine grew out of is
+retired, and the engine takes its name: the module is `github.com/capydatabase/capysquash` and the
 binary is `capysquash`. Everything that only existed for the product is gone;
 what is left is a standalone CLI.
 

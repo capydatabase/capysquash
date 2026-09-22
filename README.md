@@ -19,7 +19,7 @@ capysquash is the open-source engine behind `capydb migrate squash` in
 service and no telemetry; CapyDB adds managed validation on top of it (see
 [CapyDB-managed validation](#capydb-managed-validation)).
 
-Status: beta. Use `conservative` or `paranoid` on anything that matters,
+Status: stable since 1.0.0. Use `conservative` or `paranoid` on anything that matters,
 validate before you apply, and read the generated SQL.
 
 ## Installation
