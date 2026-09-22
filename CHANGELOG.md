@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- CI lint job: golangci-lint v2.12.2 is built with Go 1.26 and refuses a `go 1.27.1`
+  module before linting anything; the pin is now v2.13.2.
+
 ## [1.0.0] - 2026-09-22
 
 First stable release. The CapySquash product this engine grew out of is
