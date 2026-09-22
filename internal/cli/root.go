@@ -755,7 +755,7 @@ func runSquash(cmd *cobra.Command, args []string) error {
 					errors.CategoryConsolidation,
 				).WithInnerError(err)
 			}
-			defer engine.Close()
+			defer func() { _ = engine.Close() }()
 
 			squashResult, err := engine.Squash(migrationMap)
 			if err != nil {
@@ -822,7 +822,7 @@ func runSquash(cmd *cobra.Command, args []string) error {
 				errors.CategoryConsolidation,
 			).WithInnerError(err)
 		}
-		defer engine.Close()
+		defer func() { _ = engine.Close() }()
 
 		if showProgress {
 			fmt.Printf("Processing %d migrations...\n", len(migrations))
@@ -882,7 +882,7 @@ func runSquash(cmd *cobra.Command, args []string) error {
 				errors.CategoryConsolidation,
 			).WithInnerError(err)
 		}
-		defer engine.Close()
+		defer func() { _ = engine.Close() }()
 
 		// Convert to migration map
 		migrationMap := make(map[int]string)
@@ -1054,7 +1054,7 @@ func runValidationCheck(cfg *config.Config, originalPath, squashedPath, authComp
 	}
 
 	validator := validation.NewSchemaValidator(valConfig, nil, nil)
-	defer validator.Close()
+	defer func() { _ = validator.Close() }()
 
 	ctx := context.Background()
 	result, err := validator.ValidateWithDocker(ctx, originalPath, squashedPath)
@@ -1148,13 +1148,9 @@ func ensureOutputNotInputDirectory(outputDir string, inputs []string) error {
 			continue
 		}
 
-		inputDir := absIn
-		if info, statErr := os.Stat(absIn); statErr == nil && !info.IsDir() {
-			inputDir = filepath.Dir(absIn)
-		} else if statErr == nil && info.IsDir() {
+		inputDir := filepath.Dir(absIn)
+		if info, statErr := os.Stat(absIn); statErr == nil && info.IsDir() {
 			inputDir = absIn
-		} else {
-			inputDir = filepath.Dir(absIn)
 		}
 
 		if inputDir == absOut {
@@ -1675,7 +1671,7 @@ func runValidateExternal(cmd *cobra.Command, args []string) error {
 	valConfig.AuthCompatibilitySQL = detectAuthCompatibilitySQL(args[0])
 
 	validator := validation.NewSchemaValidator(valConfig, nil, nil)
-	defer validator.Close()
+	defer func() { _ = validator.Close() }()
 
 	snapshot, err := validator.ApplyAndSnapshot(cmd.Context(), args[0], dsn, validation.ExternalValidationOptions{
 		AllowedSchemas: externalAllowedSchemas,
@@ -1799,12 +1795,12 @@ func writeCatalogSnapshot(path string, snapshot *validation.CatalogSnapshot) err
 		return fmt.Errorf("create catalog snapshot: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 
 	encoder := json.NewEncoder(temporary)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(snapshot); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return fmt.Errorf("encode catalog snapshot: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
@@ -2397,7 +2393,7 @@ func executeSquashWithValidation(args []string, cfg *config.Config, validationAp
 			errors.CategoryConsolidation,
 		).WithInnerError(err).WithSuggestion("Review engine configuration and database connectivity settings")
 	}
-	defer engine.Close()
+	defer func() { _ = engine.Close() }()
 
 	// Convert migrations to format expected by engine
 	migrationMap := make(map[int]string)
@@ -2588,7 +2584,7 @@ func executeComprehensiveAnalysis(args []string, cfg *config.Config) error {
 			errors.CategoryConsolidation,
 		).WithInnerError(err)
 	}
-	defer engine.Close()
+	defer func() { _ = engine.Close() }()
 
 	// Convert migrations to format expected by engine
 	migrationMap := make(map[int]string)

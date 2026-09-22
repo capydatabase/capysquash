@@ -638,9 +638,9 @@ type ConfigValidationError struct {
 
 func (e *ConfigValidationError) Error() string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Configuration validation errors in %s:\n\n", e.Path))
+	fmt.Fprintf(&sb, "Configuration validation errors in %s:\n\n", e.Path)
 	for i, err := range e.Errors {
-		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, err))
+		fmt.Fprintf(&sb, "  %d. %s\n", i+1, err)
 	}
 	sb.WriteString("\nPlease fix these errors and try again.\n")
 	sb.WriteString("Run 'capysquash init-config' to generate a valid configuration file.\n")

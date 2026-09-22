@@ -6,9 +6,7 @@ import (
 	"strings"
 
 	"github.com/capydatabase/capysquash/internal/errors"
-	"github.com/capydatabase/capysquash/internal/plugins"
 	"github.com/capydatabase/capysquash/internal/postprocessing"
-	"github.com/capydatabase/capysquash/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
@@ -170,27 +168,6 @@ func (st *SQLTransformer) Transform(ctx context.Context, sql string) (*Transform
 
 	result.TransformedSQL = transformedSQL
 	return result, nil
-}
-
-// applyPluginTransformations calls all active plugins to transform SQL
-// Plugins are called in priority order (highest first)
-// Each plugin can modify the SQL (e.g., add volatility markers, fix syntax)
-func (st *SQLTransformer) applyPluginTransformations(ctx context.Context, sql string) (string, error) {
-	registry := plugins.GlobalRegistry()
-
-	// Only transform if plugins are initialized
-	if len(registry.ActivePlugins()) == 0 {
-		return sql, nil // No plugins active, return original SQL
-	}
-
-	// Call TransformSQL on registry (handles priority ordering internally)
-	transformedSQL, err := registry.TransformSQL(ctx, sql)
-	if err != nil {
-		utils.GetDefaultLogger().WithPrefix("SQL-TRANSFORM").Info("[transformation] Plugin transformation error: %v", err)
-		return sql, err // Return original SQL on error
-	}
-
-	return transformedSQL, nil
 }
 
 // transformDMLToSelect converts DML statements to SELECT for dry-run validation
@@ -996,113 +973,6 @@ func (st *SQLTransformer) hasVolatilityMarker(s string) bool {
 		strings.HasPrefix(upper, "STABLE") ||
 		strings.HasPrefix(upper, "VOLATILE")
 	return hasAtStart
-}
-
-// isAuthFunction checks if a function name matches known auth function patterns
-// Auth functions (Clerk, Supabase, etc.) should always be STABLE
-func isAuthFunction(funcName string) bool {
-	lowerName := strings.ToLower(funcName)
-
-	// Clerk auth function patterns
-	clerkPatterns := []string{
-		"current_clerk_",
-		"clerk_user_id",
-		"clerk_is_admin",
-		"clerk_organization",
-		"current_user_id",
-		"current_organization",
-		"validate_jwt",
-		"get_planning_analytics",
-		"set_session_user",
-	}
-
-	// Supabase auth function patterns
-	supabasePatterns := []string{
-		"auth.uid",
-		"auth.jwt",
-		"auth.role",
-	}
-
-	// Check all patterns
-	allPatterns := append(clerkPatterns, supabasePatterns...)
-	for _, pattern := range allPatterns {
-		if strings.Contains(lowerName, pattern) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// determineVolatility analyzes a function body to determine appropriate volatility category.
-//
-// Decision Logic (in order of precedence):
-//
-// 1. VOLATILE - Functions that:
-//   - Modify data: INSERT, UPDATE, DELETE, TRUNCATE
-//   - Modify schema: CREATE, DROP, ALTER
-//   - Use non-deterministic sequences: nextval(), setval(), currval()
-//   - Use randomness: random(), setseed()
-//
-// 2. STABLE - Functions that:
-//   - Read session/auth state: auth.jwt(), auth.uid(), current_user, current_setting()
-//   - Read time (within transaction): now(), current_timestamp, current_date
-//   - Read database: SELECT (any query is at minimum STABLE)
-//
-// 3. IMMUTABLE - Functions that:
-//   - Are purely computational (no DB access, no state)
-//   - Always return same result for same inputs
-//   - Example: Mathematical calculations, string operations
-//
-// Default: STABLE (safest for auth functions, works with index predicates)
-//
-// Note: We err on the side of caution. VOLATILE/STABLE are safe for index predicates,
-// while incorrectly marking a function as IMMUTABLE can cause correctness issues.
-func (st *SQLTransformer) determineVolatility(functionBody string) string {
-	bodyUpper := strings.ToUpper(functionBody)
-
-	// Pattern 1: VOLATILE - Data modification or side effects
-	volatilePatterns := []string{
-		"INSERT ", "UPDATE ", "DELETE ", "TRUNCATE ",
-		"CREATE ", "DROP ", "ALTER ",
-		"NEXTVAL(", "SETVAL(", "CURRVAL(",
-		"RANDOM()", "SETSEED(",
-	}
-	for _, pattern := range volatilePatterns {
-		if strings.Contains(bodyUpper, pattern) {
-			return "VOLATILE"
-		}
-	}
-
-	// Pattern 2: STABLE - Session/database state reads (no modifications)
-	// This is the safest default for auth functions (Clerk, Supabase, Auth0)
-	stablePatterns := []string{
-		"AUTH.JWT()", "AUTH.UID()", "AUTH.ROLE()", // Supabase/Clerk auth
-		"CURRENT_USER", "CURRENT_SETTING(", "SESSION_USER", // PostgreSQL session
-		"CURRENT_TIMESTAMP", "NOW()", "TIMEOFDAY()", // Time functions
-		"CURRENT_DATE", "CURRENT_TIME",
-		"TRANSACTION_TIMESTAMP()", "STATEMENT_TIMESTAMP()",
-		"SELECT ", // Any SELECT query reads state
-	}
-	for _, pattern := range stablePatterns {
-		if strings.Contains(bodyUpper, pattern) {
-			return "STABLE"
-		}
-	}
-
-	// Pattern 3: IMMUTABLE - Pure computational functions only
-	// Very conservative check - must have no database/state access
-	isPure := !strings.Contains(bodyUpper, "SELECT") &&
-		!strings.Contains(bodyUpper, "FROM") &&
-		!strings.Contains(bodyUpper, "PERFORM") &&
-		len(strings.TrimSpace(functionBody)) > 0
-
-	if isPure {
-		return "IMMUTABLE"
-	}
-
-	// Default: STABLE (safest, works with index predicates, appropriate for auth functions)
-	return "STABLE"
 }
 
 // extractFunctionName extracts the function name from a CREATE FUNCTION statement.

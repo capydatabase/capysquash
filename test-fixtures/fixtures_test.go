@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -313,8 +314,10 @@ func loadMigrationsFromDir(dir string) (map[int]string, error) {
 			// Extract sequence number from filename (001_, 002_, etc.)
 			filename := filepath.Base(path)
 			if len(filename) >= 4 && filename[3] == '_' {
-				var seq int
-				fmt.Sscanf(filename[:3], "%d", &seq)
+				seq, err := strconv.Atoi(filename[:3])
+				if err != nil {
+					return fmt.Errorf("parse sequence number of %s: %w", filename, err)
+				}
 
 				content, err := os.ReadFile(path)
 				if err != nil {

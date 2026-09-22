@@ -302,7 +302,7 @@ func (p *ProgressView) runSquash() tea.Msg {
 	if err != nil {
 		return viewtypes.ErrorMsg{Err: fmt.Errorf("failed to initialize squasher engine: %w", err)}
 	}
-	defer engine.Close()
+	defer func() { _ = engine.Close() }()
 
 	// Get migration files
 	files, err := filepath.Glob(filepath.Join(p.migrationDir, "*.sql"))

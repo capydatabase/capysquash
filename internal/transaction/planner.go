@@ -318,32 +318,32 @@ func (tp *TransactionPlanner) FormatPlan(plan *TransactionPlan) string {
 	var output strings.Builder
 
 	output.WriteString("=== Transaction Execution Plan ===\n\n")
-	output.WriteString(fmt.Sprintf("Total Statements: %d\n", plan.TotalStatements))
-	output.WriteString(fmt.Sprintf("Total Batches:    %d\n", plan.TotalBatches))
-	output.WriteString(fmt.Sprintf("Concurrent Ops:   %d\n\n", plan.ConcurrentOps))
+	fmt.Fprintf(&output, "Total Statements: %d\n", plan.TotalStatements)
+	fmt.Fprintf(&output, "Total Batches:    %d\n", plan.TotalBatches)
+	fmt.Fprintf(&output, "Concurrent Ops:   %d\n\n", plan.ConcurrentOps)
 
 	for _, batch := range plan.Batches {
-		output.WriteString(fmt.Sprintf("--- Batch %d ---\n", batch.BatchNumber))
+		fmt.Fprintf(&output, "--- Batch %d ---\n", batch.BatchNumber)
 		if batch.RequiresNoTxn {
 			output.WriteString("  Mode: NO TRANSACTION (concurrent operation)\n")
 		} else {
 			output.WriteString("  Mode: TRANSACTION\n")
 		}
-		output.WriteString(fmt.Sprintf("  Statements: %d\n", len(batch.Statements)))
-		output.WriteString(fmt.Sprintf("  Max Lock:   %s\n", parser.FormatLockLevel(batch.MaxLockLevel)))
-		output.WriteString(fmt.Sprintf("  Est. Time:  %s\n", batch.EstimatedTime))
+		fmt.Fprintf(&output, "  Statements: %d\n", len(batch.Statements))
+		fmt.Fprintf(&output, "  Max Lock:   %s\n", parser.FormatLockLevel(batch.MaxLockLevel))
+		fmt.Fprintf(&output, "  Est. Time:  %s\n", batch.EstimatedTime)
 
 		// Show first few statements
 		for i, stmt := range batch.Statements {
 			if i >= 3 {
-				output.WriteString(fmt.Sprintf("  ... and %d more statements\n", len(batch.Statements)-3))
+				fmt.Fprintf(&output, "  ... and %d more statements\n", len(batch.Statements)-3)
 				break
 			}
 			sqlPreview := stmt.SQL
 			if len(sqlPreview) > 60 {
 				sqlPreview = sqlPreview[:60] + "..."
 			}
-			output.WriteString(fmt.Sprintf("  %d. %s\n", i+1, sqlPreview))
+			fmt.Fprintf(&output, "  %d. %s\n", i+1, sqlPreview)
 		}
 		output.WriteString("\n")
 	}
@@ -351,16 +351,16 @@ func (tp *TransactionPlanner) FormatPlan(plan *TransactionPlan) string {
 	if len(plan.LockConflicts) > 0 {
 		output.WriteString("=== Lock Conflicts ===\n\n")
 		for i, conflict := range plan.LockConflicts {
-			output.WriteString(fmt.Sprintf("%d. %s [%s]\n", i+1, conflict.ConflictType, conflict.Severity))
-			output.WriteString(fmt.Sprintf("   Object: %s.%s\n", conflict.Statement1.ObjectType, conflict.Statement1.ObjectName))
-			output.WriteString(fmt.Sprintf("   Recommendation: %s\n\n", conflict.Recommendation))
+			fmt.Fprintf(&output, "%d. %s [%s]\n", i+1, conflict.ConflictType, conflict.Severity)
+			fmt.Fprintf(&output, "   Object: %s.%s\n", conflict.Statement1.ObjectType, conflict.Statement1.ObjectName)
+			fmt.Fprintf(&output, "   Recommendation: %s\n\n", conflict.Recommendation)
 		}
 	}
 
 	if len(plan.Warnings) > 0 {
 		output.WriteString("=== Warnings ===\n\n")
 		for i, warning := range plan.Warnings {
-			output.WriteString(fmt.Sprintf("%d. %s\n", i+1, warning))
+			fmt.Fprintf(&output, "%d. %s\n", i+1, warning)
 		}
 		output.WriteString("\n")
 	}
@@ -400,10 +400,10 @@ func (tp *TransactionPlanner) FormatLockAnalysis(statements []types.Statement) s
 			continue
 		}
 
-		output.WriteString(fmt.Sprintf("--- %s (%d statements) ---\n", parser.FormatLockLevel(level), len(stmts)))
+		fmt.Fprintf(&output, "--- %s (%d statements) ---\n", parser.FormatLockLevel(level), len(stmts))
 		for i, stmt := range stmts {
 			if i >= 5 {
-				output.WriteString(fmt.Sprintf("  ... and %d more\n", len(stmts)-5))
+				fmt.Fprintf(&output, "  ... and %d more\n", len(stmts)-5)
 				break
 			}
 			sqlPreview := stmt.SQL
@@ -427,17 +427,17 @@ func (tp *TransactionPlanner) FormatLockAnalysis(statements []types.Statement) s
 				flagStr = fmt.Sprintf(" [%s]", strings.Join(flags, ", "))
 			}
 
-			output.WriteString(fmt.Sprintf("  • %s%s\n", sqlPreview, flagStr))
+			fmt.Fprintf(&output, "  • %s%s\n", sqlPreview, flagStr)
 		}
 		output.WriteString("\n")
 	}
 
 	// Summary statistics
 	output.WriteString("=== Summary ===\n\n")
-	output.WriteString(fmt.Sprintf("Total Statements:        %d\n", len(statements)))
-	output.WriteString(fmt.Sprintf("Concurrent Operations:   %d\n", countConcurrent(statements)))
-	output.WriteString(fmt.Sprintf("No-Transaction Required: %d\n", countNoTxn(statements)))
-	output.WriteString(fmt.Sprintf("Preserved Verbatim:      %d\n", countPreserved(statements)))
+	fmt.Fprintf(&output, "Total Statements:        %d\n", len(statements))
+	fmt.Fprintf(&output, "Concurrent Operations:   %d\n", countConcurrent(statements))
+	fmt.Fprintf(&output, "No-Transaction Required: %d\n", countNoTxn(statements))
+	fmt.Fprintf(&output, "Preserved Verbatim:      %d\n", countPreserved(statements))
 
 	return output.String()
 }

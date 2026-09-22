@@ -1,11 +1,6 @@
 package postprocessing
 
-import (
-	"fmt"
-	"strings"
-
-	pg_query "github.com/pganalyze/pg_query_go/v6"
-)
+import "strings"
 
 // StatementFormatter provides AST-aware SQL statement formatting
 // to ensure proper spacing, line breaks, and readability
@@ -25,30 +20,11 @@ func (f *StatementFormatter) FormatSQL(sql string) string {
 		return sql
 	}
 
-	// Try AST-based formatting first (most accurate)
-	if formatted, err := f.formatWithAST(sql); err == nil {
-		return formatted
-	}
-
-	// Fallback to regex-based formatting if AST fails
+	// Regex-based formatting only. AST formatting via pg_query.Deparse() is
+	// deliberately not used: it does not preserve LANGUAGE placement, the
+	// language itself, volatility and security markers, or function body
+	// quoting, and the consolidation rules now keep the original SQL intact.
 	return f.formatWithRegex(sql)
-}
-
-// formatWithAST uses PostgreSQL parser to properly format statements
-func (f *StatementFormatter) formatWithAST(sql string) (string, error) {
-	// DO NOT use formatWithAST - it calls pg_query.Deparse() which corrupts functions
-	// Instead, fall back to regex-based formatting which preserves original SQL
-	//
-	// The issue: pg_query.Deparse() doesn't preserve:
-	// - LANGUAGE placement (before AS vs after body)
-	// - LANGUAGE type (sql vs plpgsql)
-	// - Volatility markers (STABLE, IMMUTABLE, VOLATILE)
-	// - Security markers (SECURITY DEFINER)
-	// - Function body quoting and formatting
-	//
-	// Since we now preserve original SQL in consolidation rules (rule.go, function_dedup_rule.go),
-	// we must NOT deparse it here or we'll corrupt it again.
-	return "", fmt.Errorf("AST-based formatting disabled to prevent function corruption")
 }
 
 // formatWithRegex uses regex patterns to add formatting when AST parsing fails
@@ -66,29 +42,6 @@ func (f *StatementFormatter) formatWithRegex(sql string) string {
 	sql = collapseRunsOfNewlines(sql, 2)
 
 	return sql
-}
-
-// isLargeStatement checks if a statement is "large" (CREATE FUNCTION, CREATE TABLE, etc.)
-// Large statements get extra blank lines for readability
-func isLargeStatement(stmt *pg_query.RawStmt) bool {
-	if stmt == nil || stmt.Stmt == nil {
-		return false
-	}
-
-	// Check statement type
-	switch stmt.Stmt.Node.(type) {
-	case *pg_query.Node_CreateFunctionStmt:
-		return true
-	case *pg_query.Node_CreateStmt: // CREATE TABLE
-		return true
-	case *pg_query.Node_ViewStmt: // CREATE VIEW
-		return true
-	case *pg_query.Node_IndexStmt: // CREATE INDEX
-		// Only add extra space for complex indexes
-		return false
-	default:
-		return false
-	}
 }
 
 // FormatFunctionBody formats the body of a CREATE FUNCTION statement

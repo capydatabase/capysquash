@@ -893,37 +893,6 @@ func (r *AdvancedColumnLifecycleRule) buildConstraintDefinitionFromAST(constrain
 	}
 }
 
-// extractConstraintDefinition extracts the full constraint definition
-func (r *AdvancedColumnLifecycleRule) extractConstraintDefinition(sql string, constraintType string) string {
-	// Find the constraint clause in the SQL
-	upperSQL := strings.ToUpper(sql)
-	startIdx := strings.Index(upperSQL, strings.ToUpper(constraintType))
-	if startIdx == -1 {
-		return ""
-	}
-
-	// Extract until the next comma or closing parenthesis
-	endIdx := len(sql)
-	for i := startIdx; i < len(sql); i++ {
-		if sql[i] == ',' || sql[i] == ')' || sql[i] == ';' {
-			endIdx = i
-			break
-		}
-	}
-
-	return strings.TrimSpace(sql[startIdx:endIdx])
-}
-
-// isSQLKeyword checks if a word is a SQL keyword
-func (r *AdvancedColumnLifecycleRule) isSQLKeyword(word string) bool {
-	keywords := map[string]bool{
-		"and": true, "or": true, "not": true, "null": true,
-		"true": true, "false": true, "between": true, "in": true,
-		"like": true, "is": true, "exists": true,
-	}
-	return keywords[strings.ToLower(word)]
-}
-
 // identifyComplexPatterns identifies complex patterns in column lifecycles
 func (r *AdvancedColumnLifecycleRule) identifyComplexPatterns(columnStates map[string]*ColumnLifecycleState) {
 	for _, col := range columnStates {
@@ -1053,7 +1022,7 @@ func (r *AdvancedColumnLifecycleRule) generateOptimizedCreate(baseSQL string, co
 // buildColumnDefinition builds a column definition from its lifecycle state
 func (r *AdvancedColumnLifecycleRule) buildColumnDefinition(col *ColumnLifecycleState) string {
 	var def strings.Builder
-	def.WriteString(fmt.Sprintf("%s %s", col.Name, col.DataType))
+	fmt.Fprintf(&def, "%s %s", col.Name, col.DataType)
 
 	if !col.IsNullable {
 		def.WriteString(" NOT NULL")
@@ -1361,7 +1330,8 @@ func sqlMentionsIdentifier(sql, identifier string) bool {
 	tokens := strings.FieldsFunc(strings.ToLower(sql), func(r rune) bool {
 		isLowerAlpha := r >= 'a' && r <= 'z'
 		isDigit := r >= '0' && r <= '9'
-		return !(isLowerAlpha || isDigit || r == '_' || r == '.')
+		isIdentifierRune := isLowerAlpha || isDigit || r == '_' || r == '.'
+		return !isIdentifierRune
 	})
 
 	for _, token := range tokens {

@@ -622,7 +622,7 @@ func (ed *ExtensionDetector) generateInstallationScript(extensionDetails map[str
 	// Custom installation commands
 	for _, info := range extensionDetails {
 		if info.InstallCommand != "" {
-			script.WriteString(fmt.Sprintf("# Configure %s\n", info.Name))
+			fmt.Fprintf(&script, "# Configure %s\n", info.Name)
 			script.WriteString("echo \"" + info.InstallCommand + "\" >> /etc/postgresql/postgresql.conf\n\n")
 		}
 	}
@@ -649,15 +649,15 @@ func (ed *ExtensionDetector) generateValidationScript(extensionDetails map[strin
 
 	for _, name := range extensions {
 		info := extensionDetails[name]
-		script.WriteString(fmt.Sprintf("-- Validate %s extension\n", name))
+		fmt.Fprintf(&script, "-- Validate %s extension\n", name)
 
 		if info.ValidationSQL != "" {
 			script.WriteString("DO $$\n")
 			script.WriteString("BEGIN\n")
-			script.WriteString(fmt.Sprintf("  PERFORM %s\n", info.ValidationSQL))
+			fmt.Fprintf(&script, "  PERFORM %s\n", info.ValidationSQL)
 			script.WriteString("EXCEPTION\n")
 			script.WriteString("  WHEN OTHERS THEN\n")
-			script.WriteString(fmt.Sprintf("    RAISE NOTICE 'Extension %s not available: %%', SQLERRM;\n", name))
+			fmt.Fprintf(&script, "    RAISE NOTICE 'Extension %s not available: %%', SQLERRM;\n", name)
 			script.WriteString("END\n")
 			script.WriteString("$$;\n\n")
 		}
@@ -670,7 +670,7 @@ func (ed *ExtensionDetector) generateValidationScript(extensionDetails map[strin
 func (ed *ExtensionDetector) GenerateDockerfile(analysis *ExtensionAnalysis) string {
 	var dockerfile strings.Builder
 
-	dockerfile.WriteString(fmt.Sprintf("FROM %s\n\n", analysis.RecommendedDockerBase))
+	fmt.Fprintf(&dockerfile, "FROM %s\n\n", analysis.RecommendedDockerBase)
 
 	if len(analysis.ExtensionDetails) > 0 {
 		dockerfile.WriteString("# Install required PostgreSQL extensions\n")
@@ -718,8 +718,8 @@ func (ed *ExtensionDetector) GenerateInitSQL(analysis *ExtensionAnalysis) string
 			cascade = " CASCADE"
 		}
 
-		script.WriteString(fmt.Sprintf("-- Create %s extension\n", extName))
-		script.WriteString(fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS \"%s\"%s;\n\n", extName, cascade))
+		fmt.Fprintf(&script, "-- Create %s extension\n", extName)
+		fmt.Fprintf(&script, "CREATE EXTENSION IF NOT EXISTS \"%s\"%s;\n\n", extName, cascade)
 	}
 
 	return script.String()

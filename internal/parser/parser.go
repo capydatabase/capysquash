@@ -1650,7 +1650,8 @@ func cleanSQL(sql string) string {
 func extractNestedTypesFromDoBlock(doBlockSQL string) []string {
 	var nestedTypes []string
 	tokens := strings.FieldsFunc(doBlockSQL, func(r rune) bool {
-		return !(r == '_' || r == '.' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+		isIdentifierRune := r == '_' || r == '.' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		return !isIdentifierRune
 	})
 
 	for i := 0; i+3 < len(tokens); i++ {

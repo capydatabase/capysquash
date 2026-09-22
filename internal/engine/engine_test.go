@@ -159,7 +159,7 @@ func TestEngine_SquashFiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewEngine() error = %v", err)
 			}
-			defer eng.Close()
+			defer func() { _ = eng.Close() }()
 
 			result, err := eng.SquashFiles(tt.migrations)
 			if (err != nil) != tt.wantErr {
@@ -203,7 +203,7 @@ func TestEngine_GetStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	// Get initial stats (before squashing)
 	initialStats := eng.GetStats()
@@ -247,7 +247,7 @@ func TestEngine_GetMemoryStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	stats := eng.GetMemoryStats()
 
@@ -305,7 +305,7 @@ func TestEngine_ProgressCallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	_, err = eng.SquashFiles(migrations)
 	// Don't fail if squashing has errors, just check callback was invoked
@@ -341,7 +341,7 @@ func TestEngine_GetResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	// Before squashing, result should be nil
 	if result := eng.GetResult(); result != nil {
@@ -538,7 +538,7 @@ func TestEngine_CycleDetectionConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewEngine() error = %v", err)
 			}
-			defer eng.Close()
+			defer func() { _ = eng.Close() }()
 
 			// Verify engine was created successfully with cycle detection config
 			if eng == nil {
@@ -567,7 +567,7 @@ func TestEngine_GetSafetyLevel(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewEngine() error = %v", err)
 			}
-			defer eng.Close()
+			defer func() { _ = eng.Close() }()
 
 			if got := eng.GetSafetyLevel(); got != tt.safetyLevel {
 				t.Errorf("GetSafetyLevel() = %v, want %v", got, tt.safetyLevel)
@@ -594,7 +594,7 @@ func TestEngine_GetExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	// Before squashing, should return empty
 	exts := eng.GetExtensions()
@@ -608,7 +608,7 @@ func TestEngine_GetAuthCompatibilitySQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	// Should not panic
 	authSQL := eng.GetAuthCompatibilitySQL()
@@ -622,7 +622,7 @@ func TestEngine_GetWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	// Before squashing, should return empty
 	warnings := eng.GetWarnings()
@@ -661,6 +661,8 @@ func BenchmarkEngine_SquashFiles(b *testing.B) {
 			b.Fatalf("SquashFiles() error = %v", err)
 		}
 
-		eng.Close()
+		if err := eng.Close(); err != nil {
+			b.Fatalf("Close() error = %v", err)
+		}
 	}
 }

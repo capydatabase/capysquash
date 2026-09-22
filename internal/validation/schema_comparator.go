@@ -260,7 +260,7 @@ func collectCatalogDefinitions(ctx context.Context, db *sql.DB, kind, query stri
 	if err != nil {
 		return fmt.Errorf("list %s signatures: %w", kind, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var identifier, definition string

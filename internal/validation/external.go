@@ -42,7 +42,7 @@ func (sv *SchemaValidator) ApplyAndSnapshot(
 	if err != nil {
 		return nil, fmt.Errorf("open external validation database: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("connect to external validation database: %w", err)

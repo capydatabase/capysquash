@@ -4,7 +4,6 @@ package metadata
 import (
 	"context"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 
@@ -305,22 +304,17 @@ func (sc *SchemaComparator) compareColumns(schema, tableName string, stmt types.
 	}
 
 	// Check for missing columns in DB
-	for colName, typeName := range migColumns {
-		if dbCol, exists := dbCols[colName]; !exists {
+	for colName := range migColumns {
+		if _, exists := dbCols[colName]; !exists {
 			result.SchemaDrift = append(result.SchemaDrift, SchemaDrift{
 				Object:      fmt.Sprintf("%s.%s", tableName, colName),
 				ObjectType:  "COLUMN",
 				Description: fmt.Sprintf("Column %s defined in migration but not found in database", colName),
 				DriftType:   "missing_in_db",
 			})
-		} else {
-			// Basic type check (using helper if compatible)
-			// Normalize types before comparison (very rough)
-			if !areTypesCompatible(typeName, dbCol.DataType) {
-				// Don't flag specific errors yet as type mapping is complex, but checking existence is broken
-				// result.Warnings = append(result.Warnings, fmt.Sprintf("Possible type mismatch for %s.%s: migration=%s, db=%s", tableName, colName, typeName, dbCol.DataType))
-			}
 		}
+		// Type compatibility is not compared: PostgreSQL type-name mapping is
+		// too loose for a reliable check, so only existence is verified.
 	}
 }
 
@@ -471,51 +465,6 @@ func extractAllObjects(migration *types.Migration) map[string]types.ObjectType {
 		objects[strings.ToLower(stmt.ObjectName)] = stmt.ObjectType
 	}
 	return objects
-}
-
-func areTypesCompatible(migType, dbType string) bool {
-	// Normalize types for comparison
-	migType = normalizeType(migType)
-	dbType = normalizeType(dbType)
-
-	// Exact match
-	if migType == dbType {
-		return true
-	}
-
-	// Compatible type aliases
-	compatibleTypes := map[string][]string{
-		"integer":   {"int", "int4"},
-		"bigint":    {"int8"},
-		"smallint":  {"int2"},
-		"boolean":   {"bool"},
-		"character": {"char"},
-		"text":      {"varchar"},
-	}
-
-	for canonical, aliases := range compatibleTypes {
-		if migType == canonical {
-			if slices.Contains(aliases, dbType) {
-				return true
-			}
-		}
-		if dbType == canonical {
-			if slices.Contains(aliases, migType) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-func normalizeType(typ string) string {
-	typ = strings.ToLower(strings.TrimSpace(typ))
-	// Remove precision/length for comparison
-	if idx := strings.Index(typ, "("); idx > 0 {
-		typ = typ[:idx]
-	}
-	return typ
 }
 
 func buildMetadataSignatureLines(dbMeta *DatabaseMetadata) []string {

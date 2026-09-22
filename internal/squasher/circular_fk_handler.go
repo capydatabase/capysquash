@@ -516,7 +516,7 @@ func (h *CircularFKHandler) removeConstraintsFromCreateTable(
 func (h *CircularFKHandler) generateAlterTableAddConstraint(fk *ForeignKeyConstraint) *types.Statement {
 	var sql strings.Builder
 
-	sql.WriteString(fmt.Sprintf("ALTER TABLE %s\n", fk.SourceTable))
+	fmt.Fprintf(&sql, "ALTER TABLE %s\n", fk.SourceTable)
 	sql.WriteString("    ADD CONSTRAINT ")
 
 	// Generate constraint name if not present

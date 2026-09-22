@@ -120,7 +120,7 @@ func (g *DDLGenerator) generateColumn() string {
 	dataType := g.generateDataType()
 
 	var columnDef strings.Builder
-	columnDef.WriteString(fmt.Sprintf("%s %s", columnName, dataType))
+	fmt.Fprintf(&columnDef, "%s %s", columnName, dataType)
 
 	// Add constraints
 	if g.rand.Float32() < 0.2 {
@@ -139,7 +139,7 @@ func (g *DDLGenerator) generateColumn() string {
 	if g.rand.Float32() < 0.2 {
 		defaultValue := g.generateDefaultValue(dataType)
 		if defaultValue != "" {
-			columnDef.WriteString(fmt.Sprintf(" DEFAULT %s", defaultValue))
+			fmt.Fprintf(&columnDef, " DEFAULT %s", defaultValue)
 		}
 	}
 
@@ -147,7 +147,7 @@ func (g *DDLGenerator) generateColumn() string {
 	if g.rand.Float32() < 0.1 {
 		check := g.generateCheckConstraint()
 		if check != "" {
-			columnDef.WriteString(fmt.Sprintf(" CHECK (%s)", check))
+			fmt.Fprintf(&columnDef, " CHECK (%s)", check)
 		}
 	}
 

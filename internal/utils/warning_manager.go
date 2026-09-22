@@ -225,39 +225,39 @@ func (wm *WarningManager) FormatWarnings() string {
 
 	// Critical warnings
 	if critical := bySeverity[errors.SeverityCritical]; len(critical) > 0 {
-		output.WriteString(fmt.Sprintf("\n🔴 Critical (%d):\n", len(critical)))
+		fmt.Fprintf(&output, "\n🔴 Critical (%d):\n", len(critical))
 		for _, w := range critical {
-			output.WriteString(fmt.Sprintf("  ► %s\n", w.Message))
+			fmt.Fprintf(&output, "  ► %s\n", w.Message)
 			if w.Suggestion != "" {
-				output.WriteString(fmt.Sprintf("    → %s\n", w.Suggestion))
+				fmt.Fprintf(&output, "    → %s\n", w.Suggestion)
 			}
 		}
 	}
 
 	// Error severity warnings (maps to High in old system)
 	if errSev := bySeverity[errors.SeverityError]; len(errSev) > 0 {
-		output.WriteString(fmt.Sprintf("\n🟠 Error (%d):\n", len(errSev)))
+		fmt.Fprintf(&output, "\n🟠 Error (%d):\n", len(errSev))
 		for _, w := range errSev {
-			output.WriteString(fmt.Sprintf("  ► %s\n", w.Message))
+			fmt.Fprintf(&output, "  ► %s\n", w.Message)
 			if w.Suggestion != "" {
-				output.WriteString(fmt.Sprintf("    → %s\n", w.Suggestion))
+				fmt.Fprintf(&output, "    → %s\n", w.Suggestion)
 			}
 		}
 	}
 
 	// Warning severity (maps to Medium/Low in old system)
 	if warn := bySeverity[errors.SeverityWarning]; len(warn) > 0 {
-		output.WriteString(fmt.Sprintf("\n🟡 Warning (%d):\n", len(warn)))
+		fmt.Fprintf(&output, "\n🟡 Warning (%d):\n", len(warn))
 		for _, w := range warn {
-			output.WriteString(fmt.Sprintf("  ► %s\n", w.Message))
+			fmt.Fprintf(&output, "  ► %s\n", w.Message)
 		}
 	}
 
 	// Info severity
 	if info := bySeverity[errors.SeverityInfo]; len(info) > 0 {
-		output.WriteString(fmt.Sprintf("\nℹ️  Info (%d):\n", len(info)))
+		fmt.Fprintf(&output, "\nℹ️  Info (%d):\n", len(info))
 		for _, w := range info {
-			output.WriteString(fmt.Sprintf("  ► %s\n", w.Message))
+			fmt.Fprintf(&output, "  ► %s\n", w.Message)
 		}
 	}
 

@@ -178,13 +178,13 @@ func (p *ConsolidationPlan) FormatPlan() string {
 	// Summary
 	sb.WriteString("📊 SUMMARY\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	sb.WriteString(fmt.Sprintf("Input:  %d migration files, %d operations\n", p.TotalMigrations, p.TotalOperations))
-	sb.WriteString(fmt.Sprintf("Output: %d migration file, %d operations\n", p.EstimatedReduction.FinalFiles, p.EstimatedReduction.FinalOperations))
-	sb.WriteString(fmt.Sprintf("Reduction: %d fewer files (%.1f%%), %d fewer operations (%.1f%%)\n\n",
+	fmt.Fprintf(&sb, "Input:  %d migration files, %d operations\n", p.TotalMigrations, p.TotalOperations)
+	fmt.Fprintf(&sb, "Output: %d migration file, %d operations\n", p.EstimatedReduction.FinalFiles, p.EstimatedReduction.FinalOperations)
+	fmt.Fprintf(&sb, "Reduction: %d fewer files (%.1f%%), %d fewer operations (%.1f%%)\n\n",
 		p.EstimatedReduction.FilesReduced,
 		float64(p.EstimatedReduction.FilesReduced)/float64(p.TotalMigrations)*100,
 		p.EstimatedReduction.OperationsReduced,
-		p.EstimatedReduction.PercentageReduced))
+		p.EstimatedReduction.PercentageReduced)
 
 	// Consolidations
 	if len(p.Consolidations) > 0 {
@@ -192,19 +192,19 @@ func (p *ConsolidationPlan) FormatPlan() string {
 		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 		for i, consolidation := range p.Consolidations {
-			sb.WriteString(fmt.Sprintf("[%d] %s.%s (%s)\n", i+1, consolidation.ObjectSchema, consolidation.ObjectName, consolidation.ObjectType))
-			sb.WriteString(fmt.Sprintf("    Rule: %s\n", consolidation.Rule))
-			sb.WriteString(fmt.Sprintf("    Reason: %s\n", consolidation.Reason))
-			sb.WriteString(fmt.Sprintf("    Safety: %s | Risk: %s\n", consolidation.SafetyLevel, consolidation.RiskLevel))
-			sb.WriteString(fmt.Sprintf("    Operations: %d → 1 (-%d operations)\n\n", len(consolidation.Operations), len(consolidation.Operations)-1))
+			fmt.Fprintf(&sb, "[%d] %s.%s (%s)\n", i+1, consolidation.ObjectSchema, consolidation.ObjectName, consolidation.ObjectType)
+			fmt.Fprintf(&sb, "    Rule: %s\n", consolidation.Rule)
+			fmt.Fprintf(&sb, "    Reason: %s\n", consolidation.Reason)
+			fmt.Fprintf(&sb, "    Safety: %s | Risk: %s\n", consolidation.SafetyLevel, consolidation.RiskLevel)
+			fmt.Fprintf(&sb, "    Operations: %d → 1 (-%d operations)\n\n", len(consolidation.Operations), len(consolidation.Operations)-1)
 
 			// Show before/after
 			sb.WriteString("    Before:\n")
 			for j, op := range consolidation.Operations {
-				sb.WriteString(fmt.Sprintf("      %d. %s\n", j+1, op))
+				fmt.Fprintf(&sb, "      %d. %s\n", j+1, op)
 			}
 			if consolidation.ResultSQL != "" {
-				sb.WriteString(fmt.Sprintf("\n    After:\n      → %s\n\n", consolidation.ResultSQL))
+				fmt.Fprintf(&sb, "\n    After:\n      → %s\n\n", consolidation.ResultSQL)
 			}
 			sb.WriteString("    ───────────────────────────────────────────────────────────────\n\n")
 		}
@@ -216,11 +216,11 @@ func (p *ConsolidationPlan) FormatPlan() string {
 		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 		for i, conflict := range p.CannotConsolidate {
-			sb.WriteString(fmt.Sprintf("[%d] %s (%s)\n", i+1, conflict.ObjectName, conflict.ObjectType))
-			sb.WriteString(fmt.Sprintf("    Reason: %s\n", conflict.Reason))
+			fmt.Fprintf(&sb, "[%d] %s (%s)\n", i+1, conflict.ObjectName, conflict.ObjectType)
+			fmt.Fprintf(&sb, "    Reason: %s\n", conflict.Reason)
 			sb.WriteString("    Operations:\n")
 			for j, op := range conflict.Operations {
-				sb.WriteString(fmt.Sprintf("      %d. %s\n", j+1, op))
+				fmt.Fprintf(&sb, "      %d. %s\n", j+1, op)
 			}
 			sb.WriteString("\n")
 		}
@@ -229,9 +229,9 @@ func (p *ConsolidationPlan) FormatPlan() string {
 	// Estimated time savings
 	sb.WriteString("\n⏱️  ESTIMATED IMPACT\n")
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	sb.WriteString(fmt.Sprintf("Database Operations Eliminated: %d\n", p.EstimatedReduction.OperationsReduced))
-	sb.WriteString(fmt.Sprintf("Migration Complexity Reduced: %.1f%%\n", p.EstimatedReduction.PercentageReduced))
-	sb.WriteString(fmt.Sprintf("Estimated Execution Time Saved: ~%d ms per deployment\n", p.EstimatedReduction.OperationsReduced*10))
+	fmt.Fprintf(&sb, "Database Operations Eliminated: %d\n", p.EstimatedReduction.OperationsReduced)
+	fmt.Fprintf(&sb, "Migration Complexity Reduced: %.1f%%\n", p.EstimatedReduction.PercentageReduced)
+	fmt.Fprintf(&sb, "Estimated Execution Time Saved: ~%d ms per deployment\n", p.EstimatedReduction.OperationsReduced*10)
 	sb.WriteString("\n")
 
 	sb.WriteString("═══════════════════════════════════════════════════════════════════\n")

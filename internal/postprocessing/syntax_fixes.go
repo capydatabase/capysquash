@@ -408,7 +408,7 @@ func removeOrphanedVolatilityAfterDollar(line string) (string, bool) {
 		pos++
 	}
 
-	keywordEnd := pos
+	var keywordEnd int
 	if strings.HasPrefix(upper[pos:], "STABLE") {
 		keywordEnd = pos + len("STABLE")
 	} else if strings.HasPrefix(upper[pos:], "VOLATILE") {

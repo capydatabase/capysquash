@@ -1208,7 +1208,6 @@ func (e *Engine) SquashFromDirectory(dir string) (*SquashResult, error) {
 		).WithInnerError(err)
 	}
 	extAnalysis := e.prepareMigrationEnvironment(ctx, migrationContents)
-	migrationContents = nil // release for GC before streaming begins
 
 	// Phase 1: Stream parse and track migrations
 	e.updatePhase("Parsing and Tracking")
@@ -3573,7 +3572,7 @@ func OptimizedSquashForLargeDatasets(cfg *config.Config, migrations map[int]stri
 	if err != nil {
 		return nil, err
 	}
-	defer engine.Close()
+	defer func() { _ = engine.Close() }()
 
 	return engine.SquashStreaming(migrations)
 }
@@ -3596,7 +3595,7 @@ func OptimizedSquashFromDirectory(cfg *config.Config, dir string, memoryLimitMB 
 	if err != nil {
 		return nil, err
 	}
-	defer engine.Close()
+	defer func() { _ = engine.Close() }()
 
 	return engine.SquashFromDirectory(dir)
 }

@@ -224,35 +224,35 @@ func (sm *SquashMap) FormatSquashMap() string {
 	var output strings.Builder
 
 	output.WriteString("=== Squash Map ===\n\n")
-	output.WriteString(fmt.Sprintf("Version:      %s\n", sm.Version))
-	output.WriteString(fmt.Sprintf("Timestamp:    %s\n", sm.Timestamp.Format(time.RFC3339)))
-	output.WriteString(fmt.Sprintf("Safety Mode:  %s\n", sm.SafetyMode))
-	output.WriteString(fmt.Sprintf("PG Version:   %s\n", sm.PGVersion))
-	output.WriteString(fmt.Sprintf("Extensions:   %v\n", sm.Extensions))
-	output.WriteString(fmt.Sprintf("Content Hash: %s\n\n", sm.ContentHash))
+	fmt.Fprintf(&output, "Version:      %s\n", sm.Version)
+	fmt.Fprintf(&output, "Timestamp:    %s\n", sm.Timestamp.Format(time.RFC3339))
+	fmt.Fprintf(&output, "Safety Mode:  %s\n", sm.SafetyMode)
+	fmt.Fprintf(&output, "PG Version:   %s\n", sm.PGVersion)
+	fmt.Fprintf(&output, "Extensions:   %v\n", sm.Extensions)
+	fmt.Fprintf(&output, "Content Hash: %s\n\n", sm.ContentHash)
 
 	output.WriteString("=== Input/Output ===\n\n")
-	output.WriteString(fmt.Sprintf("Input Files:  %d\n", len(sm.Inputs)))
+	fmt.Fprintf(&output, "Input Files:  %d\n", len(sm.Inputs))
 	for _, input := range sm.Inputs {
-		output.WriteString(fmt.Sprintf("  - %s\n", input))
+		fmt.Fprintf(&output, "  - %s\n", input)
 	}
 
-	output.WriteString(fmt.Sprintf("\nOutput Files: %d\n", len(sm.Outputs)))
+	fmt.Fprintf(&output, "\nOutput Files: %d\n", len(sm.Outputs))
 	for _, out := range sm.Outputs {
-		output.WriteString(fmt.Sprintf("  - %s\n", out))
+		fmt.Fprintf(&output, "  - %s\n", out)
 	}
 
 	output.WriteString("\n=== Statistics ===\n\n")
-	output.WriteString(fmt.Sprintf("Original Statements:     %d\n", sm.Stats.OriginalStatements))
-	output.WriteString(fmt.Sprintf("Consolidated Statements: %d\n", sm.Stats.ConsolidatedStatements))
-	output.WriteString(fmt.Sprintf("Reduction Rate:          %.2f%%\n", sm.Stats.ReductionRate))
-	output.WriteString(fmt.Sprintf("Files Processed:         %d\n", sm.Stats.FilesProcessed))
-	output.WriteString(fmt.Sprintf("Files Generated:         %d\n", sm.Stats.FilesGenerated))
+	fmt.Fprintf(&output, "Original Statements:     %d\n", sm.Stats.OriginalStatements)
+	fmt.Fprintf(&output, "Consolidated Statements: %d\n", sm.Stats.ConsolidatedStatements)
+	fmt.Fprintf(&output, "Reduction Rate:          %.2f%%\n", sm.Stats.ReductionRate)
+	fmt.Fprintf(&output, "Files Processed:         %d\n", sm.Stats.FilesProcessed)
+	fmt.Fprintf(&output, "Files Generated:         %d\n", sm.Stats.FilesGenerated)
 
 	if len(sm.Warnings) > 0 {
 		output.WriteString("\n=== Warnings ===\n\n")
 		for i, warning := range sm.Warnings {
-			output.WriteString(fmt.Sprintf("%d. %s\n", i+1, warning))
+			fmt.Fprintf(&output, "%d. %s\n", i+1, warning)
 		}
 	}
 

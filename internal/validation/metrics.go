@@ -406,15 +406,15 @@ func (m *ValidationMetrics) ExportPrometheus(w io.Writer) error {
 
 	// Helper to write metric
 	writeMetric := func(name, help, mtype string, value any, labels ...string) {
-		sb.WriteString(fmt.Sprintf("# HELP %s %s\n", name, help))
-		sb.WriteString(fmt.Sprintf("# TYPE %s %s\n", name, mtype))
+		fmt.Fprintf(&sb, "# HELP %s %s\n", name, help)
+		fmt.Fprintf(&sb, "# TYPE %s %s\n", name, mtype)
 
 		labelStr := ""
 		if len(labels) > 0 {
 			labelStr = "{" + strings.Join(labels, ",") + "}"
 		}
 
-		sb.WriteString(fmt.Sprintf("%s%s %v\n\n", name, labelStr, value))
+		fmt.Fprintf(&sb, "%s%s %v\n\n", name, labelStr, value)
 	}
 
 	// Timing metrics

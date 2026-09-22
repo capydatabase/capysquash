@@ -940,13 +940,13 @@ func (sv *SchemaValidator) validateWithTwoDatabases(ctx context.Context, origina
 	if err != nil {
 		return result, fmt.Errorf("failed to connect to original database: %v", err)
 	}
-	defer origDB.Close()
+	defer func() { _ = origDB.Close() }()
 
 	squashDB, err := sql.Open("postgres", squashedDSN)
 	if err != nil {
 		return result, fmt.Errorf("failed to connect to squashed database: %v", err)
 	}
-	defer squashDB.Close()
+	defer func() { _ = squashDB.Close() }()
 
 	// Use SchemaComparator for semantic diff
 	comparator := NewSchemaComparator(sv)
@@ -1056,13 +1056,13 @@ func (sv *SchemaValidator) validateWithTwoContainers(ctx context.Context, origin
 	if err != nil {
 		return result, fmt.Errorf("failed to connect to original database: %v", err)
 	}
-	defer origDB.Close()
+	defer func() { _ = origDB.Close() }()
 
 	squashDB, err := sql.Open("postgres", squashedDSN)
 	if err != nil {
 		return result, fmt.Errorf("failed to connect to squashed database: %v", err)
 	}
-	defer squashDB.Close()
+	defer func() { _ = squashDB.Close() }()
 
 	comparator := NewSchemaComparator(sv)
 	diff, err := comparator.CompareDatabases(ctx, origDB, squashDB)
@@ -1118,7 +1118,7 @@ func (sv *SchemaValidator) validateWithSchemaDiff(ctx context.Context, originalP
 		result.Error = fmt.Sprintf("failed to connect to admin database: %v", err)
 		return result, err
 	}
-	defer adminDB.Close()
+	defer func() { _ = adminDB.Close() }()
 
 	recreateDiffDatabase := func() error {
 		// Terminate any lingering connections before dropping.
@@ -1138,7 +1138,7 @@ func (sv *SchemaValidator) validateWithSchemaDiff(ctx context.Context, originalP
 		if err != nil {
 			return nil, fmt.Errorf("connect for snapshot: %w", err)
 		}
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		return collectSchemaSignature(ctx, db)
 	}
 
@@ -1507,7 +1507,8 @@ func normalizeCreateFunctionHeader(line string) (string, bool) {
 
 func tokenizeValidationIdentifiers(sql string) []string {
 	raw := strings.FieldsFunc(sql, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.')
+		isIdentifierRune := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.'
+		return !isIdentifierRune
 	})
 
 	tokens := make([]string, 0, len(raw))

@@ -93,14 +93,6 @@ func filterIgnoredViolations(rawSQL string, violations []Violation) []Violation 
 	return filtered
 }
 
-// statementWindowWithLeadingComments expands the statement slice to include
-// immediately preceding comment/blank lines so marker comments above a
-// statement can suppress that statement's rule violations.
-func statementWindowWithLeadingComments(rawSQL string, start, end int32) string {
-	windowStart, windowEnd := statementWindowBoundsWithLeadingComments(rawSQL, start, end)
-	return strings.TrimSpace(rawSQL[windowStart:windowEnd])
-}
-
 func statementWindowBoundsWithLeadingComments(rawSQL string, start, end int32) (int, int) {
 	prefixStart := int(start)
 	for prefixStart > 0 {

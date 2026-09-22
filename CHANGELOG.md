@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CI lint job: golangci-lint v2.12.2 is built with Go 1.26 and refuses a `go 1.27.1`
   module before linting anything; the pin is now v2.13.2.
+- golangci-lint is clean (it had 66 findings once it could run): unchecked `Close`
+  errors are now explicitly discarded or reported, dead helpers left behind by
+  the `pkg/` removal are deleted (type-dependency scanning, volatility and
+  auth-function heuristics, plugin SQL transforms, the disabled AST
+  formatter, the never-implemented column type check), `WriteString(Sprintf)`
+  became `Fprintf`, and two ineffectual assignments and one always-false
+  comparison are gone. No behaviour change.
 
 ## [1.0.0] - 2026-09-22
 

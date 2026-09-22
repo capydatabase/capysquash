@@ -1236,71 +1236,6 @@ func (udr *UnifiedDependencyResolver) extractExtensionProvisions(sql string) []s
 	return udr.removeDuplicates(provides)
 }
 
-// extractTypeDependencies finds type/enum references that need to be created first
-func (udr *UnifiedDependencyResolver) extractTypeDependencies(sql string) []string {
-	var deps []string
-
-	if stmts := udr.parseStatementsForDependencyExtraction(sql); len(stmts) > 0 {
-		seenTypes := make(map[string]struct{})
-
-		for _, stmt := range stmts {
-			if stmt.ObjectType != types.TypeTable || stmt.Operation != types.OpCreate || stmt.ParseTree == nil {
-				continue
-			}
-
-			for _, raw := range stmt.ParseTree.Stmts {
-				createStmt := raw.Stmt.GetCreateStmt()
-				if createStmt == nil {
-					continue
-				}
-
-				for _, tableElt := range createStmt.TableElts {
-					colDef := tableElt.GetColumnDef()
-					if colDef == nil || colDef.TypeName == nil {
-						continue
-					}
-
-					typeName := strings.ToLower(strings.TrimSpace(typeNameFromAST(colDef.TypeName)))
-					if typeName == "" || isBuiltInOrKeywordType(typeName) {
-						continue
-					}
-
-					if _, exists := seenTypes[typeName]; exists {
-						continue
-					}
-
-					seenTypes[typeName] = struct{}{}
-					deps = append(deps, fmt.Sprintf("type:%s", typeName))
-					utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Table depends on custom type: %s", typeName)
-				}
-			}
-		}
-
-		deps = udr.removeDuplicates(deps)
-		if len(deps) > 0 {
-			return deps
-		}
-	}
-
-	// Fallback for SQL fragments that cannot be parsed as full CREATE TABLE statements.
-	seenTypes := make(map[string]struct{})
-	for _, typeName := range scanPotentialCustomTypes(sql) {
-		typeName = strings.ToLower(strings.TrimSpace(typeName))
-		if typeName == "" || isBuiltInOrKeywordType(typeName) {
-			continue
-		}
-
-		if _, exists := seenTypes[typeName]; exists {
-			continue
-		}
-
-		seenTypes[typeName] = struct{}{}
-		deps = append(deps, fmt.Sprintf("type:%s", typeName))
-	}
-
-	return udr.removeDuplicates(deps)
-}
-
 func (udr *UnifiedDependencyResolver) parseStatementsForDependencyExtraction(sql string) []types.Statement {
 	migration, err := parser.ParseMigration(sql, "__dependency_extraction__.sql")
 	if err != nil || migration == nil || len(migration.Statements) == 0 {
@@ -1423,7 +1358,8 @@ func tokenizeSQLIdentifiers(sql string) []string {
 	}
 
 	raw := strings.FieldsFunc(sql, func(r rune) bool {
-		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.')
+		isIdentifierRune := unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.'
+		return !isIdentifierRune
 	})
 
 	tokens := make([]string, 0, len(raw))
@@ -1745,44 +1681,6 @@ func (udr *UnifiedDependencyResolver) extractCreatedExtensionNames(sql string) [
 	return udr.removeDuplicates(names)
 }
 
-func scanPotentialCustomTypes(sql string) []string {
-	tokens := tokenizeSQLIdentifiers(sql)
-	if len(tokens) < 2 {
-		return nil
-	}
-
-	blocked := map[string]bool{
-		"create": true, "table": true, "alter": true, "add": true, "column": true,
-		"constraint": true, "primary": true, "foreign": true, "references": true,
-		"check": true, "default": true, "not": true, "null": true, "unique": true,
-		"key": true, "as": true, "enum": true, "type": true, "on": true,
-		"delete": true, "update": true, "set": true, "if": true, "exists": true,
-		"returns": true, "function": true,
-	}
-
-	typesFound := make([]string, 0)
-	for i := 0; i+1 < len(tokens); i++ {
-		left := strings.ToLower(strings.TrimSpace(tokens[i]))
-		right := strings.ToLower(strings.TrimSpace(tokens[i+1]))
-
-		if left == "" || right == "" {
-			continue
-		}
-
-		if blocked[left] || blocked[right] {
-			continue
-		}
-
-		if !isIdentifierToken(left) || !isIdentifierToken(right) {
-			continue
-		}
-
-		typesFound = append(typesFound, right)
-	}
-
-	return removeDuplicateStrings(typesFound)
-}
-
 func enhanceExtensionStatementWithCascade(sql string, cascadeExtensions map[string]bool) string {
 	trimmed := strings.TrimSpace(sql)
 	if trimmed == "" {
@@ -1848,52 +1746,6 @@ func normalizeDependencyIdentifier(dep string) string {
 	}
 
 	return strings.ToLower(strings.TrimSpace(trimmed))
-}
-
-func typeNameFromAST(typeName *pg_query.TypeName) string {
-	if typeName == nil || len(typeName.Names) == 0 {
-		return ""
-	}
-
-	last := typeName.Names[len(typeName.Names)-1]
-	strNode := last.GetString_()
-	if strNode == nil {
-		return ""
-	}
-
-	return strNode.Sval
-}
-
-func isBuiltInOrKeywordType(typeName string) bool {
-	postgresBuiltinTypes := map[string]bool{
-		"text": true, "varchar": true, "char": true, "character": true,
-		"integer": true, "int": true, "int2": true, "int4": true, "int8": true,
-		"smallint": true, "bigint": true, "serial": true, "bigserial": true,
-		"numeric": true, "decimal": true, "real": true, "double": true, "float": true,
-		"boolean": true, "bool": true, "date": true, "time": true,
-		"timestamp": true, "timestamptz": true, "interval": true,
-		"json": true, "jsonb": true, "uuid": true, "bytea": true,
-		"array": true, "hstore": true, "xml": true, "money": true,
-		"point": true, "line": true, "lseg": true, "box": true, "path": true,
-		"polygon": true, "circle": true, "cidr": true, "inet": true, "macaddr": true,
-		"tsvector": true, "tsquery": true, "geometry": true, "geography": true,
-	}
-
-	sqlKeywords := map[string]bool{
-		"table": true, "not": true, "null": true, "check": true, "constraint": true,
-		"primary": true, "foreign": true, "key": true, "references": true,
-		"unique": true, "default": true, "exists": true, "if": true, "enable": true,
-		"disable": true, "cascade": true, "restrict": true, "on": true, "delete": true,
-		"update": true, "no": true, "action": true, "set": true, "add": true,
-		"alter": true, "drop": true, "row": true, "level": true, "security": true,
-	}
-
-	normalized := strings.ToLower(strings.TrimSpace(typeName))
-	if normalized == "" || len(normalized) <= 3 {
-		return true
-	}
-
-	return postgresBuiltinTypes[normalized] || sqlKeywords[normalized]
 }
 
 // extractTypeProvisions finds what types/enums this SQL creates
