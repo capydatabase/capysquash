@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // ModernPatternRule defines optimization rules for modern PostgreSQL patterns

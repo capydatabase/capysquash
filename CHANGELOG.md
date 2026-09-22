@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to pgsquash-engine will be documented in this file.
+All notable changes to capysquash will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -9,11 +9,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **⚠️ Important Notice**
 >
-> This tool modifies SQL migration files. Always maintain backups of your original migrations before running consolidation operations. While pgsquash includes validation and safety checks, you should verify the output matches your expectations. Test consolidated migrations in a non-production environment first.
+> This tool modifies SQL migration files. Always maintain backups of your original migrations before running consolidation operations. While capysquash includes validation and safety checks, you should verify the output matches your expectations. Test consolidated migrations in a non-production environment first.
 
 ---
 
 ## [Unreleased]
+
+The CapySquash product this engine grew out of is retired, and the engine
+takes its name: the module is `github.com/capydatabase/capysquash` and the
+binary is `capysquash`. Everything that only existed for the product is gone;
+what is left is a standalone CLI.
+
+### Changed
+
+- **Renamed from pgsquash-engine to capysquash.** The module path is
+  `github.com/capydatabase/capysquash`, the entry point is `cmd/capysquash`,
+  the binary and the root command are `capysquash`, the config file it
+  auto-loads is `capysquash.config.json` (`init-config` writes it), the log
+  level variable is `CAPYSQUASH_LOG_LEVEL`, and the manual-override pragmas
+  are `-- capysquash:ignore` and `-- capysquash:no-merge`. The
+  `validate-external` contract strings are `capysquash.external-validation.v1`
+  and `capysquash.catalog-snapshot.v1`; a CapyDB CLI older than 1.7.0 expects
+  the `pgsquash.*` names and must be upgraded alongside this release. The lint
+  directives (`-- capysquash-ignore:` family) and the `CSQ.*` rule codes are
+  unchanged from v0.11.0.
+- The container image runs `capysquash` directly (`ENTRYPOINT ["capysquash"]`)
+  instead of a setup entrypoint, and the compose files only pass
+  `CAPYSQUASH_LOG_LEVEL` (the other `PGSQUASH_*` variables were read by nothing).
+- The version baked into a `go build` without ldflags is `dev` instead of a
+  stale `0.9.7`.
+- CI is one workflow: build, vet, race tests and a binary smoke test on the
+  `go.mod` toolchain, `validate-external` against PostgreSQL 15-18, and
+  golangci-lint. The release workflow reads its Go version from `go.mod`;
+  previously it pinned 1.26.5 against a `go 1.27.1` module and failed before
+  publishing any archive.
+- Repository links, the GoReleaser owner and the image labels point at
+  `github.com/capydatabase/capysquash`. README, CONTRIBUTING and
+  SECURITY describe the standalone CLI.
+
+### Removed
+
+- **The public Go API.** `pkg/` is gone; the engine is consumed as the
+  `capysquash` binary (the CapyDB CLI drives it through `validate-external`),
+  and everything now lives under `internal/`. The `pkg/cli` branded-binary
+  entry point, `pkg/rules`, `pkg/errors`, `pkg/utils`, the plugin detection
+  and compatibility API, the partner-integration metrics, the `examples/`
+  programs and the package READMEs went with it.
+- **The AI harness.** `pkg/harness`, the deterministic context/report/artifact
+  builders, the `squash --emit-context` and `--context-output` flags, and the
+  `deterministic_artifact`, `deterministic_report` and `harness_context` keys
+  of `squash --dry-run --json`. The remaining keys (`baseline_sql`,
+  `data_operations_sql`, `auth_compatibility_sql`, `safety_level`, `warnings`)
+  are unchanged.
+- **The CapySquash product plumbing.** `SetBrandName` and the second, branded
+  binary it produced, the `.capysquash.yml` GitHub App configuration and its
+  loader, the `.github/capysquash.yml` and `.github/capysquash.config.*`
+  GitHub App examples, the `test-branding.sh` script, and the `health` command
+  (a container health endpoint for the retired API server).
+- The API server pointers under `docker/api-server/`, the container
+  entrypoint that drove commands that no longer exist (`validate-config`,
+  `workflow`, `validate --docker`), the duplicated `docker/engine` and
+  `docker/dev-environment` stacks, `docker/scripts/`, the unreferenced init
+  SQL, and the `deploy.sh`, `init-pgsquash.sh`, `validate.sh` and
+  `build.sh` shell scripts. `Makefile` replaces the build scripts.
+- The `develop`, `cli-split` and `refactor` branches (all merged or
+  superseded by `main`).
+
+### Fixed
+
+- `go test ./...` failed on `test-fixtures/` since v0.10.0: the fixture and
+  fuzz suites still imported the pre-rename `github.com/capy-base/...` path,
+  and `go.mod` required the module itself.
+- `docker/postgres/Dockerfile` is now tracked. A `docker/` line in
+  `.gitignore` had kept it out of the repository, so `compose.yaml` could not
+  build `postgres-primary` from a fresh clone.
 
 ## [0.11.0] - 2026-09-09
 
@@ -605,9 +674,9 @@ Correctness overhaul across the safety ladder, validation, output pipeline, and 
 - Enables better code review, parallel migrations, and incremental deployment
 - CLI: `pgsquash squash --split category` or `--split hybrid`
 
-[Unreleased]: https://github.com/capy-base/pgsquash-engine/compare/v0.11.0...HEAD
-[0.11.0]: https://github.com/capy-base/pgsquash-engine/compare/v0.10.0...v0.11.0
-[0.10.0]: https://github.com/capy-base/pgsquash-engine/compare/v0.9.7...v0.10.0
-[0.9.7]: https://github.com/capy-base/pgsquash-engine/compare/v0.8.5-beta...v0.9.7
-[0.8.5-beta]: https://github.com/capy-base/pgsquash-engine/compare/v0.8.2-beta...v0.8.5-beta
-[0.8.2-beta]: https://github.com/capy-base/pgsquash-engine/releases/tag/v0.8.2-beta
+[Unreleased]: https://github.com/capydatabase/capysquash/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/capydatabase/capysquash/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/capydatabase/capysquash/compare/v0.9.7...v0.10.0
+[0.9.7]: https://github.com/capydatabase/capysquash/compare/v0.8.5-beta...v0.9.7
+[0.8.5-beta]: https://github.com/capydatabase/capysquash/compare/v0.8.2-beta...v0.8.5-beta
+[0.8.2-beta]: https://github.com/capydatabase/capysquash/releases/tag/v0.8.2-beta

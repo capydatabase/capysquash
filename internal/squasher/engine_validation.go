@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/pkg/validation"
+	"github.com/capydatabase/capysquash/internal/validation"
 )
 
 func (e *Engine) runPreFlightValidation(ctx context.Context, migrations map[int]string) error {

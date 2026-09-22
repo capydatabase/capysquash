@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/capysquash/internal/errors"
 )
 
 // WarningManager handles deduplication and categorization of warnings

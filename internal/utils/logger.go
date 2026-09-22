@@ -38,7 +38,7 @@ func (l LogLevel) String() string {
 	}
 }
 
-// Logger is a simple structured logger for pgsquash
+// Logger is a simple structured logger for capysquash
 type Logger struct {
 	minLevel LogLevel
 	output   io.Writer

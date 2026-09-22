@@ -1,26 +1,24 @@
-# pgsquash — CLI with Docker-based validation.
+# capysquash — CLI with Docker-based validation.
 # Needs access to /var/run/docker.sock (Docker Desktop running on macOS/Windows;
 # membership of the `docker` group on Linux).
 #
-#   docker compose -f docker/validation/with-validation.yml run --rm pgsquash validate --docker /app/migrations
-#   docker compose -f docker/validation/with-validation.yml run --rm pgsquash workflow --validate
-#   docker compose -f docker/validation/with-validation.yml run --rm pgsquash squash /app/migrations --validate
-#   docker compose -f docker/validation/with-validation.yml run --rm \
-#     -e PGSQUASH_POSTGRES_VERSION=17 pgsquash validate --docker
+#   docker compose -f docker/validation/with-validation.yml run --rm capysquash squash /app/migrations --output /app/output
+#   docker compose -f docker/validation/with-validation.yml run --rm capysquash validate /app/migrations /app/output
+#   docker compose -f docker/validation/with-validation.yml run --rm capysquash safe /app/migrations --output /app/output
 #
 # `run`, not `up`: this is a one-shot CLI that exits when its command finishes.
 
-name: pgsquash-validation
+name: capysquash-validation
 
 services:
-  pgsquash:
+  capysquash:
     build:
       context: ../..
       dockerfile: Dockerfile
       target: runtime
       provenance: false
       sbom: false
-    image: pgsquash:latest
+    image: capysquash:latest
     restart: "no"
     # The socket is root:root 0660, so a non-root uid simply cannot open it -
     # the image's own uid 10001 gets "permission denied" and validation dies.
@@ -39,10 +37,7 @@ services:
         max-size: "20m"
         max-file: "5"
     environment:
-      PGSQUASH_SAFETY_LEVEL: ${PGSQUASH_SAFETY_LEVEL:-standard}
-      PGSQUASH_LOG_LEVEL: ${PGSQUASH_LOG_LEVEL:-debug}
-      PGSQUASH_DOCKER_ENABLED: "true"
-      PGSQUASH_AUTO_VALIDATE: "true"
+      CAPYSQUASH_LOG_LEVEL: ${CAPYSQUASH_LOG_LEVEL:-debug}
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ${MIGRATIONS_DIR:-./migrations}:/app/migrations:ro

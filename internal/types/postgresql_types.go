@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/capysquash/internal/errors"
 )
 
 // PostgreSQLTypeSystem handles PostgreSQL-specific type operations and conversions

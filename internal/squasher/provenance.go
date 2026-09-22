@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/capysquash/internal/errors"
 )
 
 // SquashMap represents the complete mapping of a squash operation
 type SquashMap struct {
 	// Metadata
-	Version     string    `json:"version"`      // pgsquash version
+	Version     string    `json:"version"`      // capysquash version
 	Timestamp   time.Time `json:"timestamp"`    // When the squash was performed
 	SafetyMode  string    `json:"safety_mode"`  // Safety level used (paranoid, conservative, standard, aggressive)
 	PGVersion   string    `json:"pg_version"`   // PostgreSQL version targeted

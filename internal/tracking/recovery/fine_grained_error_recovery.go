@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // ErrorRecoveryStrategy defines different approaches to handling errors

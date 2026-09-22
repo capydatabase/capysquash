@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // FixExtensionOrder ensures extensions are in correct dependency order.
@@ -114,7 +114,7 @@ func FixExtensionOrder(sql string) string {
 			return strings.Join(result, "\n")
 		} else {
 			// If header not found, we can't safely reorder without risking breaking other things or putting them at top.
-			// But usually pgsquash generates this header.
+			// But usually capysquash generates this header.
 			utils.GetDefaultLogger().WithPrefix("POSTPROCESS").Warn("Extension header not found, skipping reordering")
 		}
 	}

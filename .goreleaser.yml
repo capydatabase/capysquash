@@ -1,11 +1,11 @@
-# Native release archives for the standalone pgsquash CLI.
+# Native release archives for the standalone capysquash CLI.
 # pg_query_go requires CGO, so release.yml runs this through goreleaser-cross.
 version: 2
 
 builds:
-  - id: pgsquash-linux-amd64
-    main: ./cmd/pgsquash
-    binary: pgsquash
+  - id: capysquash-linux-amd64
+    main: ./cmd/capysquash
+    binary: capysquash
     env: [CGO_ENABLED=1, CC=x86_64-linux-gnu-gcc, CXX=x86_64-linux-gnu-g++]
     goos: [linux]
     goarch: [amd64]
@@ -17,9 +17,9 @@ builds:
       - -X main.gitCommit={{.FullCommit}}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
-  - id: pgsquash-linux-arm64
-    main: ./cmd/pgsquash
-    binary: pgsquash
+  - id: capysquash-linux-arm64
+    main: ./cmd/capysquash
+    binary: capysquash
     env: [CGO_ENABLED=1, CC=aarch64-linux-gnu-gcc, CXX=aarch64-linux-gnu-g++]
     goos: [linux]
     goarch: [arm64]
@@ -31,9 +31,9 @@ builds:
       - -X main.gitCommit={{.FullCommit}}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
-  - id: pgsquash-darwin-amd64
-    main: ./cmd/pgsquash
-    binary: pgsquash
+  - id: capysquash-darwin-amd64
+    main: ./cmd/capysquash
+    binary: capysquash
     env: [CGO_ENABLED=1, CC=o64-clang, CXX=o64-clang++]
     goos: [darwin]
     goarch: [amd64]
@@ -45,9 +45,9 @@ builds:
       - -X main.gitCommit={{.FullCommit}}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
-  - id: pgsquash-darwin-arm64
-    main: ./cmd/pgsquash
-    binary: pgsquash
+  - id: capysquash-darwin-arm64
+    main: ./cmd/capysquash
+    binary: capysquash
     env: [CGO_ENABLED=1, CC=oa64-clang, CXX=oa64-clang++]
     goos: [darwin]
     goarch: [arm64]
@@ -60,12 +60,12 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
-  - id: pgsquash-archive
+  - id: capysquash-archive
     ids:
-      - pgsquash-linux-amd64
-      - pgsquash-linux-arm64
-      - pgsquash-darwin-amd64
-      - pgsquash-darwin-arm64
+      - capysquash-linux-amd64
+      - capysquash-linux-arm64
+      - capysquash-darwin-amd64
+      - capysquash-darwin-arm64
     formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_
@@ -92,18 +92,18 @@ changelog:
 
 release:
   github:
-    owner: capysquash
-    name: pgsquash-engine
+    owner: capydatabase
+    name: capysquash
   draft: false
   prerelease: auto
   mode: replace
   header: |
-    ## pgsquash-engine {{ .Version }}
+    ## capysquash {{ .Version }}
 
     Native archives are attached for Linux and macOS on amd64 and arm64.
     Verify downloads against `checksums.txt` before installation.
   footer: |
-    Full changelog: https://github.com/capysquash/pgsquash-engine/compare/{{ .PreviousTag }}...{{ .Tag }}
+    Full changelog: https://github.com/capydatabase/capysquash/compare/{{ .PreviousTag }}...{{ .Tag }}
 
 metadata:
   mod_timestamp: "{{ .CommitTimestamp }}"

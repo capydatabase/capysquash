@@ -3,7 +3,7 @@ package validation
 import (
 	"fmt"
 
-	parserutil "github.com/capydatabase/pgsquash-engine/internal/parser"
+	parserutil "github.com/capydatabase/capysquash/internal/parser"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

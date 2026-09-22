@@ -1,4 +1,4 @@
-// Package prisma provides Prisma ORM integration for pgsquash.
+// Package prisma provides Prisma ORM integration for capysquash.
 // It handles Prisma-generated migrations, schema.prisma patterns, and migration metadata.
 package prisma
 
@@ -7,9 +7,9 @@ import (
 	"database/sql"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/plugins"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/plugins"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // PrismaPlugin implements Prisma ORM integration

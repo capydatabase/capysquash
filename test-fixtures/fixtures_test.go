@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/capy-base/pgsquash-engine/pkg/engine"
+	"github.com/capydatabase/capysquash/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -179,7 +179,7 @@ func testSafetyMode(t *testing.T, fixture FixtureTest, safetyMode SafetyLevel, o
 	config := engine.DefaultConfig()
 	config.SafetyLevel = engineSafetyLevel
 
-	// Run squash using public API
+	// Run squash through the internal/engine façade
 	result, err := engine.SquashFiles(originalMigrations, config)
 	require.NoError(t, err, "Failed to squash migrations")
 

@@ -5,7 +5,7 @@ package volatility
 import (
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/capysquash/internal/errors"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

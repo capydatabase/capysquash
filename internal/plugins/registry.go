@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/types"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // Registry manages the lifecycle of all plugins
@@ -36,8 +36,8 @@ func NewRegistry() *Registry {
 //
 // Registration is idempotent by plugin name: registering a plugin whose name
 // is already present is a no-op. This allows every entry point (CLI main,
-// pkg/engine construction, library callers) to ensure the default plugin set
-// is registered without coordinating a single init site.
+// internal/engine construction, tests) to ensure the default plugin set is
+// registered without coordinating a single init site.
 func (r *Registry) Register(plugin Plugin) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

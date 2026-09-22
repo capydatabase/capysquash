@@ -77,7 +77,7 @@ func TestSquashDryRunIsPure(t *testing.T) {
 	}
 
 	// No staging directory may be left behind either.
-	staging, err := filepath.Glob(filepath.Join(root, ".pgsquash-staging-*"))
+	staging, err := filepath.Glob(filepath.Join(root, ".capysquash-staging-*"))
 	if err != nil {
 		t.Fatalf("glob failed: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSquashSmokeEndToEnd(t *testing.T) {
 	t.Setenv("PROD_DB_DSN", "")
 
 	// A distinctive version proves the stamp is threaded from SetVersionInfo
-	// rather than being the hardcoded "0.9.7" fallback.
+	// rather than being the "dev" fallback.
 	const testVersion = "9.9.9-clitest"
 	setTestVersionInfo(t, testVersion, "2026-07-07", "cafebabe")
 
@@ -182,8 +182,8 @@ func TestSquashSmokeEndToEnd(t *testing.T) {
 	if squashmap.Version != testVersion {
 		t.Errorf("squashmap version = %q, want %q (version must be threaded from SetVersionInfo)", squashmap.Version, testVersion)
 	}
-	if squashmap.Version == "0.9.7" {
-		t.Error("squashmap version is the hardcoded fallback \"0.9.7\" despite SetVersionInfo being called")
+	if squashmap.Version == "dev" {
+		t.Error("squashmap version is the \"dev\" fallback despite SetVersionInfo being called")
 	}
 	if squashmap.SafetyMode != "standard" {
 		t.Errorf("squashmap safety_mode = %q, want %q (default config)", squashmap.SafetyMode, "standard")
@@ -198,7 +198,7 @@ func TestSquashSmokeEndToEnd(t *testing.T) {
 
 	// Staging directories are created next to the output dir and must be
 	// gone after promotion.
-	staging, err := filepath.Glob(filepath.Join(root, ".pgsquash-staging-*"))
+	staging, err := filepath.Glob(filepath.Join(root, ".capysquash-staging-*"))
 	if err != nil {
 		t.Fatalf("glob failed: %v", err)
 	}

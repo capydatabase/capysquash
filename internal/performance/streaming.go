@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/parser"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/parser"
+	"github.com/capydatabase/capysquash/internal/types"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // StreamingProcessor handles memory-efficient processing of large migration sets

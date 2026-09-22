@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/plugins"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/plugins"
+	"github.com/capydatabase/capysquash/internal/types"
+	"github.com/capydatabase/capysquash/internal/utils"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

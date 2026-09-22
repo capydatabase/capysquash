@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/utils"
 
-	"github.com/capydatabase/pgsquash-engine/internal/metadata"
-	"github.com/capydatabase/pgsquash-engine/internal/parser"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/metadata"
+	"github.com/capydatabase/capysquash/internal/parser"
+	"github.com/capydatabase/capysquash/internal/types"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

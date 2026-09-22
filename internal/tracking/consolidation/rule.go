@@ -3,9 +3,9 @@ package consolidation
 import (
 	"fmt"
 
-	"github.com/capydatabase/pgsquash-engine/internal/config"
-	"github.com/capydatabase/pgsquash-engine/internal/tracking"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/config"
+	"github.com/capydatabase/capysquash/internal/tracking"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // ConsolidationRule interface for consolidation rules used by the squasher

@@ -3,8 +3,8 @@ package prisma
 import (
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/plugins"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/plugins"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // GetConsolidationRules returns Prisma-specific consolidation rules

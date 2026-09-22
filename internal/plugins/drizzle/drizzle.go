@@ -1,4 +1,4 @@
-// Package drizzle provides Drizzle ORM integration for pgsquash.
+// Package drizzle provides Drizzle ORM integration for capysquash.
 // It handles Drizzle-generated migrations, identity columns, and drizzle-kit patterns.
 package drizzle
 
@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/plugins"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/plugins"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // DrizzlePlugin implements Drizzle ORM integration

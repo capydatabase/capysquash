@@ -37,7 +37,7 @@ func TestExternalCatalogValidationAgainstPostgres(t *testing.T) {
 	}
 	defer admin.Close()
 
-	databaseName := fmt.Sprintf("pgsquash_external_%d", time.Now().UnixNano())
+	databaseName := fmt.Sprintf("capysquash_external_%d", time.Now().UnixNano())
 	databaseURL := *parsed
 	databaseURL.Path = "/" + databaseName
 	dsn := databaseURL.String()

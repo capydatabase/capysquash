@@ -88,7 +88,7 @@ func TestSafetyLadderNoDeadCodeRule(t *testing.T) {
 
 // TestParseSafetyLevelRejection verifies ParseSafetyLevel accepts every valid
 // level and rejects unknown values (the single choke point wired into the CLI
-// flag handler, pkg/engine convertConfig, and NewSquasherRuleEngine).
+// flag handler, internal/engine convertConfig, and NewSquasherRuleEngine).
 func TestParseSafetyLevelRejection(t *testing.T) {
 	t.Parallel()
 

@@ -4,8 +4,8 @@ package utils
 import (
 	"fmt"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // ObjectType validation

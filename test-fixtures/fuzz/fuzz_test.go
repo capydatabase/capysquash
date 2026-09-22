@@ -1,4 +1,4 @@
-// Package fuzz provides property-based testing for pgsquash-engine.
+// Package fuzz provides property-based testing for capysquash.
 // It generates random DDL sequences and validates that squashing preserves schema equivalence.
 package fuzz
 
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/capy-base/pgsquash-engine/pkg/engine"
+	"github.com/capydatabase/capysquash/internal/engine"
 	"github.com/stretchr/testify/assert"
 )
 

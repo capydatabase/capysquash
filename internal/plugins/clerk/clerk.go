@@ -1,4 +1,4 @@
-// Package clerk provides Clerk authentication integration for pgsquash.
+// Package clerk provides Clerk authentication integration for capysquash.
 // It handles JWT v2 organization claims, user ID extraction, and RLS policy patterns.
 package clerk
 
@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/plugins"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/plugins"
+	"github.com/capydatabase/capysquash/internal/types"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

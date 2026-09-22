@@ -5,10 +5,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/parser"
-	"github.com/capydatabase/pgsquash-engine/internal/tracking"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/parser"
+	"github.com/capydatabase/capysquash/internal/tracking"
+	"github.com/capydatabase/capysquash/internal/types"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

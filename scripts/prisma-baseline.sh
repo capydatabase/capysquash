@@ -1,6 +1,6 @@
 #!/bin/bash
 # Prisma baseline script - applies squashed migrations and marks old ones as applied
-# This script helps integrate pgsquash with Prisma's migration system
+# This script helps integrate capysquash with Prisma's migration system
 
 set -e
 
@@ -15,7 +15,7 @@ echo -e "${GREEN}=== Prisma Baseline Script ===${NC}\n"
 # Check if .squashmap.json exists
 if [ ! -f ".squashmap.json" ]; then
     echo -e "${RED}Error: .squashmap.json not found${NC}"
-    echo "Please run pgsquash first to generate the squashmap file"
+    echo "Please run capysquash first to generate the squashmap file"
     exit 1
 fi
 

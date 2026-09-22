@@ -1,6 +1,6 @@
 # Test Fixtures Library
 
-This directory contains comprehensive test fixtures for validating pgsquash functionality across different scenarios and edge cases.
+This directory contains comprehensive test fixtures for validating capysquash functionality across different scenarios and edge cases.
 
 ## 📁 Fixture Structure
 
@@ -95,7 +95,7 @@ Tests materialized view handling and REFRESH operations.
 
 ### 6. `pragma_examples`
 
-Tests manual override pragmas (` -  pgsquash:ignore`, ` -  pgsquash:no-merge`).
+Tests manual override pragmas (` -  capysquash:ignore`, ` -  capysquash:no-merge`).
 
 **Scenarios tested:**
 
@@ -181,7 +181,7 @@ Tests use Docker containers for schema validation:
 
 docker run --rm -d \
   -e POSTGRES_PASSWORD=test \
-  -e POSTGRES_DB=pgsquash_test \
+  -e POSTGRES_DB=capysquash_test \
   -p 5432:5432 \
   postgres:17
 

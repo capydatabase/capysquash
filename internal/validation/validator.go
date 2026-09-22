@@ -16,11 +16,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/performance"
-	"github.com/capydatabase/pgsquash-engine/internal/plugins"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/performance"
+	"github.com/capydatabase/capysquash/internal/plugins"
+	"github.com/capydatabase/capysquash/internal/types"
+	"github.com/capydatabase/capysquash/internal/utils"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
@@ -1642,10 +1642,10 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		},
 		Cmd: []string{"postgres", "-c", "shared_preload_libraries=pg_stat_statements"},
 		Labels: map[string]string{
-			"pgsquash.type":    "validation",
-			"pgsquash.session": sessionID,
-			"pgsquash.cleanup": "auto",
-			"pgsquash.created": time.Now().Format(time.RFC3339),
+			"capysquash.type":    "validation",
+			"capysquash.session": sessionID,
+			"capysquash.cleanup": "auto",
+			"capysquash.created": time.Now().Format(time.RFC3339),
 		},
 	}, &container.HostConfig{
 		PortBindings: nat.PortMap{
@@ -1661,7 +1661,7 @@ func (sv *SchemaValidator) createEnhancedContainer(ctx context.Context, extensio
 		SecurityOpt: []string{
 			"no-new-privileges",
 		},
-	}, nil, nil, fmt.Sprintf("pgsquash-validation-%s", sessionID))
+	}, nil, nil, fmt.Sprintf("capysquash-validation-%s", sessionID))
 
 	if err != nil {
 		return nil, errors.NewError(
@@ -2083,7 +2083,7 @@ func (sv *SchemaValidator) installExtensions(ctx context.Context, containerInfo 
 //
 // And cache with content-based tags like:
 //
-//	pgsquash-postgres:17-debian-sha256-abc123
+//	capysquash-postgres:17-debian-sha256-abc123
 //
 // This keeps the flexibility of runtime installation while gaining
 // speed benefits of pre-built images for common extension combinations.
@@ -2285,7 +2285,7 @@ func (sv *SchemaValidator) setupDatabases(ctx context.Context, containerInfo *Co
 	if originalErr != nil {
 		if sv.config.Verbose {
 			color.Yellow("⚠️  Original migrations have errors (this is expected): %v\n", originalErr)
-			color.Yellow("    Note: pgsquash is designed to fix broken migrations\n")
+			color.Yellow("    Note: capysquash is designed to fix broken migrations\n")
 		}
 		// Don't fail validation - just track that original failed
 	}

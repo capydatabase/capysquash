@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/capydatabase/pgsquash-engine/pkg/tui"
+	"github.com/capydatabase/capysquash/internal/tui"
 	"github.com/spf13/cobra"
 )
 
 var tuiCmd = &cobra.Command{
 	Use:   "tui [migrations-dir]",
 	Short: "Launch interactive TUI for migration analysis and squashing",
-	Long: `Launch the interactive terminal user interface (TUI) for pgsquash.
+	Long: `Launch the interactive terminal user interface (TUI) for capysquash.
 
 The TUI provides a visual interface for:
   ► Analyzing migrations and viewing lifecycle patterns
@@ -20,8 +20,8 @@ The TUI provides a visual interface for:
   ► Monitoring squashing progress in real-time
 
 Examples:
-  pgsquash tui migrations/
-  pgsquash tui
+  capysquash tui migrations/
+  capysquash tui
 `,
 	RunE: runTUI,
 }
@@ -75,7 +75,6 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Get config path from flag or default
 	configPath, _ := cmd.Flags().GetString("config")
 
-	// Launch the TUI using the public API
 	return tui.Launch(migrationDir, configPath)
 }
 
@@ -96,18 +95,16 @@ func runTUIAnalyze(cmd *cobra.Command, args []string) error {
 
 	configPath, _ := cmd.Flags().GetString("config")
 
-	// Launch TUI directly into analysis view using the public API
 	return tui.LaunchWithView(migrationDir, configPath, tui.ViewAnalysis)
 }
 
 // runTUIConfig runs the TUI and navigates to configuration view
 func runTUIConfig(cmd *cobra.Command, args []string) error {
-	configPath := "pgsquash.config.json"
+	configPath := "capysquash.config.json"
 	if len(args) > 0 {
 		configPath = args[0]
 	}
 
-	// Launch TUI directly into config view using the public API
 	return tui.LaunchWithView(".", configPath, tui.ViewConfig)
 }
 
@@ -128,6 +125,5 @@ func runTUIDepGraph(cmd *cobra.Command, args []string) error {
 
 	configPath, _ := cmd.Flags().GetString("config")
 
-	// Launch TUI directly into dependency graph view using the public API
 	return tui.LaunchWithView(migrationDir, configPath, tui.ViewDependencyGraph)
 }

@@ -3,8 +3,8 @@ package supabase
 import (
 	"context"
 
-	"github.com/capydatabase/pgsquash-engine/internal/plugins/auth"
-	"github.com/capydatabase/pgsquash-engine/internal/plugins/volatility"
+	"github.com/capydatabase/capysquash/internal/plugins/auth"
+	"github.com/capydatabase/capysquash/internal/plugins/volatility"
 )
 
 // InjectCompatibilityLayer returns SQL to mock Supabase authentication for validation

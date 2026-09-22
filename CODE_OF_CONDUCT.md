@@ -76,7 +76,7 @@ Account, or acting as an appointed representative at an online or offline event.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be.
 Reported to the project maintainers responsible for enforcement at:
 
-**Report**: [Open a private report on GitHub](https://github.com/capysquash/pgsquash-engine/issues/new)
+**Report**: [Open a private report on GitHub](https://github.com/capydatabase/capysquash/issues/new)
 
 All complaints will be reviewed and investigated promptly and fairly.
 

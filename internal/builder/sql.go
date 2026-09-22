@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/types"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 

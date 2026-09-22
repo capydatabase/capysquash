@@ -17,17 +17,16 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/capydatabase/pgsquash-engine/internal/config"
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/parser"
-	"github.com/capydatabase/pgsquash-engine/internal/squasher"
-	"github.com/capydatabase/pgsquash-engine/internal/tracking"
-	"github.com/capydatabase/pgsquash-engine/internal/transformation"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
-	"github.com/capydatabase/pgsquash-engine/internal/validation"
-	engineapi "github.com/capydatabase/pgsquash-engine/pkg/engine"
-	harnesscontract "github.com/capydatabase/pgsquash-engine/pkg/harness"
+	"github.com/capydatabase/capysquash/internal/config"
+	engineapi "github.com/capydatabase/capysquash/internal/engine"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/parser"
+	"github.com/capydatabase/capysquash/internal/squasher"
+	"github.com/capydatabase/capysquash/internal/tracking"
+	"github.com/capydatabase/capysquash/internal/transformation"
+	"github.com/capydatabase/capysquash/internal/types"
+	"github.com/capydatabase/capysquash/internal/utils"
+	"github.com/capydatabase/capysquash/internal/validation"
 )
 
 var (
@@ -63,8 +62,6 @@ var (
 	strictParse            bool
 	openReport             bool
 	customDockerImage      string
-	emitHarnessReport      bool
-	harnessReportPath      string
 	externalDSN            string
 	externalDSNEnv         string
 	snapshotOutput         string
@@ -89,14 +86,12 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:     "pgsquash",
-	Short:   "pgsquash-engine - Intelligent PostgreSQL migration consolidation",
-	Version: "0.9.7",
-	Long: `pgsquash-engine intelligently consolidates PostgreSQL migration files into
-clean, production-ready SQL while preserving data integrity, respecting
-dependencies, and validating safety at every step.
-
-The pgsquash-engine can be used directly or embedded through its public Go API.`,
+	Use:     "capysquash",
+	Short:   "capysquash - Intelligent PostgreSQL migration consolidation",
+	Version: "dev",
+	Long: `capysquash consolidates PostgreSQL migration files into clean,
+production-ready SQL while preserving data integrity, respecting dependencies,
+and validating safety at every step.`,
 	// UX FIX: Silence duplicate error messages - errors are already logged in main()
 	SilenceErrors: true,
 	// UX FIX: Don't show usage on every error - only when explicitly requested with --help
@@ -149,9 +144,9 @@ var lintCmd = &cobra.Command{
 	Long: `Run static AST-based lint checks against migration SQL files.
 
 Examples:
-  pgsquash lint ./migrations
-  pgsquash lint ./migrations/*.sql --enable-rule CSQ.SAFETY.CONCURRENT_INDEX
-  pgsquash lint ./migrations --fix --write
+  capysquash lint ./migrations
+  capysquash lint ./migrations/*.sql --enable-rule CSQ.SAFETY.CONCURRENT_INDEX
+  capysquash lint ./migrations --fix --write
 `,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runLint,
@@ -160,7 +155,7 @@ Examples:
 var initConfigCmd = &cobra.Command{
 	Use:   "init-config",
 	Short: "Generate default configuration file",
-	Long:  `Create a default pgsquash.config.json file with all available options.`,
+	Long:  `Create a default capysquash.config.json file with all available options.`,
 	RunE:  runInitConfig,
 }
 
@@ -230,7 +225,7 @@ func init() {
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "",
-		"Config file (default: pgsquash.config.json)")
+		"Config file (default: capysquash.config.json)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false,
 		"Verbose output")
 
@@ -306,10 +301,6 @@ func init() {
 		"Open validation report in $EDITOR after validation")
 	squashCmd.Flags().StringVar(&customDockerImage, "docker-image", "",
 		"Custom Docker image with pre-installed extensions (e.g., 'myregistry/postgres-postgis:17')")
-	squashCmd.Flags().BoolVar(&emitHarnessReport, "emit-context", false,
-		"Emit deterministic AI harness context artifact after squash")
-	squashCmd.Flags().StringVar(&harnessReportPath, "context-output", "",
-		"Path to write deterministic context artifact (default: <output>/.capysquash.context.v1.json)")
 
 	// Branch safety flags
 	squashCmd.Flags().BoolVar(&branchCheck, "branch-check", false,
@@ -401,7 +392,7 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 			"Failed to load configuration",
 			errors.SeverityError,
 			errors.CategoryValidation,
-		).WithFile(configPath).WithInnerError(err).WithSuggestion("Run 'pgsquash init-config' to generate a valid configuration file")
+		).WithFile(configPath).WithInnerError(err).WithSuggestion("Run 'capysquash init-config' to generate a valid configuration file")
 	}
 
 	if !cmd.Flags().Changed("progress") {
@@ -533,14 +524,10 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	}
 
 	startTime := time.Now()
-	validationStatus := "skipped"
-	validationModeUsed := ""
-	objectsConsolidated := 0
 
 	// If explain mode is enabled, imply dry-run
 	if explainMode {
 		dryRun = true
-		validationStatus = "dry_run"
 	}
 
 	// Enforce branch safety checks for non-dry-run squashing.
@@ -575,7 +562,7 @@ func runSquash(cmd *cobra.Command, args []string) error {
 			"Failed to load configuration",
 			errors.SeverityError,
 			errors.CategoryValidation,
-		).WithFile(configPath).WithInnerError(err).WithSuggestion("Run 'pgsquash init-config' to generate a valid configuration file")
+		).WithFile(configPath).WithInnerError(err).WithSuggestion("Run 'capysquash init-config' to generate a valid configuration file")
 	}
 
 	// Override config with command line flags.
@@ -600,11 +587,6 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	// Config show_progress wins when --progress was not explicitly set.
 	if !cmd.Flags().Changed("progress") {
 		showProgress = cfg.Performance.ShowProgress
-	}
-
-	validationModeUsed = strings.ToUpper(strings.TrimSpace(cfg.Validation.Mode))
-	if validationModeUsed == "" {
-		validationModeUsed = "TWO_DATABASES"
 	}
 
 	// Auto-detect worker count if not specified
@@ -689,7 +671,6 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	var dataOperationsSQL string
 	var provenanceMap *squasher.SquashMap
 	var requiredExtensions []string
-	var harnessMigrations []engineapi.DeterministicHarnessMigration
 
 	// Use streaming engine for large datasets or when explicitly requested
 	if useStreaming {
@@ -702,7 +683,6 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		harnessMigrations = deterministicHarnessMigrations(migrations)
 
 		parsePolicyWarnings, err := enforcePartialParsePolicy(migrations, strictParse)
 		if err != nil {
@@ -794,7 +774,6 @@ func runSquash(cmd *cobra.Command, args []string) error {
 			requiredExtensions = squashResult.Extensions
 
 			migrationCount = len(migrations)
-			objectsConsolidated = int(engine.GetStats().ConsolidationsApplied)
 
 			// Print final progress line
 			if showProgress {
@@ -807,7 +786,6 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		harnessMigrations = deterministicHarnessMigrations(migrations)
 
 		parsePolicyWarnings, err := enforcePartialParsePolicy(migrations, strictParse)
 		if err != nil {
@@ -871,7 +849,6 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		warnings = append(squashResult.Warnings, parsePolicyWarnings...)
 		authCompatibilitySQL = squashResult.AuthCompatibilitySQL
 		migrationCount = len(migrations)
-		objectsConsolidated = int(engine.GetStats().ConsolidationsApplied)
 		dataOperationsSQL = squashResult.DataOperationsSQL
 		provenanceMap = squashResult.ProvenanceMap
 		requiredExtensions = squashResult.Extensions
@@ -932,56 +909,10 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	// Regular dry-run mode (without detailed explanation)
 	if dryRun {
 		if squashJSON {
-			result := &engineapi.SquashResult{
-				BaselineSQL:         finalSQL,
-				DataOperationsSQL:   dataOperationsSQL,
-				Warnings:            warnings,
-				FilesProcessed:      migrationCount,
-				ObjectsConsolidated: objectsConsolidated,
-				ProcessingTime:      time.Since(startTime).String(),
-				Extensions:          requiredExtensions,
-				ProvenanceInfo: &engineapi.ProvenanceInfo{
-					Version:     rootCmd.Version,
-					SafetyLevel: string(cfg.SafetyLevel),
-				},
-			}
-			report, err := engineapi.BuildDeterministicHarnessReport(result, engineapi.DeterministicHarnessReportOptions{
-				OutputSQLPath:          "generated_schema.sql",
-				EngineVersion:          rootCmd.Version,
-				OriginalMigrationFiles: migrationCount,
-				ValidationStatus:       "engine_basic_passed",
-				ValidationMode:         "engine_basic",
-				AnalysisWarnings:       warnings,
-			})
-			if err != nil {
-				return err
-			}
-			contextArtifact, err := engineapi.BuildDeterministicHarnessContext(result, engineapi.DeterministicHarnessContextOptions{
-				OutputSQLPath:          "generated_schema.sql",
-				EngineVersion:          rootCmd.Version,
-				OriginalMigrationFiles: migrationCount,
-				ValidationStatus:       report.Validation.Status,
-				ValidationMode:         report.Validation.Mode,
-				AnalysisWarnings:       warnings,
-				OriginalMigrations:     harnessMigrations,
-			})
-			if err != nil {
-				return err
-			}
-			artifact, err := engineapi.BuildDeterministicHarnessArtifact(result, report)
-			if err == nil {
-				_, err = engineapi.ValidateDeterministicHarnessArtifact(cmd.Context(), artifact, contextArtifact)
-			}
-			if err != nil {
-				return err
-			}
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 				"auth_compatibility_sql": authCompatibilitySQL,
 				"baseline_sql":           finalSQL,
 				"data_operations_sql":    dataOperationsSQL,
-				"deterministic_artifact": artifact,
-				"deterministic_report":   report,
-				"harness_context":        contextArtifact,
 				"safety_level":           string(cfg.SafetyLevel),
 				"warnings":               warnings,
 			})
@@ -1052,12 +983,11 @@ func runSquash(cmd *cobra.Command, args []string) error {
 
 		if originalPath == "" {
 			fmt.Println(color.YellowString("⚠️  Could not determine original migrations path, skipping validation"))
-			fmt.Println(color.YellowString("    Run 'pgsquash validate <original> <squashed>' manually if needed"))
+			fmt.Println(color.YellowString("    Run 'capysquash validate <original> <squashed>' manually if needed"))
 		} else {
 			valResult, valErr := runValidationCheck(cfg, originalPath, stagingDir, authCompatibilitySQL)
 
-			status, outcomeErr := reportSquashValidationOutcome(valResult, valErr)
-			validationStatus = status
+			_, outcomeErr := reportSquashValidationOutcome(valResult, valErr)
 			if outcomeErr != nil {
 				// Staged output is discarded by the deferred cleanup; the
 				// output directory stays untouched.
@@ -1082,73 +1012,7 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	// Print success report
 	printSquashSummary(migrationCount, len(strings.Split(finalSQL, "\n")), time.Since(startTime), warnings, outputPath)
 
-	if emitHarnessReport {
-		if dryRun {
-			fmt.Println(color.YellowString("⚠️  Skipping context emission in --dry-run mode"))
-		} else {
-			reportOutputPath := strings.TrimSpace(harnessReportPath)
-			if reportOutputPath == "" {
-				reportOutputPath = filepath.Join(cfg.Output.Directory, ".capysquash.context.v1.json")
-			}
-
-			contextArtifact, reportErr := engineapi.BuildDeterministicHarnessContext(&engineapi.SquashResult{
-				BaselineSQL:         finalSQL,
-				DataOperationsSQL:   "",
-				Warnings:            warnings,
-				FilesProcessed:      migrationCount,
-				ObjectsConsolidated: objectsConsolidated,
-				ProcessingTime:      time.Since(startTime).String(),
-				ProvenanceInfo: &engineapi.ProvenanceInfo{
-					Version:     rootCmd.Version,
-					SafetyLevel: string(cfg.SafetyLevel),
-				},
-			}, engineapi.DeterministicHarnessContextOptions{
-				OutputSQLPath:          outputPath,
-				EngineVersion:          rootCmd.Version,
-				OriginalMigrationFiles: migrationCount,
-				ValidationStatus:       validationStatus,
-				ValidationMode:         validationModeUsed,
-				AnalysisWarnings:       warnings,
-			})
-			if reportErr != nil {
-				return errors.NewError(
-					errors.ErrorCodeSQLGenerationFailed,
-					"Failed to build deterministic context artifact",
-					errors.SeverityError,
-					errors.CategoryConsolidation,
-				).WithInnerError(reportErr)
-			}
-
-			if reportErr := harnesscontract.WriteHarnessContextV1(reportOutputPath, contextArtifact); reportErr != nil {
-				return errors.NewError(
-					errors.ErrorCodeSQLGenerationFailed,
-					"Failed to write deterministic context artifact",
-					errors.SeverityError,
-					errors.CategoryConsolidation,
-				).WithFile(reportOutputPath).WithInnerError(reportErr)
-			}
-
-			fmt.Println(color.GreenString("✓ Deterministic context artifact written to: %s", reportOutputPath))
-		}
-	}
-
 	return nil
-}
-
-func deterministicHarnessMigrations(migrations []*MigrationWithContent) []engineapi.DeterministicHarnessMigration {
-	result := make([]engineapi.DeterministicHarnessMigration, 0, len(migrations))
-	for index, migration := range migrations {
-		migrationID := filepath.Base(migration.FullPath)
-		if migrationID == "." || migrationID == "" {
-			migrationID = migration.Filename
-		}
-		result = append(result, engineapi.DeterministicHarnessMigration{
-			MigrationID: migrationID,
-			Sequence:    index + 1,
-			SQL:         migration.Content,
-		})
-	}
-	return result
 }
 
 // runValidationCheck performs validation and returns the result
@@ -1200,8 +1064,8 @@ func runValidationCheck(cfg *config.Config, originalPath, squashedPath, authComp
 
 // applySafetyOverride validates and applies a --safety flag override.
 // An unknown value is rejected instead of silently disabling consolidation.
-// Parsing goes through the public API's case/whitespace-normalizing parser so
-// CLI semantics never diverge from library consumers.
+// Parsing goes through internal/engine's case/whitespace-normalizing parser so
+// the CLI and the fixture suites agree on what is valid.
 func applySafetyOverride(cfg *config.Config, level string) error {
 	if level == "" {
 		return nil
@@ -1321,7 +1185,7 @@ func stageSquashOutput(cfg *config.Config, baselineSQL, dataOperationsSQL string
 		).WithInnerError(err).WithSuggestion("Check directory permissions and ensure parent directory exists")
 	}
 
-	stagingDir, err := os.MkdirTemp(parent, ".pgsquash-staging-")
+	stagingDir, err := os.MkdirTemp(parent, ".capysquash-staging-")
 	if err != nil {
 		return "", nil, errors.NewError(
 			errors.ErrorCodeValidationFailed,
@@ -1517,7 +1381,7 @@ func reportSquashValidationOutcome(valResult *validation.ValidationResult, valEr
 		fmt.Println(docker.Differences)
 
 		if openReport {
-			reportPath := "pgsquash-validation-report.md"
+			reportPath := "capysquash-validation-report.md"
 			if err := os.WriteFile(reportPath, []byte(docker.Differences), 0644); err == nil {
 				fmt.Println(color.CyanString("📝 Validation report saved to: %s", reportPath))
 				openInEditor(reportPath)
@@ -1570,7 +1434,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			"Failed to load configuration for validation",
 			errors.SeverityError,
 			errors.CategoryValidation,
-		).WithFile(configPath).WithInnerError(err).WithSuggestion("Ensure pgsquash.config.json is valid or use default configuration")
+		).WithFile(configPath).WithInnerError(err).WithSuggestion("Ensure capysquash.config.json is valid or use default configuration")
 	}
 
 	// Load migrations to detect auth patterns
@@ -1722,7 +1586,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 				}
 			}
 			// Fail closed: a validation gate that always exits 0 is not a gate.
-			// Returning an error makes `pgsquash validate` exit non-zero so CI can
+			// Returning an error makes `capysquash validate` exit non-zero so CI can
 			// rely on it to block non-equivalent squashed migrations.
 			return errors.NewError(
 				errors.ErrorCodeValidationFailed,
@@ -1744,7 +1608,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	).WithFile(originalDir).WithSuggestion("Ensure directory exists and contains .sql files")
 }
 
-const externalValidationContractVersion = "pgsquash.external-validation.v1"
+const externalValidationContractVersion = "capysquash.external-validation.v1"
 
 type externalValidationResult struct {
 	ContractVersion   string   `json:"contract_version"`
@@ -1930,7 +1794,7 @@ func writeCatalogSnapshot(path string, snapshot *validation.CatalogSnapshot) err
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return fmt.Errorf("create catalog snapshot directory: %w", err)
 	}
-	temporary, err := os.CreateTemp(directory, ".pgsquash-snapshot-*.json")
+	temporary, err := os.CreateTemp(directory, ".capysquash-snapshot-*.json")
 	if err != nil {
 		return fmt.Errorf("create catalog snapshot: %w", err)
 	}
@@ -2310,7 +2174,7 @@ func collectSQLFilesFromArgs(args []string) ([]string, error) {
 }
 
 func runInitConfig(cmd *cobra.Command, args []string) error {
-	configFile := brandDefaultConfigName()
+	configFile := defaultConfigFileName
 	if configPath != "" {
 		configFile = configPath
 	}
@@ -2361,7 +2225,7 @@ func runInitConfig(cmd *cobra.Command, args []string) error {
 	} else {
 		color.Green("☑ Generated default configuration: %s\n", configFile)
 	}
-	fmt.Printf("Edit this file to customize pgsquash-engine behavior\n")
+	fmt.Printf("Edit this file to customize capysquash behavior\n")
 
 	return nil
 }

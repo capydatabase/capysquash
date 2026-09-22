@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // TransformSQL performs Drizzle-specific SQL transformations

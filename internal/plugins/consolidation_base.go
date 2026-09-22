@@ -3,8 +3,8 @@ package plugins
 import (
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/types"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/types"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // BaseConsolidator provides common consolidation logic for plugins

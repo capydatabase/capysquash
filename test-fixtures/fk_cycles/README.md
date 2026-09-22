@@ -2,7 +2,7 @@
 
 # Tests circular foreign key detection and resolution
 
-This fixture tests how pgsquash handles circular foreign key dependencies:
+This fixture tests how capysquash handles circular foreign key dependencies:
 
 1. **Detection**: Should detect circular FK relationships
 2. **Resolution**: Should use 2-phase approach to resolve cycles

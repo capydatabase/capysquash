@@ -3,7 +3,7 @@ package consolidation
 import (
 	"testing"
 
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 func TestMultipleCreateConsolidationRule_Apply(t *testing.T) {

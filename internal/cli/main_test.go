@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,14 +12,14 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	pkgplugins "github.com/capydatabase/pgsquash-engine/pkg/plugins"
+	"github.com/capydatabase/capysquash/internal/plugins/builtin"
 )
 
 // TestMain registers the default plugin set once for the whole package.
 // Plugin registration is idempotent, so this is safe even if another
 // package in the same binary already registered them.
 func TestMain(m *testing.M) {
-	if err := pkgplugins.RegisterDefault(); err != nil {
+	if err := builtin.RegisterDefault(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to register default plugins: %v\n", err)
 		os.Exit(1)
 	}
@@ -65,7 +64,7 @@ func resetCLIState(t *testing.T) {
 }
 
 // executeCLI runs the real cobra command tree end-to-end (the same path the
-// pgsquash binary uses via cli.Execute) with a clean flag state.
+// capysquash binary uses via cli.Execute) with a clean flag state.
 func executeCLI(t *testing.T, args ...string) error {
 	t.Helper()
 	resetCLIState(t)
@@ -159,27 +158,4 @@ func fileSHA256(t *testing.T, path string) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
-}
-
-// captureStderr runs fn while capturing everything written to os.Stderr.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	old := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("failed to create pipe: %v", err)
-	}
-	os.Stderr = w
-	defer func() { os.Stderr = old }()
-
-	fn()
-
-	if err := w.Close(); err != nil {
-		t.Fatalf("failed to close pipe writer: %v", err)
-	}
-	data, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("failed to read captured stderr: %v", err)
-	}
-	return string(data)
 }

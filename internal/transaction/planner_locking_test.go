@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 func TestPlanTransactions_WarnsOnMultipleAlterTableTargetsInBatch(t *testing.T) {

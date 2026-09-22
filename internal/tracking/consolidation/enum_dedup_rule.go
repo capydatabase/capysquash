@@ -5,12 +5,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/utils"
 
-	"github.com/capydatabase/pgsquash-engine/internal/tracking"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/tracking"
+	"github.com/capydatabase/capysquash/internal/types"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/capysquash/internal/errors"
 )
 
 // EnumDeduplicationRule detects and resolves duplicate ENUM type definitions

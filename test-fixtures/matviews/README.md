@@ -2,7 +2,7 @@
 
 # Tests materialized view handling and REFRESH operations
 
-This fixture tests how pgsquash handles materialized views:
+This fixture tests how capysquash handles materialized views:
 
 1. **MV creation**: Should preserve CREATE MATERIALIZED VIEW statements
 2. **REFRESH detection**: Should identify REFRESH MATERIALIZED VIEW operations

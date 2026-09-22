@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
+	"github.com/capydatabase/capysquash/internal/errors"
 )
 
 // WriteSQL writes SQL content to a file with standard permissions (0644).
@@ -24,7 +24,7 @@ func WriteSQL(path string, content string) error {
 // WriteConfig writes configuration data to a file with standard permissions (0644).
 // Creates parent directories if they don't exist.
 //
-// This is used for writing pgsquash.config.json and other config files.
+// This is used for writing capysquash.config.json and other config files.
 //
 // Example:
 //

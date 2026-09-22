@@ -2,7 +2,7 @@
 
 # Tests partial index consolidation and predicate normalization
 
-This fixture tests how pgsquash handles partial indexes with WHERE clauses:
+This fixture tests how capysquash handles partial indexes with WHERE clauses:
 
 1. **Predicate normalization**: Should normalize spacing and formatting
 2. **Consolidation**: Should merge similar indexes safely

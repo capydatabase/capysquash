@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/types"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // BackupType defines the type of backup to generate
@@ -105,10 +105,10 @@ type BackupGenerator struct {
 
 // NewBackupGenerator creates a new backup generator.
 //
-// The default working directory is a dedicated pgsquash-backups directory
+// The default working directory is a dedicated capysquash-backups directory
 // under the system temp dir - never the shared temp dir itself, because
 // CleanupOldBackups glob-deletes "*backup*.sql" inside the working directory
-// and must only ever touch files pgsquash created. Callers that want backups
+// and must only ever touch files capysquash created. Callers that want backups
 // somewhere durable (e.g. <output>/.backups, as the squasher engine enforces)
 // use SetWorkingDirectory.
 func NewBackupGenerator(config *BackupConfig, db *sql.DB) *BackupGenerator {
@@ -120,7 +120,7 @@ func NewBackupGenerator(config *BackupConfig, db *sql.DB) *BackupGenerator {
 		config:     config,
 		db:         db,
 		pgDumpPath: findPgDumpPath(),
-		workDir:    filepath.Join(os.TempDir(), "pgsquash-backups"),
+		workDir:    filepath.Join(os.TempDir(), "capysquash-backups"),
 	}
 }
 

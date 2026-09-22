@@ -1,10 +1,10 @@
-# pgsquash — core development stack.
+# capysquash — core development stack.
 #
-#   docker compose run --rm pgsquash squash /app/migrations
+#   docker compose run --rm capysquash squash /app/migrations
 #   docker compose up -d postgres-primary          # just the validation database
 #   docker compose down --volumes
 #
-# The pgsquash service is a one-shot CLI, not a daemon: drive it with
+# The capysquash service is a one-shot CLI, not a daemon: drive it with
 # `docker compose run`, not `up`.
 #
 # Companion files:
@@ -12,7 +12,7 @@
 #   compose.tools.yaml    - pgAdmin + Filebrowser
 #   docker compose -f compose.yaml -f compose.testing.yaml up -d
 
-name: pgsquash
+name: capysquash
 
 # ── reusable fragments ───────────────────────────────────────────────────────
 x-logging: &logging
@@ -33,13 +33,13 @@ x-healthy: &healthy-timing
   start_interval: 2s # faster probes inside start_period (Engine >= 25)
 
 x-postgres-env: &postgres-env
-  POSTGRES_USER: pgsquash
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsquash_secure_password}
+  POSTGRES_USER: capysquash
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-capysquash_secure_password}
   POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
 
 # ── services ─────────────────────────────────────────────────────────────────
 services:
-  pgsquash:
+  capysquash:
     build:
       context: .
       dockerfile: Dockerfile
@@ -52,7 +52,7 @@ services:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
       provenance: false
       sbom: false
-    image: pgsquash:${BUILD_VERSION:-dev}
+    image: capysquash:${BUILD_VERSION:-dev}
     <<: *hardening
     # One-shot CLI: it runs a command and exits. No restart policy (that would
     # crash-loop it) and no healthcheck (a process that exits is never healthy).
@@ -61,19 +61,13 @@ services:
     logging: *logging
     init: true
     environment:
-      PGSQUASH_SAFETY_LEVEL: ${PGSQUASH_SAFETY_LEVEL:-standard}
-      PGSQUASH_AUTO_VALIDATE: ${PGSQUASH_AUTO_VALIDATE:-true}
-      PGSQUASH_DOCKER_ENABLED: "true"
-      PGSQUASH_AUTO_SETUP: "true"
-      PGSQUASH_LOG_LEVEL: ${PGSQUASH_LOG_LEVEL:-info}
-      PGSQUASH_LOG_FORMAT: json
+      CAPYSQUASH_LOG_LEVEL: ${CAPYSQUASH_LOG_LEVEL:-info}
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ./migrations:/app/migrations:ro
       - ./output:/app/output
       - ./config:/app/config
-      - pgsquash-logs:/app/logs
-      - pgsquash-cache:/app/.cache
+      - capysquash-cache:/app/.cache
       # Docker-out-of-Docker for the validation features. This hands the
       # container full control of the host daemon - it is why this stack is
       # development-only.
@@ -82,8 +76,8 @@ services:
       # docker/validation/with-validation.yml, which runs as root.
       - /var/run/docker.sock:/var/run/docker.sock
       # Optional: SSH keys for git operations over ssh.
-      - ~/.ssh:/home/pgsquash/.ssh:ro
-    networks: [pgsquash-net]
+      - ~/.ssh:/home/capysquash/.ssh:ro
+    networks: [capysquash-net]
     depends_on:
       postgres-primary:
         condition: service_healthy
@@ -100,7 +94,7 @@ services:
         PG_VERSION: "18"
       provenance: false
       sbom: false
-    image: pgsquash-postgres:18
+    image: capysquash-postgres:18
     <<: *hardening
     cap_drop: [] # initdb needs CHOWN/SETUID/SETGID/FOWNER before dropping privileges
     restart: unless-stopped
@@ -108,7 +102,7 @@ services:
     stop_grace_period: 30s
     environment:
       <<: *postgres-env
-      POSTGRES_DB: pgsquash_primary
+      POSTGRES_DB: capysquash_primary
     volumes:
       # PostgreSQL 18+ images want a single mount at /var/lib/postgresql and
       # place the cluster in a major-version subdirectory below it. Mounting at
@@ -117,8 +111,8 @@ services:
       - postgres-primary-data:/var/lib/postgresql
       - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
       - ./docker/init-scripts/init-postgres.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
-      - pgsquash-logs:/var/log/postgresql
-    networks: [pgsquash-net]
+      - capysquash-logs:/var/log/postgresql
+    networks: [capysquash-net]
     ports:
       - target: 5432
         published: "${POSTGRES_PRIMARY_PORT:-5432}"
@@ -135,9 +129,9 @@ services:
 # ── top-level resources ──────────────────────────────────────────────────────
 volumes:
   postgres-primary-data:
-  pgsquash-logs:
-  pgsquash-cache:
+  capysquash-logs:
+  capysquash-cache:
 
 networks:
-  pgsquash-net:
+  capysquash-net:
     driver: bridge

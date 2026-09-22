@@ -418,127 +418,127 @@ func (m *ValidationMetrics) ExportPrometheus(w io.Writer) error {
 	}
 
 	// Timing metrics
-	writeMetric("pgsquash_validation_duration_seconds", "Total validation duration", "gauge",
+	writeMetric("capysquash_validation_duration_seconds", "Total validation duration", "gauge",
 		snapshot.TotalDuration.Seconds())
 
-	writeMetric("pgsquash_validation_query_duration_avg_seconds", "Average query duration", "gauge",
+	writeMetric("capysquash_validation_query_duration_avg_seconds", "Average query duration", "gauge",
 		snapshot.AverageQueryDuration.Seconds())
 
-	writeMetric("pgsquash_validation_query_duration_max_seconds", "Slowest query duration", "gauge",
+	writeMetric("capysquash_validation_query_duration_max_seconds", "Slowest query duration", "gauge",
 		snapshot.SlowestQueryDuration.Seconds())
 
 	// Count metrics
-	writeMetric("pgsquash_validations_total", "Total validations performed", "counter",
+	writeMetric("capysquash_validations_total", "Total validations performed", "counter",
 		snapshot.TotalValidations)
 
-	writeMetric("pgsquash_validations_successful_total", "Successful validations", "counter",
+	writeMetric("capysquash_validations_successful_total", "Successful validations", "counter",
 		snapshot.SuccessfulValidations)
 
-	writeMetric("pgsquash_validations_failed_total", "Failed validations", "counter",
+	writeMetric("capysquash_validations_failed_total", "Failed validations", "counter",
 		snapshot.FailedValidations)
 
-	writeMetric("pgsquash_validation_objects_total", "Total objects validated", "counter",
+	writeMetric("capysquash_validation_objects_total", "Total objects validated", "counter",
 		snapshot.ObjectsValidated)
 
-	writeMetric("pgsquash_validation_queries_total", "Total queries executed", "counter",
+	writeMetric("capysquash_validation_queries_total", "Total queries executed", "counter",
 		snapshot.QueriesExecuted)
 
-	writeMetric("pgsquash_validation_errors_total", "Total errors found", "counter",
+	writeMetric("capysquash_validation_errors_total", "Total errors found", "counter",
 		snapshot.ErrorsFound)
 
-	writeMetric("pgsquash_validation_warnings_total", "Total warnings found", "counter",
+	writeMetric("capysquash_validation_warnings_total", "Total warnings found", "counter",
 		snapshot.WarningsFound)
 
 	// Schema object metrics
-	writeMetric("pgsquash_validation_tables_total", "Tables validated", "counter",
+	writeMetric("capysquash_validation_tables_total", "Tables validated", "counter",
 		snapshot.TablesValidated)
 
-	writeMetric("pgsquash_validation_indexes_total", "Indexes validated", "counter",
+	writeMetric("capysquash_validation_indexes_total", "Indexes validated", "counter",
 		snapshot.IndexesValidated)
 
-	writeMetric("pgsquash_validation_functions_total", "Functions validated", "counter",
+	writeMetric("capysquash_validation_functions_total", "Functions validated", "counter",
 		snapshot.FunctionsValidated)
 
-	writeMetric("pgsquash_validation_triggers_total", "Triggers validated", "counter",
+	writeMetric("capysquash_validation_triggers_total", "Triggers validated", "counter",
 		snapshot.TriggersValidated)
 
-	writeMetric("pgsquash_validation_constraints_total", "Constraints validated", "counter",
+	writeMetric("capysquash_validation_constraints_total", "Constraints validated", "counter",
 		snapshot.ConstraintsValidated)
 
-	writeMetric("pgsquash_validation_views_total", "Views validated", "counter",
+	writeMetric("capysquash_validation_views_total", "Views validated", "counter",
 		snapshot.ViewsValidated)
 
-	writeMetric("pgsquash_validation_extensions_detected", "Extensions detected", "gauge",
+	writeMetric("capysquash_validation_extensions_detected", "Extensions detected", "gauge",
 		snapshot.ExtensionsDetected)
 
 	// Docker metrics
-	writeMetric("pgsquash_docker_containers_total", "Docker containers spun up", "counter",
+	writeMetric("capysquash_docker_containers_total", "Docker containers spun up", "counter",
 		snapshot.DockerContainersSpun)
 
-	writeMetric("pgsquash_docker_validation_duration_seconds", "Docker validation time", "gauge",
+	writeMetric("capysquash_docker_validation_duration_seconds", "Docker validation time", "gauge",
 		snapshot.DockerValidationTime.Seconds())
 
-	writeMetric("pgsquash_docker_failures_total", "Docker validation failures", "counter",
+	writeMetric("capysquash_docker_failures_total", "Docker validation failures", "counter",
 		snapshot.DockerFailures)
 
 	// Error breakdown by code
 	for code, count := range snapshot.ErrorsByCode {
-		writeMetric("pgsquash_validation_errors_by_code", "Errors by error code", "counter",
+		writeMetric("capysquash_validation_errors_by_code", "Errors by error code", "counter",
 			count, fmt.Sprintf(`code="%s"`, code))
 	}
 
 	// Error breakdown by severity
 	for severity, count := range snapshot.ErrorsBySeverity {
-		writeMetric("pgsquash_validation_errors_by_severity", "Errors by severity", "counter",
+		writeMetric("capysquash_validation_errors_by_severity", "Errors by severity", "counter",
 			count, fmt.Sprintf(`severity="%s"`, severity))
 	}
 
 	// Warning breakdown
 	for code, count := range snapshot.WarningsByCode {
-		writeMetric("pgsquash_validation_warnings_by_code", "Warnings by code", "counter",
+		writeMetric("capysquash_validation_warnings_by_code", "Warnings by code", "counter",
 			count, fmt.Sprintf(`code="%s"`, code))
 	}
 
 	// Approach usage
 	for approach, count := range snapshot.ApproachUsage {
-		writeMetric("pgsquash_validation_approach_usage", "Validation approach usage", "counter",
+		writeMetric("capysquash_validation_approach_usage", "Validation approach usage", "counter",
 			count, fmt.Sprintf(`approach="%s"`, approach))
 	}
 
 	// Extension metrics
-	writeMetric("pgsquash_extension_install_attempts_total", "Extension install attempts", "counter",
+	writeMetric("capysquash_extension_install_attempts_total", "Extension install attempts", "counter",
 		snapshot.ExtensionInstallAttempts)
 
-	writeMetric("pgsquash_extension_install_failures_total", "Extension install failures", "counter",
+	writeMetric("capysquash_extension_install_failures_total", "Extension install failures", "counter",
 		snapshot.ExtensionInstallFailures)
 
-	writeMetric("pgsquash_extension_install_duration_seconds", "Extension install time", "gauge",
+	writeMetric("capysquash_extension_install_duration_seconds", "Extension install time", "gauge",
 		snapshot.ExtensionInstallTime.Seconds())
 
 	// Fix metrics
-	writeMetric("pgsquash_fixes_attempted_total", "SQL fixes attempted", "counter",
+	writeMetric("capysquash_fixes_attempted_total", "SQL fixes attempted", "counter",
 		snapshot.FixesAttempted)
 
-	writeMetric("pgsquash_fixes_succeeded_total", "SQL fixes succeeded", "counter",
+	writeMetric("capysquash_fixes_succeeded_total", "SQL fixes succeeded", "counter",
 		snapshot.FixesSucceeded)
 
-	writeMetric("pgsquash_fixes_failed_total", "SQL fixes failed", "counter",
+	writeMetric("capysquash_fixes_failed_total", "SQL fixes failed", "counter",
 		snapshot.FixesFailed)
 
 	// Resource metrics
-	writeMetric("pgsquash_memory_peak_bytes", "Peak memory usage", "gauge",
+	writeMetric("capysquash_memory_peak_bytes", "Peak memory usage", "gauge",
 		snapshot.PeakMemoryUsage)
 
-	writeMetric("pgsquash_cpu_time_seconds", "CPU time used", "gauge",
+	writeMetric("capysquash_cpu_time_seconds", "CPU time used", "gauge",
 		snapshot.CPUTimeUsed.Seconds())
 
 	// Success rates
 	successRate := calculateSuccessRate(snapshot.SuccessfulValidations, snapshot.TotalValidations)
-	writeMetric("pgsquash_validation_success_rate", "Validation success rate (0-1)", "gauge",
+	writeMetric("capysquash_validation_success_rate", "Validation success rate (0-1)", "gauge",
 		successRate/100.0)
 
 	fixSuccessRate := calculateSuccessRate(snapshot.FixesSucceeded, snapshot.FixesAttempted)
-	writeMetric("pgsquash_fix_success_rate", "Fix success rate (0-1)", "gauge",
+	writeMetric("capysquash_fix_success_rate", "Fix success rate (0-1)", "gauge",
 		fixSuccessRate/100.0)
 
 	_, err := w.Write([]byte(sb.String()))

@@ -1,4 +1,4 @@
-# pgsquash — optional development tools (pgAdmin, Filebrowser).
+# capysquash — optional development tools (pgAdmin, Filebrowser).
 # Overlay for compose.yaml. Both sit behind the `tools` profile, so they only
 # start when you ask for them.
 #
@@ -21,15 +21,15 @@ services:
     environment:
       # pgAdmin rejects reserved domains (.localhost/.local) outright and exits,
       # so this default has to be a real-looking address.
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@pgsquash.dev}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-pgsquash_pgadmin}
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@capysquash.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-capysquash_pgadmin}
       PGADMIN_CONFIG_SERVER_MODE: "False"
       # Under no-new-privileges pgAdmin cannot bind the privileged port 80 and
       # silently falls back to 8080; pin it so the published port matches.
       PGADMIN_LISTEN_PORT: 8080
     volumes:
       - pgadmin-data:/var/lib/pgadmin
-    networks: [pgsquash-net]
+    networks: [capysquash-net]
     ports:
       - target: 8080
         published: "${PGADMIN_PORT:-5050}"
@@ -56,7 +56,7 @@ services:
     volumes:
       - ./:/srv
       - filebrowser-data:/database
-    networks: [pgsquash-net]
+    networks: [capysquash-net]
     ports:
       - target: 80
         published: "${FILEBROWSER_PORT:-8081}"

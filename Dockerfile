@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 # ═════════════════════════════════════════════════════════════════════════════
-# pgsquash-engine — PostgreSQL migration squasher.
+# capysquash — PostgreSQL migration squasher.
 #
-#   docker build .                  → runtime image (default target)
-#   docker compose up -d            → engine + a Postgres to validate against
+#   docker build -t capysquash .
+#   docker run --rm -v "$PWD/migrations:/app/migrations:ro" capysquash analyze /app/migrations
+#   docker compose run --rm capysquash squash /app/migrations
 #
 # CGO is mandatory (github.com/pganalyze/pg_query_go links libpg_query), so
 # this image is NOT cross-compiled: no --platform=$BUILDPLATFORM here. Build
@@ -14,7 +15,6 @@
 ARG BUILD_IMAGE=golang:1.27.1-trixie
 ARG RUNTIME_IMAGE=ubuntu:resolute
 
-ARG APP_PORT=8080
 ARG APP_UID=10001
 ARG APP_GID=10001
 
@@ -38,66 +38,56 @@ RUN --mount=type=bind,source=.,target=.,ro \
     go mod download && go mod verify
 
 # ─────────────────────────────────────────────────────────────────────────────
-# build — compile and stage everything that ships into /out
+# build — compile the binary into /out
 # ─────────────────────────────────────────────────────────────────────────────
 FROM deps AS build
 ARG TARGETARCH
 ARG BUILD_VERSION BUILD_DATE GIT_COMMIT
 RUN --mount=type=bind,source=.,target=.,ro \
     --mount=type=cache,target=/go/pkg/mod,id=gomod \
-    --mount=type=cache,target=/root/.cache/go-build,id=gobuild-pgsquash-${TARGETARCH} \
-    mkdir -p /out/bin /out/app && \
+    --mount=type=cache,target=/root/.cache/go-build,id=gobuild-capysquash-${TARGETARCH} \
+    mkdir -p /out/bin && \
     go build -trimpath \
       -ldflags="-s -w \
         -X 'main.version=${BUILD_VERSION}' \
         -X 'main.buildDate=${BUILD_DATE}' \
         -X 'main.gitCommit=${GIT_COMMIT}'" \
-      -o /out/bin/pgsquash ./cmd/pgsquash && \
-    cp -r docker/init-scripts /out/app/scripts && \
-    cp -r docker/config-templates /out/app/templates && \
-    cp docker/entrypoint.sh /out/app/entrypoint.sh && \
-    chmod +x /out/app/entrypoint.sh /out/app/scripts/*.sh
+      -o /out/bin/capysquash ./cmd/capysquash
 
 # ─────────────────────────────────────────────────────────────────────────────
 # runtime — default target
-#   Not distroless: the entrypoint is bash, and the validation features shell
-#   out to psql, git and the docker CLI.
+#   Not distroless: Docker-based validation shells out to the docker CLI and
+#   psql, and --branch-check needs git.
 # ─────────────────────────────────────────────────────────────────────────────
 FROM ${RUNTIME_IMAGE} AS runtime
-ARG APP_PORT APP_UID APP_GID BUILD_VERSION BUILD_DATE GIT_COMMIT
+ARG APP_UID APP_GID BUILD_VERSION BUILD_DATE GIT_COMMIT
 
-LABEL org.opencontainers.image.title="pgsquash-engine" \
+LABEL org.opencontainers.image.title="capysquash" \
       org.opencontainers.image.description="PostgreSQL migration squasher and optimizer" \
       org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
-      org.opencontainers.image.vendor="CAPYSQUASH" \
+      org.opencontainers.image.vendor="CapyDB" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/capysquash/pgsquash-engine" \
-      org.opencontainers.image.documentation="https://github.com/capysquash/pgsquash-engine/blob/main/README.md"
+      org.opencontainers.image.source="https://github.com/capydatabase/capysquash" \
+      org.opencontainers.image.documentation="https://github.com/capydatabase/capysquash/blob/main/README.md"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     postgresql-client \
     docker.io \
-    bash \
-    curl \
-    jq \
     git \
   && rm -rf /var/lib/apt/lists/* \
-  && groupadd -g ${APP_GID} pgsquash \
-  && useradd -u ${APP_UID} -g pgsquash -s /bin/bash -m -d /home/pgsquash pgsquash \
-  && mkdir -p /app/migrations /app/output /app/config /app/logs \
+  && groupadd -g ${APP_GID} capysquash \
+  && useradd -u ${APP_UID} -g capysquash -s /bin/bash -m -d /home/capysquash capysquash \
+  && mkdir -p /app/migrations /app/output /app/config \
   && chown -R ${APP_UID}:${APP_GID} /app
 
-COPY --from=build --chown=${APP_UID}:${APP_GID} /out/bin/ /usr/local/bin/
-COPY --from=build --chown=${APP_UID}:${APP_GID} /out/app/ /app/
+COPY --from=build --chown=${APP_UID}:${APP_GID} /out/bin/capysquash /usr/local/bin/capysquash
 
 USER ${APP_UID}:${APP_GID}
 WORKDIR /app
-EXPOSE ${APP_PORT}
 
-# Healthcheck lives in compose so it can be tuned per environment.
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["capysquash"]
 CMD ["--help"]

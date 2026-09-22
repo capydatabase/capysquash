@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/parser"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/parser"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // TransactionBatch represents a group of statements that can run in a single transaction

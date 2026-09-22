@@ -7,7 +7,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // Plugin represents a third-party service integration that can hook into
@@ -39,7 +39,7 @@ type Plugin interface {
 	Detect(migrations []*types.Migration) bool
 
 	// Initialize configures the plugin with service-specific settings.
-	// Config is the plugin-specific configuration section from pgsquash.config.json.
+	// Config is the plugin-specific configuration section from capysquash.config.json.
 	Initialize(ctx context.Context, config any) error
 
 	// ===== Parser Hooks =====

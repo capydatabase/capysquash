@@ -1,4 +1,4 @@
--- PostgreSQL initialization script for pgsquash validation databases
+-- PostgreSQL initialization script for capysquash validation databases
 -- This script sets up the necessary extensions, roles, and configurations
 
 -- Enable required extensions
@@ -14,25 +14,25 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm";        -- Trigram matching for text se
 CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";  -- Query statistics
 
 -- Create additional roles for testing
-CREATE ROLE pgsquash_readonly;
-CREATE ROLE pgsquash_readwrite;
+CREATE ROLE capysquash_readonly;
+CREATE ROLE capysquash_readwrite;
 
 -- Grant basic privileges
-GRANT CONNECT ON DATABASE pgsquash_primary TO pgsquash_readonly;
-GRANT CONNECT ON DATABASE pgsquash_primary TO pgsquash_readwrite;
+GRANT CONNECT ON DATABASE capysquash_primary TO capysquash_readonly;
+GRANT CONNECT ON DATABASE capysquash_primary TO capysquash_readwrite;
 
-GRANT USAGE ON SCHEMA public TO pgsquash_readonly;
-GRANT USAGE, CREATE ON SCHEMA public TO pgsquash_readwrite;
+GRANT USAGE ON SCHEMA public TO capysquash_readonly;
+GRANT USAGE, CREATE ON SCHEMA public TO capysquash_readwrite;
 
 -- Set up default privileges for future objects
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO pgsquash_readonly;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO pgsquash_readwrite;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO pgsquash_readwrite;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO capysquash_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO capysquash_readwrite;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO capysquash_readwrite;
 
 -- Create a schema for validation testing
 CREATE SCHEMA IF NOT EXISTS validation_test;
-GRANT USAGE ON SCHEMA validation_test TO pgsquash_readonly;
-GRANT USAGE, CREATE ON SCHEMA validation_test TO pgsquash_readwrite;
+GRANT USAGE ON SCHEMA validation_test TO capysquash_readonly;
+GRANT USAGE, CREATE ON SCHEMA validation_test TO capysquash_readwrite;
 
 -- Set some optimal configurations for validation
 ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';

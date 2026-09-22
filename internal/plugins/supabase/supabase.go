@@ -1,4 +1,4 @@
-// Package supabase provides Supabase Platform integration for pgsquash.
+// Package supabase provides Supabase Platform integration for capysquash.
 // It handles auth.uid(), RLS policies, Storage bucket policies, and Realtime publications.
 package supabase
 
@@ -7,9 +7,9 @@ import (
 	"database/sql"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/plugins"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/plugins"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // Supabase-specific auth pattern identifiers

@@ -9,7 +9,7 @@ import (
 	"github.com/lib/pq"
 )
 
-const CatalogSnapshotContractVersion = "pgsquash.catalog-snapshot.v1"
+const CatalogSnapshotContractVersion = "capysquash.catalog-snapshot.v1"
 
 // CatalogSnapshot is a portable, deterministic representation of a PostgreSQL
 // schema. It contains no connection details or data values.

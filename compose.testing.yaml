@@ -1,4 +1,4 @@
-# pgsquash — multi-version PostgreSQL testing.
+# capysquash — multi-version PostgreSQL testing.
 # Overlay for compose.yaml; adds PostgreSQL 15, 16 and 17 next to the primary.
 #
 #   docker compose -f compose.yaml -f compose.testing.yaml up -d
@@ -18,8 +18,8 @@ x-healthy: &healthy-timing
   start_interval: 2s
 
 x-postgres-env: &postgres-env
-  POSTGRES_USER: pgsquash
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsquash_secure_password}
+  POSTGRES_USER: capysquash
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-capysquash_secure_password}
   POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
 
 # initdb needs CHOWN/SETUID/SETGID/FOWNER, so no cap_drop here.
@@ -28,13 +28,13 @@ x-postgres-test: &postgres-test
   restart: unless-stopped
   stop_grace_period: 30s
   logging: *logging
-  networks: [pgsquash-net]
+  networks: [capysquash-net]
   deploy:
     resources:
       limits: { memory: 1G }
 
 services:
-  pgsquash:
+  capysquash:
     depends_on:
       postgres-primary:
         condition: service_healthy
@@ -54,10 +54,10 @@ services:
         PG_VERSION: "17"
       provenance: false
       sbom: false
-    image: pgsquash-postgres:17
+    image: capysquash-postgres:17
     environment:
       <<: *postgres-env
-      POSTGRES_DB: pgsquash_test_17
+      POSTGRES_DB: capysquash_test_17
     volumes:
       - postgres-17-data:/var/lib/postgresql/data
       - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
@@ -80,10 +80,10 @@ services:
         PG_VERSION: "16"
       provenance: false
       sbom: false
-    image: pgsquash-postgres:16
+    image: capysquash-postgres:16
     environment:
       <<: *postgres-env
-      POSTGRES_DB: pgsquash_test_16
+      POSTGRES_DB: capysquash_test_16
     volumes:
       - postgres-16-data:/var/lib/postgresql/data
       - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro
@@ -106,10 +106,10 @@ services:
         PG_VERSION: "15"
       provenance: false
       sbom: false
-    image: pgsquash-postgres:15
+    image: capysquash-postgres:15
     environment:
       <<: *postgres-env
-      POSTGRES_DB: pgsquash_test_15
+      POSTGRES_DB: capysquash_test_15
     volumes:
       - postgres-15-data:/var/lib/postgresql/data
       - ./docker/init-scripts/supabase-compat.sql:/docker-entrypoint-initdb.d/01-supabase-compat.sql:ro

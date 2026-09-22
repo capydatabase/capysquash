@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capydatabase/pgsquash-engine/internal/config"
-	engineapi "github.com/capydatabase/pgsquash-engine/pkg/engine"
+	"github.com/capydatabase/capysquash/internal/config"
+	engineapi "github.com/capydatabase/capysquash/internal/engine"
 )
 
 // TestSquashFlagValidationEndToEnd drives the real cobra command tree and
@@ -145,9 +145,9 @@ func TestApplyValidationModeOverride(t *testing.T) {
 	}
 }
 
-// TestEngineParseSafetyLevel covers the public safety-level parser
-// (pkg/engine.ParseSafetyLevel) that API/Studio/CLI wrappers are documented to
-// use: case-insensitive, whitespace-tolerant, and strict about unknown values.
+// TestEngineParseSafetyLevel covers the shared safety-level parser
+// (internal/engine.ParseSafetyLevel) the CLI uses: case-insensitive,
+// whitespace-tolerant, and strict about unknown values.
 func TestEngineParseSafetyLevel(t *testing.T) {
 	valid := []struct {
 		input string

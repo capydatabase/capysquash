@@ -4,7 +4,7 @@ package parser
 import (
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 // StatementAnalyzer analyzes SQL statements to determine metadata like lock levels,
@@ -308,26 +308,26 @@ func (sa *StatementAnalyzer) AnalyzePragmas(stmt *types.Statement) {
 	for _, comment := range stmt.Comments {
 		commentUpper := strings.ToUpper(comment)
 
-		// Check for pgsquash:ignore pragma
-		if strings.Contains(commentUpper, "PGSQUASH:IGNORE") ||
-			strings.Contains(commentUpper, "PGSQUASH: IGNORE") {
+		// Check for capysquash:ignore pragma
+		if strings.Contains(commentUpper, "CAPYSQUASH:IGNORE") ||
+			strings.Contains(commentUpper, "CAPYSQUASH: IGNORE") {
 			stmt.Metadata.PreserveVerbatim = true
 		}
 
-		// Check for pgsquash:no-merge pragma
-		if strings.Contains(commentUpper, "PGSQUASH:NO-MERGE") ||
-			strings.Contains(commentUpper, "PGSQUASH: NO-MERGE") {
+		// Check for capysquash:no-merge pragma
+		if strings.Contains(commentUpper, "CAPYSQUASH:NO-MERGE") ||
+			strings.Contains(commentUpper, "CAPYSQUASH: NO-MERGE") {
 			stmt.Metadata.PreserveVerbatim = true
 		}
 	}
 
 	// Also check inline comments in SQL
-	if containsPgsquashPragma(stmt.SQL) {
+	if containsCapysquashPragma(stmt.SQL) {
 		stmt.Metadata.PreserveVerbatim = true
 	}
 }
 
-func containsPgsquashPragma(sql string) bool {
+func containsCapysquashPragma(sql string) bool {
 	for line := range strings.SplitSeq(sql, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "--") {
@@ -335,10 +335,10 @@ func containsPgsquashPragma(sql string) bool {
 		}
 
 		body := strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(trimmed, "--")))
-		if strings.HasPrefix(body, "PGSQUASH:IGNORE") ||
-			strings.HasPrefix(body, "PGSQUASH: IGNORE") ||
-			strings.HasPrefix(body, "PGSQUASH:NO-MERGE") ||
-			strings.HasPrefix(body, "PGSQUASH: NO-MERGE") {
+		if strings.HasPrefix(body, "CAPYSQUASH:IGNORE") ||
+			strings.HasPrefix(body, "CAPYSQUASH: IGNORE") ||
+			strings.HasPrefix(body, "CAPYSQUASH:NO-MERGE") ||
+			strings.HasPrefix(body, "CAPYSQUASH: NO-MERGE") {
 			return true
 		}
 	}

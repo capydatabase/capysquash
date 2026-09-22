@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Smoke-test the binary
+        run: |
+          go build -o capysquash ./cmd/capysquash
+          ./capysquash --version
+          mkdir -p smoke && printf 'CREATE TABLE t (id SERIAL PRIMARY KEY);\n' > smoke/001.sql
+          printf 'ALTER TABLE t ADD COLUMN name TEXT;\n' > smoke/002.sql
+          ./capysquash squash smoke/001.sql smoke/002.sql --dry-run --quiet --no-emoji
+
+  # validate-external against a real database, on every supported major.
+  external-validation:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [15, 16, 17, 18]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: capysquash_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test -race -tags=integration ./internal/validation/...
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/capysquash_test?sslmode=disable
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2

@@ -444,7 +444,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	defaults := DefaultConfig()
 
 	if configPath == "" {
-		configPath = "pgsquash.config.json"
+		configPath = "capysquash.config.json"
 	}
 
 	if _, err := os.Stat(configPath); err == nil {
@@ -643,7 +643,7 @@ func (e *ConfigValidationError) Error() string {
 		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, err))
 	}
 	sb.WriteString("\nPlease fix these errors and try again.\n")
-	sb.WriteString("Run 'pgsquash init-config' to generate a valid configuration file.\n")
+	sb.WriteString("Run 'capysquash init-config' to generate a valid configuration file.\n")
 	return sb.String()
 }
 

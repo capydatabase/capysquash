@@ -132,7 +132,7 @@ type ErrorContext struct {
 	Additional      map[string]any `json:"additional,omitempty"`
 }
 
-// StructuredError is a unified error type for all pgsquash errors
+// StructuredError is a unified error type for all capysquash errors
 type StructuredError struct {
 	Code        ErrorCode     `json:"code"`
 	Message     string        `json:"message"`

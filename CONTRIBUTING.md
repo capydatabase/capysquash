@@ -1,400 +1,77 @@
-# Contributing to pgsquash-engine
+# Contributing to capysquash
 
-Thank you for your interest in contributing to pgsquash-engine! This is the core technology that powers [CAPYSQUASH](https://capysquash.dev) and [capysquash-cli](https://github.com/CAPYSQUASH/capysquash-cli).
+Thanks for helping. This document covers setup, the shape of the code, and
+what a good change looks like. Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+first.
 
-This document provides guidelines and instructions for contributing to the pgsquash-engine library.
+## Setup
 
-## Code of Conduct
-
-This project adheres to a Code of Conduct that all contributors are expected to follow. Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before contributing.
-
-## Getting Started
-
-### Prerequisites
-
-- go 1.26.5 or higher (see `go.mod`)
-- Docker Desktop (for validation features)
-- Git
-- Basic understanding of PostgreSQL and SQL migrations
-
-### Setting Up Your Development Environment
-
-1. **Fork and Clone**
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/pgsquash-engine.git
-   cd pgsquash-engine
-   ```
-
-2. **Install Dependencies**
-   ```bash
-   go mod download
-   ```
-
-3. **Build the Project**
-   ```bash
-   go build -o pgsquash cmd/pgsquash/main.go
-   ```
-
-4. **Run Tests**
-   ```bash
-   go test ./...
-   ```
-
-5. **Try the CLI**
-   ```bash
-   ./pgsquash analyze migrations/*.sql
-   ```
-
-## How to Contribute
-
-### Reporting Bugs
-
-Before creating a bug report:
-
-- Check the [existing issues](https://github.com/capysquash/pgsquash-engine/issues) to avoid duplicates
-- Collect relevant information (Go version, OS, Docker version, error messages)
-
-When filing a bug report, include:
-
-- **Clear title** describing the issue
-- **Steps to reproduce** the problem
-- **Expected behavior** vs **actual behavior**
-- **Environment details** (OS, Go version, pgsquash version)
-- **Sample SQL files** (if applicable and non-sensitive)
-- **Error messages** and logs
-
-### Suggesting Features
-
-Feature requests are welcome! When suggesting a feature:
-
-- **Check existing feature requests** to avoid duplicates
-- **Explain the use case** - why would this feature be valuable?
-- **Describe the expected behavior** in detail
-- **Consider alternatives** you've thought about
-- **Be open to discussion** - features may be refined through collaboration
-
-### Contributing Code
-
-#### Branch Naming
-
-- `feature/description` - New features
-- `fix/description` - Bug fixes
-- `docs/description` - Documentation updates
-- `refactor/description` - Code refactoring
-- `test/description` - Test additions or improvements
-
-#### Development Workflow
-
-1. **Create an Issue** (if one doesn’t exist)
-
-- Discuss the change before starting work
-- Get feedback from maintainers
-
-2. **Create a Branch**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-3. **Make Your Changes**
-
-- Follow the [coding conventions](#coding-conventions)
-- Write or update tests
-- Update documentation as needed
-
-4. **Test Your Changes**
-   ```bash
-   # Run all tests
-
-   go test ./...
-
-   # Run tests with race detector
-
-   go test -race ./...
-
-   # Test with coverage
-
-   go test -cover ./...
-
-   # Manual testing
-
-   ./pgsquash squash examples/basic/*.sql --dry-run
-   ```
-
-5. **Commit Your Changes**
-   ```bash
-   git add .
-   git commit -m "Add feature: description of your change"
-   ```
-
-6. **Push to Your Fork**
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-7. **Create a Pull Request**
-
-- Use a clear, descriptive title
-- Reference related issues (e.g., "Fixes #123")
-- Describe what changed and why
-- Include testing details
-
-### Commit Message Guidelines
-
-Follow these conventions for commit messages:
-
-```
-<type>: <subject>
-
-<body (optional)>
-
-<footer (optional)>
-```
-
-**Types:**
-
-- `feat` - New feature
-- `fix` - Bug fix
-- `docs` - Documentation changes
-- `refactor` - Code refactoring
-- `test` - Test additions or improvements
-- `chore` - Build process or auxiliary tool changes
-
-**Examples:**
-
-```
-feat: Add support for PostgreSQL 17 syntax
-
-fix: Resolve circular dependency in FK detection
-
-docs: Update configuration examples in README
-
-test: Add integration tests for Supabase plugin
-```
-
-### Coding Conventions
-
-#### Go Style
-
-- Follow standard Go formatting: `go fmt ./...`
-- Run `goimports` if available
-- Use `golint` and `go vet` to catch common issues
-- Follow [Effective Go](https://golang.org/doc/effective_go.html) guidelines
-
-#### Naming Conventions
-
-- **Exported** types/functions: `UpperCamelCase`
-- **Private** types/functions: `lowerCamelCase`
-- **Package names**: short, lowercase nouns (e.g., `parser`, `tracker`)
-- **CLI flags**: `kebab-case` (e.g., `--dry-run`, `--safety-level`)
-- **Config JSON keys**: `snake_case` (e.g., `safety_level`, `output_directory`)
-
-#### Code Organization
-
-- Keep functions focused and single-purpose
-- Add comments for exported functions and types
-- Document complex logic with inline comments
-- Group related functionality into packages
-- Prefer AST manipulation over string manipulation
-
-#### Testing
-
-- Place tests in `*_test.go` files alongside source code
-- Use table-driven tests for multiple scenarios
-- Aim for >= 60% code coverage
-- Test edge cases and error conditions
-- Use meaningful test names: `TestFunctionName_Scenario`
-
-**Example Test:**
-
-```go
-func TestParser_ParseCreateTable(t *testing.T) {
-    tests := []struct {
-        name    string
-        sql     string
-        wantErr bool
-    }{
-        {
-            name: "simple table",
-            sql:  "CREATE TABLE users (id SERIAL PRIMARY KEY);",
-            wantErr: false,
-        },
-        {
-            name: "invalid syntax",
-            sql:  "CREATE TABLE",
-            wantErr: true,
-        },
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            result, err := ParseSQL(tt.sql)
-            if (err != nil) != tt.wantErr {
-                t.Errorf("ParseSQL() error = %v, wantErr %v", err, tt.wantErr)
-            }
-        })
-    }
-}
-```
-
-### Documentation
-
-When contributing, update relevant documentation:
-
-- **README.md** - For user-facing feature changes
-- **docs/** - For detailed documentation
-- **Code comments** - For complex logic
-- **CHANGELOG.md** - Will be updated by maintainers during release
-
-## Project Architecture
-
-Understanding the architecture will help you contribute effectively:
-
-### Core Pipeline (5 Phases)
-
-```mermaid
-flowchart TD
-    A["1. PARSING (internal/parser/)"] -->|"Uses pg_query_go for PostgreSQL AST"| B["2. TRACKING (internal/tracking/)"]
-    B -->|"Tracks object lifecycles and dependencies"| C["3. ANALYSIS (internal/squasher/)"]
-    C -->|"Resolves dependencies, detects cycles"| D["4. CONSOLIDATION (internal/squasher/)"]
-    D -->|"Applies safety-level-appropriate rules"| E["5. GENERATION (internal/builder/)"]
-    E -->|"Outputs organized SQL"| F[" "]
-```
-
-### Key Packages
-
-- **`internal/parser/`** - SQL parsing via pg_query_go
-- **`internal/tracking/`** - Object lifecycle tracking (source of truth)
-- **`internal/squasher/`** - Consolidation engine and rules
-- **`internal/builder/`** - SQL generation with formatting
-- **`internal/validation/`** - Docker-based schema validation
-- **`internal/plugins/`** - Third-party integration system
-- **`internal/cli/`** - CLI commands (Cobra-based)
-
-### Important Patterns
-
-1. **AST-First Processing** - Never manipulate raw SQL strings
-2. **Tracker as Source of Truth** - Query tracker for object state
-3. **Configuration-Driven** - Features should be configurable
-4. **Plugin Integration** - Framework-specific logic goes in plugins
-
-For detailed architecture documentation, see:
-
-- [Ecosystem architecture](https://capysquash.dev/docs/core-concepts/ecosystem-architecture)
-- [How it works](https://capysquash.dev/docs/core-concepts/how-it-works)
-- [`internal/plugins/README.md`](internal/plugins/README.md) — plugin system guide
-
-## Areas Where We Need Help
-
-We especially welcome contributions in these areas:
-
-### High Priority
-
-- **Test Coverage** - Currently below 60%, need comprehensive tests
-- **Documentation** - More examples and use case guides
-- **Bug Fixes** - Check [issues labeled "bug"](https://github.com/capysquash/pgsquash-engine/labels/bug)
-- **Platform Support** - Testing on different operating systems
-
-### Medium Priority
-
-- **Plugin Development** - New auth providers (Auth0, Firebase, NextAuth)
-- **Performance Optimization** - Profiling and optimization
-- **Error Messages** - More helpful error messages and debugging info
-- **CI/CD Improvements** - Enhanced testing and release automation
-
-### Good First Issues
-
-- Issues labeled [`good first issue`](https://github.com/capysquash/pgsquash-engine/labels/good%20first%20issue)
-- Documentation improvements
-- Adding examples to `examples/` directory
-- Writing tests for existing functionality
-
-## Pull Request Process
-
-1. **Update Documentation** - If your PR changes behavior, update docs
-2. **Add Tests** - New features should include tests
-3. **Run Tests Locally** - Ensure all tests pass before submitting
-4. **Keep PRs Focused** - One feature/fix per PR when possible
-5. **Respond to Feedback** - Be responsive to review comments
-6. **Update CHANGELOG** - Maintainers will handle this during release
-
-### PR Checklist
-
-Before submitting a PR, verify:
-
-- [ ] Code follows project conventions
-- [ ] Tests pass locally (`go test ./...`)
-- [ ] Tests added/updated for changes
-- [ ] Documentation updated (if needed)
-- [ ] Commit messages follow guidelines
-- [ ] Branch is up to date with main
-- [ ] No merge conflicts
-- [ ] Changes tested manually with sample migrations
-
-### Review Process
-
-1. **Automated Checks** - CI will run tests and linters
-2. **Maintainer Review** - A maintainer will review your code
-3. **Feedback Loop** - Address any requested changes
-4. **Approval** - Once approved, maintainers will merge
-5. **Release** - Changes will be included in the next release
-
-## Development Tips
-
-### Quick Development Cycle
+- Go per `go.mod`, plus a C toolchain (`pg_query_go` is cgo)
+- Docker, for validation features and the Docker-backed tests
+- `golangci-lint` v2 (optional; `make lint` falls back to `go vet`)
 
 ```bash
-
-# Watch and rebuild on changes (using entr or similar)
-
-ls **/*.go | entr -r go build -o pgsquash cmd/pgsquash/main.go
-
-# Quick test with examples
-
-./pgsquash squash examples/basic/*.sql --dry-run
-
-# Validate with Docker
-
-./pgsquash validate migrations/ squashed/
+git clone https://github.com/capydatabase/capysquash
+cd capysquash
+make build
+./capysquash analyze test-fixtures/rls_policies/original/*.sql
+make check
 ```
 
-### Debugging
+`go test -race ./...` runs offline; tests that need Docker skip when no daemon
+is reachable, and the `integration`-tagged tests under `internal/validation`
+need a `DATABASE_URL`.
 
-- Use `--debug` flag for verbose output
-- Check `pgsquash.log` for detailed logs
-- Use Go's built-in debugger (`dlv`)
-- Add strategic `log.Printf()` statements
+## Layout
 
-### Working with pg_query_go
+```text
+cmd/capysquash/            CLI entrypoint (version via ldflags, plugin registration)
+internal/cli/            cobra commands: analyze, squash, validate, validate-external, lint, safe, fast, analyze-deep, init-config, tui
+internal/parser/         pg_query_go parsing, normalization, statement analysis, pragmas
+internal/tracking/       object lifecycles, dependency graph, consolidation rules (the source of truth)
+internal/squasher/       the engine: dependency resolution, cycle handling, consolidation, provenance
+internal/builder/        SQL generation and formatting
+internal/postprocessing/ AST post-processing of generated SQL
+internal/validation/     Docker and external-database validation, catalog snapshots, static lint rules
+internal/plugins/        Supabase, Clerk, Prisma, Drizzle plugins (+ builtin/ registration)
+internal/engine/         programmatic façade used by the fixture and fuzz suites
+internal/tui/            bubbletea terminal UI
+test-fixtures/           golden migration histories + fuzz tests
+docker/                  validation PostgreSQL image and compose overlays
+scripts/                 Prisma and Drizzle baseline helpers
+```
 
-The parser relies heavily on `pg_query_go`. Key resources:
+The pipeline is parse → track → analyze → consolidate → generate. Two rules
+follow from it:
 
-- [pg_query_go documentation](https://github.com/pganalyze/pg_query_go)
-- [PostgreSQL parser documentation](https://www.postgresql.org/docs/current/sql.html)
-- Study existing parser code in `internal/parser/`
+1. Work on the AST and the tracker, never on SQL strings.
+2. Framework-specific behaviour belongs in a plugin, not in the core.
 
-## Resources
+The engine is consumed as a **binary**. There is no supported Go import path;
+everything lives under `internal/`. The CapyDB CLI drives it through the
+`validate-external` JSON contract (`capysquash.external-validation.v1`) and the
+`squash` flags; changing either is a breaking change and needs a changelog
+entry and a version bump.
 
-- **Documentation**: [capysquash.dev/docs](https://capysquash.dev/docs)
-- **Architecture**: [core-concepts/ecosystem-architecture](https://capysquash.dev/docs/core-concepts/ecosystem-architecture)
-- **Library API**: [pgsquash-engine/library-api](https://capysquash.dev/docs/pgsquash-engine/library-api)
-- **Configuration**: [pgsquash-engine/configuration](https://capysquash.dev/docs/pgsquash-engine/configuration)
+## Making a change
 
-## Getting Help
+- Open an issue first for anything beyond a small fix, so the approach can be
+  agreed before you spend time on it.
+- Add or update tests. Golden histories under `test-fixtures/` are the best
+  place for consolidation behaviour; `internal/cli` has end-to-end command
+  tests that run the real cobra tree.
+- Keep `make check` green: `gofmt -s`, `golangci-lint`, `go test -race`.
+- Update `README.md` for user-facing changes and add a line under
+  `## [Unreleased]` in `CHANGELOG.md`.
+- Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`,
+  `refactor:`, `test:`, `chore:`).
 
-- **GitHub Issues** - For bugs and feature requests
-- **GitHub Discussions** - For questions and general discussion
-- **Code Review** - Open a draft PR for early feedback
+## Pull requests
+
+Keep one change per PR, reference the issue, and say how you tested it. CI
+runs build, vet, tests, the lint job and `validate-external` against
+PostgreSQL 15 to 18.
 
 ## License
 
-By contributing to pgsquash, you agree that your contributions will be licensed under the project’s [MIT License](LICENSE).
-
-## Recognition
-
-Contributors will be recognized in:
-
-- GitHub contributors list
-- Release notes (for significant contributions)
-- Project documentation (as appropriate)
-
-Thank you for contributing to pgsquash! 🎉.
+Contributions are licensed under the project's [MIT License](LICENSE).

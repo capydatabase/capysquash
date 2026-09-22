@@ -6,8 +6,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/capydatabase/pgsquash-engine/internal/errors"
-	"github.com/capydatabase/pgsquash-engine/internal/tracking"
+	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/tracking"
 )
 
 // RuleMetadata provides descriptive information about a consolidation rule
@@ -100,7 +100,7 @@ func (r *RuleRegistry) Register(rule ConsolidationRule, metadata RuleMetadata) e
 		metadata.Provider = "core"
 	}
 	if metadata.Version == "" {
-		metadata.Version = "0.9.7"
+		metadata.Version = "1.0.0"
 	}
 
 	// Check for conflicts
@@ -423,7 +423,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "standard"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -436,7 +436,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "standard", "execution-order"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -449,7 +449,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "standard"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -462,7 +462,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "optimization"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -475,7 +475,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "deduplication"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -488,7 +488,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "replication"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -501,7 +501,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "types"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -514,7 +514,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"standard", "schema"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -527,7 +527,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"standard", "schema", "column-evolution"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -540,7 +540,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "security", "rls"},
 				Enabled:     true, // Re-enabled: Now works with SeparateAlterRule for proper RLS handling
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -553,7 +553,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "types", "do_block"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -566,7 +566,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"standard", "dependencies"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -579,7 +579,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "schema"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -592,7 +592,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "transactions"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 		{
@@ -605,7 +605,7 @@ func RegisterCoreRules(registry *RuleRegistry) error {
 				Provider:    "core",
 				Tags:        []string{"safe", "recovery"},
 				Enabled:     true,
-				Version:     "0.9.7",
+				Version:     "1.0.0",
 			},
 		},
 	}

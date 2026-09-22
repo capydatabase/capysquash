@@ -1,100 +1,46 @@
-# Binaries for programs and plugins
+# Build artifacts
+/capysquash
+/capysquash-*
+/bin/
+/dist/
 *.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-/pgsquash
-pgsquash-*
-
-# Test binary, built with `go test -c`
 *.test
-docs/internal/
-
-# Output of the go coverage tool
 *.out
+coverage.html
 
-# Dependency directories
-vendor/
-
-# Go workspace file
+# Go workspace / vendoring
 go.work
 go.work.sum
+vendor/
 
-# IDE files
+# Local config and secrets
+/capysquash.config.json
+.env
+.env.*
+!.env.example
+*.pem
+
+# Local-only working directories (never part of the repository)
+/docs/
+/tests/
+/test-configs/
+/migrations/
+/output/
+/squashed/
+/test_migrations/
+/test_output/
+/rollbacks/
+/backups/
+/archive/
+
+# Editors and OS
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS generated files
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Output directories
-squashed/
-output/
-build/
-migrations/
-production_optimized/
-
-# E2E generated debug artifacts
-tests/e2e/original_*.sql
-tests/e2e/squashed_*.sql
-tests/e2e/squashed_failure.sql
-tests/e2e/test_output.log
-
-# Config files (sample should be committed)
-pgsquash.config.json
-!sample_config.json
-
-# Archive directory (session notes, old docs)
-archive/
-
-# Keep Docker documentation (needed for deployment)
-!DOCKER_AUDIT_REPORT.md
-!DOCKER_DEPLOYMENT_GUIDE.md
-!DOCKER_FIXES_SUMMARY.md
-!DOCKER_QUICK_START.md
-!.dockerignore
-squashed_final/
-final_consolidated/
-squashed_fixed/
-squashed_migrations/
-clean_migrations/
-.claude/settings.local.json
-.env
-test-results/
-.github/copilot-instructions.md
 CLAUDE.md
-mise.toml
-squashed_output/
-test-config.json
-test_migrations/
-rollbacks/
-test_output/
-cmd/api-server/README.md
-docker/
-audit/
-capysquash-private-key.pem
-.env.github-app
 AGENTS.md
-bin/pgsquash
-bin/api-server
-PKG_ENGINE_AUDIT.md
-docs/
-e2e-validation-results/
-test-configs/
-test-results/
-case-study-outputs/
-case-studies/
-tests/
-test-fixtures/
-*/*.sh
-# never commit any private key, whatever its name
-*.pem
+.github/copilot-instructions.md
+.claude/settings.local.json
+mise.toml

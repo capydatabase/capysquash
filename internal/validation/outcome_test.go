@@ -11,13 +11,13 @@ func TestFinalizeComparisonOutcome(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		originalErr     error
-		diff            *SchemaDiff
-		wantSuccess     bool
-		wantOrigFailed  bool
-		wantComparison  bool
-		wantHasDiff     bool
+		name           string
+		originalErr    error
+		diff           *SchemaDiff
+		wantSuccess    bool
+		wantOrigFailed bool
+		wantComparison bool
+		wantHasDiff    bool
 	}{
 		{
 			name:           "originals apply and schemas match -> passed",

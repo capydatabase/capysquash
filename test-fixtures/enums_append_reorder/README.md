@@ -2,7 +2,7 @@
 
 # Tests ENUM consolidation with different safety modes
 
-This fixture tests how pgsquash handles ENUM type evolution:
+This fixture tests how capysquash handles ENUM type evolution:
 
 1. **Paranoid mode**: Should preserve exact ALTER TYPE sequence
 2. **Conservative mode**: Should merge only append-only operations

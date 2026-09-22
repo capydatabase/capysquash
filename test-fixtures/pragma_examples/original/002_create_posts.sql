@@ -10,6 +10,6 @@ CREATE TABLE posts (
 -- Add posts index (should be consolidated)
 CREATE INDEX idx_posts_user_id ON posts (user_id);
 
--- pgsquash: no-merge
+-- capysquash: no-merge
 -- This index should NOT be consolidated with others
 CREATE UNIQUE INDEX idx_posts_title ON posts (title);

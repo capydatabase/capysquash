@@ -7,8 +7,8 @@ package plugins
 // This is the exact resolution logic the registry applies during
 // DiscoverAndInitialize: plugins are visited in descending priority order and
 // each surviving plugin excludes every plugin named by its
-// GetConflictingPlugins(). It is exported so public API surfaces (pkg/plugins)
-// can report compatibility identically to the squashing pipeline.
+// GetConflictingPlugins(). It is exported so other packages can report
+// compatibility identically to the squashing pipeline.
 func ResolveConflicts(candidates []Plugin) []Plugin {
 	return NewRegistry().resolveConflicts(candidates)
 }

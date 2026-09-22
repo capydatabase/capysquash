@@ -3,7 +3,7 @@ package postprocessing
 import (
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/utils"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // FixFunctionLanguageConflicts fixes functions with conflicting VOLATILE/LANGUAGE placement.

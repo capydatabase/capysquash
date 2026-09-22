@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capydatabase/pgsquash-engine/internal/parser"
-	"github.com/capydatabase/pgsquash-engine/internal/types"
+	"github.com/capydatabase/capysquash/internal/parser"
+	"github.com/capydatabase/capysquash/internal/types"
 )
 
 func TestAdvancedColumnLifecycleRule_ParseAlterOperations_ASTAndFallback(t *testing.T) {

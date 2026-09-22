@@ -2,7 +2,7 @@
 
 # Tests Row Level Security policy consolidation
 
-This fixture tests how pgsquash handles RLS policies and role-based access:
+This fixture tests how capysquash handles RLS policies and role-based access:
 
 1. **Policy preservation**: Should preserve USING vs WITH CHECK clauses
 2. **Role consolidation**: Should handle role creation and assignment

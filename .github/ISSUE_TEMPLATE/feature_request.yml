@@ -22,7 +22,7 @@ body:
     attributes:
       label: Proposed Solution
       description: How would you like this to work?
-      placeholder: I think pgsquash should...
+      placeholder: I think capysquash should...
     validations:
       required: true
 
@@ -63,5 +63,5 @@ body:
       options:
         - label: I have searched existing issues/discussions to ensure this is not a duplicate
           required: true
-        - label: This feature aligns with pgsquash-engine's goals (PostgreSQL migration consolidation)
+        - label: This feature aligns with capysquash's goals (PostgreSQL migration consolidation)
           required: true

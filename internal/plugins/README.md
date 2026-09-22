@@ -1,6 +1,5 @@
-# pgsquash Plugin Architecture
+# capysquash Plugin Architecture
 
-**Version**: 0.9.7
 **Status**: Production Ready ✅
 
 This directory contains the unified plugin system for third-party integrations (auth providers, ORMs, Platforms).
@@ -56,19 +55,19 @@ No configuration required - plugins detect themselves:
 
 # Prisma project
 
-./pgsquash squash prisma/migrations/*/migration.sql
+./capysquash squash prisma/migrations/*/migration.sql
 
 # [plugins] Detected: prisma
 
 # Drizzle project
 
-./pgsquash squash drizzle/*/migration.sql
+./capysquash squash drizzle/*/migration.sql
 
 # [plugins] Detected: drizzle
 
 # Clerk + Prisma project
 
-./pgsquash squash migrations/*.sql
+./capysquash squash migrations/*.sql
 
 # [plugins] Detected: clerk, prisma
 
@@ -333,7 +332,7 @@ internal/plugins/
 ### View Registered Plugins
 
 ```bash
-./pgsquash --version
+./capysquash --version
 
 # [plugins] Registered plugin: clerk (priority: 95)
 
@@ -351,11 +350,11 @@ internal/plugins/
 
 # Plugins detect automatically
 
-./pgsquash squash migrations/*.sql
+./capysquash squash migrations/*.sql
 
 # With verbose logging
 
-./pgsquash squash migrations/*.sql --config pgsquash.config.json
+./capysquash squash migrations/*.sql --config capysquash.config.json
 
 # (set plugins.verbose: true in config)
 
@@ -369,7 +368,7 @@ internal/plugins/
 
 echo "CREATE TABLE _prisma_migrations (...)" > test.sql
 
-./pgsquash analyze test.sql --verbose
+./capysquash analyze test.sql --verbose
 
 # [plugins] Detected: prisma
 
@@ -393,8 +392,8 @@ package myservice
 
 import (
     "context"
-    "github.com/capysquash/pgsquash-engine/internal/plugins"
-    "github.com/capysquash/pgsquash-engine/internal/types"
+    "github.com/capydatabase/capysquash/internal/plugins"
+    "github.com/capydatabase/capysquash/internal/types"
 )
 
 type MyServicePlugin struct {
@@ -419,7 +418,7 @@ func (p *MyServicePlugin) Detect(migrations []*types.Migration) bool {
     return false
 }
 
-// Optional: Configure from pgsquash.config.json
+// Optional: Configure from capysquash.config.json
 func (p *MyServicePlugin) Initialize(ctx context.Context, config interface{}) error {
     return nil
 }
@@ -457,39 +456,37 @@ func (p *MyServicePlugin) ValidateSchema(ctx context.Context, db *sql.DB) error 
 
 ### Step 3: Register Plugin
 
-Add the plugin to `builtinPlugins()` in `pkg/plugins/detection.go`. That list
-is the single source of truth for built-in plugins — `plugins.RegisterDefault()`
-registers from it, and the public detection/compatibility APIs derive from it:
+Add the plugin to the list in `internal/plugins/builtin/builtin.go`. That
+list is the single source of truth for built-in plugins; `RegisterDefault()`
+registers every entry at startup:
 
 ```go
-// pkg/plugins/detection.go
-import "github.com/capysquash/pgsquash-engine/internal/plugins/myservice"
+// internal/plugins/builtin/builtin.go
+import "github.com/capydatabase/capysquash/internal/plugins/myservice"
 
-func builtinPlugins() []internal_plugins.Plugin {
-    return []internal_plugins.Plugin{
-        clerk.NewClerkPlugin(),
-        supabase.NewSupabasePlugin(),
-        prisma.NewPrismaPlugin(),
-        drizzle.NewDrizzlePlugin(),
-        myservice.NewMyServicePlugin(), // ← Add here
-    }
-}
+for _, plugin := range []plugins.Plugin{
+    clerk.NewClerkPlugin(),
+    supabase.NewSupabasePlugin(),
+    prisma.NewPrismaPlugin(),
+    drizzle.NewDrizzlePlugin(),
+    myservice.NewMyServicePlugin(),
+} {
 ```
 
 ### Step 4: Build & Test
 
 ```bash
-go build -o pgsquash cmd/pgsquash/main.go
-./pgsquash --version  # Should show your plugin
+go build -o capysquash cmd/capysquash/main.go
+./capysquash --version  # Should show your plugin
 
-./pgsquash analyze test-migrations/*.sql --verbose
+./capysquash analyze test-migrations/*.sql --verbose
 ```
 
 ---
 
 ## 📊 Implementation Status
 
-### ✅ Completed (v0.9.7)
+### ✅ Completed
 
 - [x] **Core Infrastructure**
 
@@ -610,7 +607,7 @@ This handles cases where pg\_query would fail on plugin-specific syntax.
 2. Implement `Plugin` interface (or embed `BasePlugin`)
 3. Add consolidation rules in `consolidation.go`
 4. Add transformations in `transformations.go`
-5. Register in `cmd/pgsquash/main.go`
+5. Register in `cmd/capysquash/main.go`
 6. Add tests (unit + integration)
 7. Update configuration example
 8. Document in this README
@@ -645,6 +642,4 @@ func TestMyPluginWorkflow(t *testing.T) {
 
 ---
 
-_Last Updated: 2025-10-06_.
-_Version: 0.9.7_.
 _Plugins: 4 production-ready (Clerk, Supabase, Prisma, Drizzle)_.

@@ -12,8 +12,8 @@ body:
     id: version
     attributes:
       label: Version
-      description: What version of pgsquash-engine are you using?
-      placeholder: "0.9.7"
+      description: What version of capysquash are you using?
+      placeholder: "0.11.0"
     validations:
       required: true
 
@@ -40,7 +40,7 @@ body:
       label: Steps To Reproduce
       description: How can we reproduce this?
       placeholder: |
-        1. Run command `pgsquash squash ...`
+        1. Run command `capysquash squash ...`
         2. With these migration files (attach if possible)
         3. See error...
     validations:
@@ -84,7 +84,7 @@ body:
       options:
         - label: I have searched existing issues to ensure this is not a duplicate
           required: true
-        - label: I have included the pgsquash-engine version
+        - label: I have included the capysquash version
           required: true
         - label: I have provided steps to reproduce
           required: true

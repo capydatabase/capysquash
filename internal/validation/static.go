@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capydatabase/pgsquash-engine/internal/config"
+	"github.com/capydatabase/capysquash/internal/config"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
@@ -278,4 +278,16 @@ func (v *StaticValidator) ApplyFixes(sql string, violations []Violation) (string
 	}
 
 	return currentSQL, nil
+}
+
+// NewPreFlightValidator returns the validator the engine runs over each input
+// migration before consolidation: default rules, warnings stay warnings.
+func NewPreFlightValidator() *StaticValidator {
+	return NewStaticValidator(nil)
+}
+
+// NewPostFlightValidator returns the validator the engine runs over the
+// generated baseline: default rules, warnings promoted to errors.
+func NewPostFlightValidator() *StaticValidator {
+	return NewStaticValidator(&config.StaticValidatorConfig{TreatWarningsAsErrors: true})
 }
