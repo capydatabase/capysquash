@@ -1813,7 +1813,7 @@ func (udr *UnifiedDependencyResolver) dependencyMatches(dependency, provision st
 		// For column dependencies, we need table to exist first
 		parts := strings.Split(dependency, ":")
 		if len(parts) > 1 {
-			tablePart := strings.Split(parts[1], ".")[0]
+			tablePart, _, _ := strings.Cut(parts[1], ".")
 			return provision == tablePart
 		}
 	}

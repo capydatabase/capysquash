@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -644,8 +645,8 @@ func (r *AdvancedColumnLifecycleRule) processConstraintChange(columnStates map[s
 	if len(constraintInfo.AffectedColumns) == 0 {
 		if op.Operation == ColumnOpDropConstraint && constraintInfo.Name != "" {
 			for _, col := range columnStates {
-				for i := len(col.Constraints) - 1; i >= 0; i-- {
-					if strings.EqualFold(col.Constraints[i].Name, constraintInfo.Name) {
+				for i, v := range slices.Backward(col.Constraints) {
+					if strings.EqualFold(v.Name, constraintInfo.Name) {
 						col.Constraints = append(col.Constraints[:i], col.Constraints[i+1:]...)
 					}
 				}

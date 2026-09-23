@@ -1,6 +1,7 @@
 package prisma
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/capydatabase/capysquash/internal/plugins"
@@ -202,9 +203,9 @@ func (pp *PrismaPlugin) mergePrismaIndices(statements []*types.Statement) *types
 
 	// Find the final CREATE statement (most recent index definition)
 	var finalCreate *types.Statement
-	for i := len(statements) - 1; i >= 0; i-- {
-		if statements[i].Operation == types.OpCreate {
-			finalCreate = statements[i]
+	for _, statement := range slices.Backward(statements) {
+		if statement.Operation == types.OpCreate {
+			finalCreate = statement
 			break
 		}
 	}

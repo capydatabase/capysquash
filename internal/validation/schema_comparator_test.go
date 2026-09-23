@@ -140,7 +140,6 @@ func TestCatalogSignatureQueriesParse(t *testing.T) {
 		"comments":     signatureCommentsQuery,
 	}
 	for name, query := range queries {
-		name, query := name, query
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			if _, err := pgquery.Parse(query); err != nil {

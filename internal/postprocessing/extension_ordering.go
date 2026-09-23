@@ -1,6 +1,7 @@
 package postprocessing
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -37,8 +38,8 @@ func FixExtensionOrder(sql string) string {
 
 			// Find the extension name (last meaningful part before semicolon)
 			var extName string
-			for j := len(parts) - 1; j >= 0; j-- {
-				part := strings.Trim(parts[j], `";`)
+			for _, part := range slices.Backward(parts) {
+				part := strings.Trim(part, `";`)
 				if part != "" && strings.ToUpper(part) != "EXISTS" && strings.ToUpper(part) != "NOT" &&
 					strings.ToUpper(part) != "IF" && strings.ToUpper(part) != "EXTENSION" && strings.ToUpper(part) != "CREATE" {
 					extName = part
@@ -146,8 +147,8 @@ func SortExtensionsByDependency(extensionLines []string) []string {
 		parts := strings.Fields(line)
 		// Parse from end slightly more robustly than fixed index
 		var extName string
-		for j := len(parts) - 1; j >= 0; j-- {
-			part := strings.Trim(parts[j], `";`)
+		for _, part := range slices.Backward(parts) {
+			part := strings.Trim(part, `";`)
 			upper := strings.ToUpper(part)
 			if part != "" && upper != "EXISTS" && upper != "NOT" &&
 				upper != "IF" && upper != "EXTENSION" && upper != "CREATE" {

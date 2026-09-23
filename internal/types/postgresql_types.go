@@ -515,7 +515,7 @@ func (pts *PostgreSQLTypeSystem) GetTypeSize(typeName string) (int, error) {
 
 	// Handle precision specifications
 	if strings.Contains(typeName, "(") {
-		baseType := strings.Split(normalized, "(")[0]
+		baseType, _, _ := strings.Cut(normalized, "(")
 		if size, exists := typeSizes[baseType]; exists {
 			if size == -1 {
 				// Try to extract size from specification
