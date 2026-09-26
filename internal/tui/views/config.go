@@ -52,11 +52,6 @@ func NewConfigView(configPath string) *ConfigView {
 	}
 }
 
-// Init initializes the config view
-func (c *ConfigView) Init() tea.Cmd {
-	return c.loadConfig
-}
-
 // Update handles messages
 func (c *ConfigView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {

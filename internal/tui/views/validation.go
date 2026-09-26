@@ -20,10 +20,6 @@ func NewValidationView() *ValidationView {
 	return &ValidationView{}
 }
 
-func (v *ValidationView) Init() tea.Cmd {
-	return nil
-}
-
 func (v *ValidationView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {
 	case viewtypes.ValidationResultMsg:

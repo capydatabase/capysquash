@@ -39,11 +39,6 @@ func NewAnalysisView(migrationDir string) *AnalysisView {
 	}
 }
 
-// Init initializes the analysis view
-func (a *AnalysisView) Init() tea.Cmd {
-	return nil
-}
-
 // Update handles messages
 func (a *AnalysisView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {

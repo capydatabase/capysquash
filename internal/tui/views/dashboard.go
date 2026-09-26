@@ -91,11 +91,6 @@ func NewDashboardView(migrationDir, configPath string) *DashboardView {
 	return d
 }
 
-// Init initializes the dashboard
-func (d *DashboardView) Init() tea.Cmd {
-	return d.loadStats
-}
-
 // Update handles messages
 func (d *DashboardView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {

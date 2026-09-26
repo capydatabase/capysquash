@@ -43,11 +43,6 @@ func NewProgressView(migrationDir, configPath string) *ProgressView {
 	}
 }
 
-// Init initializes the progress view
-func (p *ProgressView) Init() tea.Cmd {
-	return nil
-}
-
 // Update handles messages
 func (p *ProgressView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {

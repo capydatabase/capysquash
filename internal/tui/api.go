@@ -47,11 +47,7 @@ func LaunchWithView(migrationDir, configPath string, view ViewType) error {
 	}
 
 	model := NewModel(migrationDir, configPath)
-
-	// Set the initial view before starting the program
-	if v, exists := model.views[view]; exists {
-		model.currentView = v
-	}
+	model.startAt(view)
 
 	return run(model)
 }

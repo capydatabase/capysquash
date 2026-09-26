@@ -47,9 +47,16 @@ func NewModel(migrationDir, configPath string) *Model {
 	return m
 }
 
-// Init initializes the TUI
+// Init enters the starting view.
 func (m *Model) Init() tea.Cmd {
-	return m.currentView.Init()
+	return m.currentView.OnEnter()
+}
+
+// startAt makes view the one the program starts on. Init enters it.
+func (m *Model) startAt(view ViewType) {
+	if v, exists := m.views[view]; exists {
+		m.currentView = v
+	}
 }
 
 // Update handles messages

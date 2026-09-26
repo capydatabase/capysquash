@@ -103,9 +103,6 @@ type SquashStats struct {
 
 // View interface that all views must implement
 type View interface {
-	// Init initializes the view
-	Init() tea.Cmd
-
 	// Update handles messages and updates view state
 	Update(msg tea.Msg) (View, tea.Cmd)
 
@@ -118,7 +115,8 @@ type View interface {
 	// SetSize sets the view dimensions
 	SetSize(width, height int)
 
-	// OnEnter is called when the view becomes active
+	// OnEnter is called when the view becomes active, including the view
+	// the program starts on.
 	OnEnter() tea.Cmd
 
 	// OnExit is called when leaving the view

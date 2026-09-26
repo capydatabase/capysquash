@@ -27,11 +27,6 @@ func NewHelpView() *HelpView {
 	}
 }
 
-// Init initializes the help view
-func (h *HelpView) Init() tea.Cmd {
-	return nil
-}
-
 // Update handles messages
 func (h *HelpView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {

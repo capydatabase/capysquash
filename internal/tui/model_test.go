@@ -111,6 +111,41 @@ func TestKeysSwitchViews(t *testing.T) {
 	}
 }
 
+// `capysquash tui analyze|deps|config` start on a view other than the
+// dashboard; that view must be entered (and load its data) on start.
+func TestStartViewIsEntered(t *testing.T) {
+	cases := []struct {
+		view    ViewType
+		heading string
+	}{
+		{ViewDashboard, "Migration Overview"},
+		{ViewAnalysis, "Migration Analysis"},
+		{ViewDependencyGraph, "Dependency Graph - Forward Dependencies"},
+		{ViewConfig, "Configuration Wizard"},
+	}
+	for _, tc := range cases {
+		t.Run((&Model{}).getViewName(tc.view), func(t *testing.T) {
+			dir, err := filepath.Abs("../../test-fixtures/fk_cycles/original")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(t.TempDir())
+
+			m := NewModel(dir, "capysquash.config.json")
+			m.startAt(tc.view)
+			drive(t, m, m.Init())
+			m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+			if got := m.currentView.Type(); got != tc.view {
+				t.Fatalf("view = %v, want %v", got, tc.view)
+			}
+			if c := content(m); !strings.Contains(c, tc.heading) {
+				t.Fatalf("start view did not load; missing %q in:\n%s", tc.heading, c)
+			}
+		})
+	}
+}
+
 func TestEveryViewRenders(t *testing.T) {
 	cases := []struct {
 		view    ViewType

@@ -38,11 +38,6 @@ func NewDependencyGraphView(migrationDir string) *DependencyGraphView {
 	}
 }
 
-// Init initializes the dependency graph view
-func (d *DependencyGraphView) Init() tea.Cmd {
-	return nil
-}
-
 // Update handles messages
 func (d *DependencyGraphView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {
