@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/capydatabase/capysquash/internal/config"
 	"github.com/capydatabase/capysquash/internal/squasher"
 	"github.com/capydatabase/capysquash/internal/tui/styles"
 	"github.com/capydatabase/capysquash/internal/tui/viewtypes"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // ProgressView displays real-time progress of squashing operation
@@ -51,7 +51,7 @@ func (p *ProgressView) Init() tea.Cmd {
 // Update handles messages
 func (p *ProgressView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "enter":
 			if p.complete {

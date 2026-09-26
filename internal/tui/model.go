@@ -3,10 +3,10 @@ package tui
 import (
 	"fmt"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/capydatabase/capysquash/internal/tui/styles"
 	"github.com/capydatabase/capysquash/internal/tui/views"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Model is the main TUI application model
@@ -49,10 +49,7 @@ func NewModel(migrationDir, configPath string) *Model {
 
 // Init initializes the TUI
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(
-		tea.EnterAltScreen,
-		m.currentView.Init(),
-	)
+	return m.currentView.Init()
 }
 
 // Update handles messages
@@ -73,7 +70,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Global key bindings
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -121,10 +118,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// View renders the TUI
-func (m *Model) View() string {
+// View renders the TUI. It always asks for the alternate screen.
+func (m *Model) View() tea.View {
+	v := tea.NewView("Initializing...")
+	v.AltScreen = true
 	if !m.ready {
-		return "Initializing..."
+		return v
 	}
 
 	// Render current view
@@ -133,11 +132,12 @@ func (m *Model) View() string {
 	// Render status bar
 	statusBar := m.renderStatusBar()
 
-	return lipgloss.JoinVertical(
+	v.SetContent(lipgloss.JoinVertical(
 		lipgloss.Left,
 		content,
 		statusBar,
-	)
+	))
+	return v
 }
 
 // navigateTo switches to a different view

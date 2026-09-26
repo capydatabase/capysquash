@@ -1,10 +1,10 @@
 package views
 
 import (
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/capydatabase/capysquash/internal/tui/styles"
 	"github.com/capydatabase/capysquash/internal/tui/viewtypes"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // HelpView displays keyboard shortcuts and usage information
@@ -35,7 +35,7 @@ func (h *HelpView) Init() tea.Cmd {
 // Update handles messages
 func (h *HelpView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k":
 			if h.scrollOffset > 0 {

@@ -6,12 +6,12 @@ import (
 	"path/filepath"
 	"sort"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/tracking"
 	"github.com/capydatabase/capysquash/internal/tui/styles"
 	"github.com/capydatabase/capysquash/internal/tui/viewtypes"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // DependencyGraphView displays object dependency visualization
@@ -46,7 +46,7 @@ func (d *DependencyGraphView) Init() tea.Cmd {
 // Update handles messages
 func (d *DependencyGraphView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k":
 			if d.selectedIdx > 0 {

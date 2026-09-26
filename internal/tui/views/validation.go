@@ -3,9 +3,9 @@ package views
 import (
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/capydatabase/capysquash/internal/tui/styles"
 	"github.com/capydatabase/capysquash/internal/tui/viewtypes"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // ValidationView renders validation results

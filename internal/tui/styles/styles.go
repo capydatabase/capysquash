@@ -1,7 +1,9 @@
 package styles
 
 import (
-	"github.com/charmbracelet/lipgloss"
+	"image/color"
+
+	"charm.land/lipgloss/v2"
 )
 
 // Color palette
@@ -135,13 +137,13 @@ var (
 )
 
 // Stat creates a styled statistic display
-func Stat(label, value string, color lipgloss.Color) string {
+func Stat(label, value string, c color.Color) string {
 	labelStyle := lipgloss.NewStyle().
 		Foreground(Muted).
 		Width(20)
 
 	valueStyle := lipgloss.NewStyle().
-		Foreground(color).
+		Foreground(c).
 		Bold(true)
 
 	return labelStyle.Render(label+":") + " " + valueStyle.Render(value)
@@ -168,10 +170,10 @@ func StatDanger(label, value string) string {
 }
 
 // Badge creates a styled badge
-func Badge(text string, color lipgloss.Color) string {
+func Badge(text string, c color.Color) string {
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FFFFFF")).
-		Background(color).
+		Background(c).
 		Padding(0, 1).
 		Bold(true).
 		Render(text)

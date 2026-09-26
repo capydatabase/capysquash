@@ -5,7 +5,7 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Launch is a convenience function that creates and runs a TUI in one step.
@@ -25,7 +25,7 @@ func Launch(migrationDir, configPath string) error {
 	}
 
 	model := NewModel(migrationDir, configPath)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
@@ -56,7 +56,7 @@ func LaunchWithView(migrationDir, configPath string, view ViewType) error {
 		model.currentView = v
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model)
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)

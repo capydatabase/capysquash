@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The TUI (`capysquash tui`, `tui analyze`, `tui deps`, `tui config`) runs on
+  Bubble Tea v2 (`charm.land/bubbletea/v2` v2.0.10) and Lip Gloss v2
+  (`charm.land/lipgloss/v2` v2.0.6), replacing Bubble Tea v1.3.10 and Lip
+  Gloss v1.1.0. Views, key bindings, colours and the alternate screen are
+  unchanged; screens were compared side by side against the v1 build. Colour
+  downsampling for 256-colour and 16-colour terminals now comes from Bubble
+  Tea's renderer instead of Lip Gloss.
+
 ### Fixed
 
 - `govulncheck` is clean. The Docker validation path moved from the frozen

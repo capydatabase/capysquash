@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/capydatabase/capysquash/internal/config"
 	"github.com/capydatabase/capysquash/internal/tui/styles"
 	"github.com/capydatabase/capysquash/internal/tui/viewtypes"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // ConfigView displays and allows editing configuration
@@ -60,7 +60,7 @@ func (c *ConfigView) Init() tea.Cmd {
 // Update handles messages
 func (c *ConfigView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if c.editingIdx >= 0 {
 			return c.handleEditMode(msg)
 		}
@@ -81,7 +81,7 @@ func (c *ConfigView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 }
 
 // handleNavigationMode handles input in navigation mode
-func (c *ConfigView) handleNavigationMode(msg tea.KeyMsg) (viewtypes.View, tea.Cmd) {
+func (c *ConfigView) handleNavigationMode(msg tea.KeyPressMsg) (viewtypes.View, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
 		if c.selectedIdx > 0 {
@@ -95,7 +95,7 @@ func (c *ConfigView) handleNavigationMode(msg tea.KeyMsg) (viewtypes.View, tea.C
 		}
 		return c, nil
 
-	case "enter", " ":
+	case "enter", "space":
 		// Enter edit mode
 		c.editingIdx = c.selectedIdx
 		return c, nil
@@ -115,7 +115,7 @@ func (c *ConfigView) handleNavigationMode(msg tea.KeyMsg) (viewtypes.View, tea.C
 }
 
 // handleEditMode handles input in edit mode
-func (c *ConfigView) handleEditMode(msg tea.KeyMsg) (viewtypes.View, tea.Cmd) {
+func (c *ConfigView) handleEditMode(msg tea.KeyPressMsg) (viewtypes.View, tea.Cmd) {
 	field := c.fields[c.editingIdx]
 
 	switch msg.String() {
@@ -134,7 +134,7 @@ func (c *ConfigView) handleEditMode(msg tea.KeyMsg) (viewtypes.View, tea.Cmd) {
 		}
 		return c, nil
 
-	case "right", "l", "enter", " ":
+	case "right", "l", "enter", "space":
 		switch field.Type {
 		case FieldTypeSelect:
 			c.cycleNext(c.editingIdx)
@@ -228,7 +228,8 @@ func (c *ConfigView) renderField(idx int, field ConfigField) string {
 	// Value
 	var value string
 	if isEditing {
-		value = "  " + styles.ActiveBoxStyle.Width(40).Render("◄ "+field.CurrentValue+" ►")
+		// Lip Gloss v2 counts the border in Width: 40 columns inside plus 2 for the border.
+		value = "  " + styles.ActiveBoxStyle.Width(42).Render("◄ "+field.CurrentValue+" ►")
 	} else {
 		valueStyle := styles.TextStyle.Foreground(styles.Secondary)
 		if field.Type == FieldTypeToggle {
