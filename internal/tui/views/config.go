@@ -229,8 +229,10 @@ func (c *ConfigView) renderField(idx int, field ConfigField) string {
 	// Value
 	var value string
 	if isEditing {
-		// Lip Gloss v2 counts the border in Width: 40 columns inside plus 2 for the border.
-		value = "  " + styles.ActiveBoxStyle.Width(42).Render("◄ "+field.CurrentValue+" ►")
+		// Lip Gloss v2 counts the border in Width: 40 columns inside plus 2
+		// for the border. The margin indents every line of the box, which a
+		// "  " prefix would only do for the first.
+		value = styles.ActiveBoxStyle.Width(42).MarginLeft(2).Render("◄ " + field.CurrentValue + " ►")
 	} else {
 		valueStyle := styles.TextStyle.Foreground(styles.Secondary)
 		if field.Type == FieldTypeToggle {

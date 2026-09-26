@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The TUI configuration wizard's edit box is indented as a whole. Only its
+  top border was indented, so the rest of the box sat two columns to the left.
 - Esc while editing a field in the TUI configuration wizard cancels the edit,
   as the on-screen hint says. It used to leave the wizard for the dashboard
   with the edit still open.

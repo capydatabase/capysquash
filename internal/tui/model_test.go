@@ -2,12 +2,16 @@ package tui
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
+
+// sgr matches the colour and style escapes Lip Gloss emits.
+var sgr = regexp.MustCompile(`\x1b\[[0-9;:]*m`)
 
 var (
 	keySpace = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
@@ -181,23 +185,34 @@ func TestEveryViewRenders(t *testing.T) {
 
 // The edit box was Width(40) in Lip Gloss v1, which excluded the border. v2
 // includes it, so the port uses Width(42); the rendered box must still be 42
-// columns wide.
-func TestConfigEditBoxWidth(t *testing.T) {
+// columns wide. Every line of it is indented two columns like the rest of
+// the field (only the top border used to be).
+func TestConfigEditBox(t *testing.T) {
 	m := newTestModel(t)
 	_, cmd := m.navigateTo(ViewConfig)
 	drive(t, m, cmd)
 	press(t, m, keyEnter)
 
+	var box []string
 	for line := range strings.SplitSeq(content(m), "\n") {
-		if strings.Contains(line, "◄") {
-			// JoinVertical pads every line to the widest one; drop that.
-			if got := lipgloss.Width(strings.TrimRight(line, " ")); got != 42 {
-				t.Fatalf("edit box line is %d columns, want 42: %q", got, line)
-			}
-			return
+		// JoinVertical pads every line to the widest one; drop that.
+		plain := strings.TrimRight(sgr.ReplaceAllString(line, ""), " ")
+		if trimmed := strings.TrimLeft(plain, " "); strings.HasPrefix(trimmed, "╭") ||
+			strings.HasPrefix(trimmed, "│") || strings.HasPrefix(trimmed, "╰") {
+			box = append(box, plain)
 		}
 	}
-	t.Fatalf("no edit box rendered:\n%s", content(m))
+	if len(box) != 5 {
+		t.Fatalf("want a 5-line edit box, found %d lines:\n%s", len(box), content(m))
+	}
+	for _, line := range box {
+		if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "   ") {
+			t.Errorf("box line not indented by two columns: %q", line)
+		}
+		if got := lipgloss.Width(line); got != 2+42 {
+			t.Errorf("box line is %d columns, want 2+42: %q", got, line)
+		}
+	}
 }
 
 // The status bar must fit on one line at the terminal width; it used to
