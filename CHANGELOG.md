@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The TUI's validation view is reachable: press `v` anywhere (again to go
+  back). It lints every migration with the same static rules as
+  `capysquash lint`, honouring `static_validation` in the config file:
+  safety and breaking findings and unparseable files fail it, hygiene
+  findings are listed as warnings. The key is shown in the status bar and on
+  the help screen. The view existed before but nothing opened it or gave it
+  results.
+
 ### Changed
 
 - The TUI (`capysquash tui`, `tui analyze`, `tui deps`, `tui config`) runs on

@@ -38,7 +38,7 @@ func NewModel(migrationDir, configPath string) *Model {
 	m.views[ViewConfig] = views.NewConfigView(configPath)
 	m.views[ViewDependencyGraph] = views.NewDependencyGraphView(migrationDir)
 	m.views[ViewProgress] = views.NewProgressView(migrationDir, configPath)
-	m.views[ViewValidation] = views.NewValidationView()
+	m.views[ViewValidation] = views.NewValidationView(migrationDir, configPath)
 	m.views[ViewHelp] = views.NewHelpView()
 
 	// Start with dashboard
@@ -91,6 +91,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				return m.navigateTo(ViewHelp)
 			}
+
+		case "v":
+			// Toggle the validation view
+			if m.currentView.Type() == ViewValidation {
+				return m.navigateTo(ViewDashboard)
+			}
+			return m.navigateTo(ViewValidation)
 
 		case "esc":
 			// A view using esc itself (the config wizard while editing)
@@ -184,7 +191,7 @@ func (m *Model) renderStatusBar() string {
 	viewBadge := styles.PrimaryBadge(viewName)
 
 	// Navigation hints
-	hints := styles.MutedStyle.Render("ESC: Dashboard  ►  ?: Help  ►  q: Quit")
+	hints := styles.MutedStyle.Render("ESC: Dashboard  ►  v: Validation  ►  ?: Help  ►  q: Quit")
 
 	// Status message
 	status := ""

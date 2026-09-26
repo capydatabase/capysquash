@@ -60,6 +60,7 @@ func (h *HelpView) View() string {
 		{"q, Ctrl+C", "Quit the application", ""},
 		{"ESC", "Return to dashboard", ""},
 		{"?", "Toggle this help screen", ""},
+		{"v", "Toggle migration validation (static lint)", ""},
 	}))
 
 	// Dashboard shortcuts

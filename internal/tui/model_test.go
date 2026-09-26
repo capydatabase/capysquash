@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -20,6 +21,7 @@ var (
 	keyDown  = tea.KeyPressMsg{Code: tea.KeyDown}
 	keyHelp  = tea.KeyPressMsg{Code: '?', Text: "?"}
 	keyQuit  = tea.KeyPressMsg{Code: 'q', Text: "q"}
+	keyValid = tea.KeyPressMsg{Code: 'v', Text: "v"}
 )
 
 // newTestModel builds a model over a fixture migration set, sized like a
@@ -160,7 +162,7 @@ func TestEveryViewRenders(t *testing.T) {
 		{ViewConfig, "Configuration Wizard"},
 		{ViewDependencyGraph, "Dependency Graph"},
 		{ViewProgress, "Migration Squashing Progress"},
-		{ViewValidation, "No validation results yet."},
+		{ViewValidation, "Migration Validation"},
 		{ViewHelp, "Help & Keyboard Shortcuts"},
 	}
 	for _, tc := range cases {
@@ -255,5 +257,68 @@ func TestEscCancelsConfigEdit(t *testing.T) {
 	press(t, m, keyEsc)
 	if got := m.currentView.Type(); got != ViewDashboard {
 		t.Fatalf("esc outside an edit: view = %v, want dashboard", got)
+	}
+}
+
+// v toggles the validation view from anywhere; entering it lints the
+// migrations. The fixture has hygiene findings only, so it passes with
+// warnings.
+func TestValidationKey(t *testing.T) {
+	m := newTestModel(t)
+
+	press(t, m, keyValid)
+	if got := m.currentView.Type(); got != ViewValidation {
+		t.Fatalf("after v: view = %v, want validation", got)
+	}
+	c := content(m)
+	for _, want := range []string{"Validation Passed", "001_create_posts.sql:6 [hygiene] CSQ.HYGIENE.PREFER_BIGINT", "v: Validation"} {
+		if !strings.Contains(c, want) {
+			t.Errorf("missing %q in:\n%s", want, c)
+		}
+	}
+
+	for line := range strings.SplitSeq(c, "\n") {
+		if w := lipgloss.Width(line); w > 120 {
+			t.Errorf("line is %d columns, wider than the 120-column terminal: %q", w, line)
+		}
+	}
+
+	press(t, m, keyValid)
+	if got := m.currentView.Type(); got != ViewDashboard {
+		t.Fatalf("after second v: view = %v, want dashboard", got)
+	}
+
+	press(t, m, keyHelp)
+	if !strings.Contains(content(m), "Toggle migration validation") {
+		t.Error("help does not list the v binding")
+	}
+}
+
+// Breaking and safety findings fail validation, as they fail lint; files
+// that do not parse are errors too.
+func TestValidationFails(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"001_create.sql": "CREATE TABLE users (id bigint PRIMARY KEY);\n",
+		"002_drop.sql":   "DROP TABLE users;\n",
+		"003_broken.sql": "CREATE TABLE (;\n",
+	}
+	for name, sql := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(sql), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(t.TempDir())
+
+	m := NewModel(dir, "capysquash.config.json")
+	m.startAt(ViewValidation)
+	drive(t, m, m.Init())
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+
+	c := content(m)
+	for _, want := range []string{"Validation Failed", "002_drop.sql:1 [breaking]", "003_broken.sql: failed to parse SQL"} {
+		if !strings.Contains(c, want) {
+			t.Errorf("missing %q in:\n%s", want, c)
+		}
 	}
 }
