@@ -199,3 +199,20 @@ func TestConfigEditBoxWidth(t *testing.T) {
 	}
 	t.Fatalf("no edit box rendered:\n%s", content(m))
 }
+
+// The status bar must fit on one line at the terminal width; it used to
+// ignore its own padding and wrap "Quit" onto a second line.
+func TestStatusBarFitsOneLine(t *testing.T) {
+	for _, width := range []int{80, 120, 160} {
+		m := newTestModel(t)
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+
+		bar := m.renderStatusBar()
+		if h := lipgloss.Height(bar); h != 1 {
+			t.Errorf("width %d: status bar is %d lines:\n%s", width, h, bar)
+		}
+		if w := lipgloss.Width(bar); w != width {
+			t.Errorf("width %d: status bar is %d columns", width, w)
+		}
+	}
+}

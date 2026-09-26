@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The TUI status bar fits on one line. Its width sum left out the bar's own
+  padding, so the "q: Quit" hint wrapped onto a second line at every
+  terminal width.
 - `capysquash tui analyze` and `capysquash tui deps` no longer sit on their
   loading message forever. The view the TUI starts on is now entered like any
   other, so it loads its data; before, only the dashboard and the

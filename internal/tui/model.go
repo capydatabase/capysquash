@@ -197,9 +197,10 @@ func (m *Model) renderStatusBar() string {
 
 	rightSection := hints
 
-	// Calculate padding
+	// Fill the gap between the sections. The bar's own horizontal padding
+	// takes columns out of m.width too, or the content wraps.
 	totalWidth := lipgloss.Width(leftSection) + lipgloss.Width(rightSection)
-	padding := max(m.width-totalWidth, 0)
+	padding := max(m.width-styles.StatusBarStyle.GetHorizontalPadding()-totalWidth, 0)
 
 	statusContent := lipgloss.JoinHorizontal(
 		lipgloss.Left,
