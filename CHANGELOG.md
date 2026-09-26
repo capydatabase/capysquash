@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The TUI no longer draws engine log lines over its own screen. The
+  analysis, dependency graph and squash views ran the parser, tracker and
+  squasher, whose default logger writes to stdout; the lines landed on top
+  of the TUI (the squash result screen was mostly log text). The default
+  logger is silenced while the TUI runs and restored when it exits.
 - `govulncheck` is clean. The Docker validation path moved from the frozen
   `github.com/docker/docker` client (GO-2026-4887, GO-2026-4883, no fix will
   ever land on that module path) to `github.com/moby/moby/client` v0.6 and

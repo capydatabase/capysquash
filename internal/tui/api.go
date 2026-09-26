@@ -4,8 +4,10 @@ package tui
 
 import (
 	"fmt"
+	"io"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/capydatabase/capysquash/internal/utils"
 )
 
 // Launch is a convenience function that creates and runs a TUI in one step.
@@ -24,12 +26,7 @@ func Launch(migrationDir, configPath string) error {
 		configPath = "capysquash.config.json"
 	}
 
-	model := NewModel(migrationDir, configPath)
-	p := tea.NewProgram(model)
-	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("TUI error: %w", err)
-	}
-	return nil
+	return run(NewModel(migrationDir, configPath))
 }
 
 // LaunchWithView is a convenience function that creates and runs a TUI,
@@ -56,9 +53,18 @@ func LaunchWithView(migrationDir, configPath string, view ViewType) error {
 		model.currentView = v
 	}
 
-	p := tea.NewProgram(model)
+	return run(model)
+}
 
-	if _, err := p.Run(); err != nil {
+// run starts the program. The analysis, dependency and squash views call
+// into packages that log through the default logger, which writes to stdout
+// and would draw over the screen, so it is silenced until the program exits.
+func run(model *Model) error {
+	prev := utils.GetDefaultLogger()
+	utils.SetDefaultLogger(utils.NewLogger(utils.LogLevelInfo, io.Discard))
+	defer utils.SetDefaultLogger(prev)
+
+	if _, err := tea.NewProgram(model).Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
 	return nil

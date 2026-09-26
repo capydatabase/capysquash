@@ -31,14 +31,14 @@ func newTestModel(t *testing.T) *Model {
 	t.Chdir(tmp)
 
 	m := NewModel(dir, filepath.Join(tmp, "capysquash.config.json"))
-	run(t, m, m.Init())
+	drive(t, m, m.Init())
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	return m
 }
 
-// run executes cmd the way the program would and feeds each resulting
+// drive executes cmd the way the program would and feeds each resulting
 // message back into the model until nothing is left to do.
-func run(t *testing.T, m *Model, cmd tea.Cmd) {
+func drive(t *testing.T, m *Model, cmd tea.Cmd) {
 	t.Helper()
 	if cmd == nil {
 		return
@@ -47,18 +47,18 @@ func run(t *testing.T, m *Model, cmd tea.Cmd) {
 	case nil:
 	case tea.BatchMsg:
 		for _, c := range msg {
-			run(t, m, c)
+			drive(t, m, c)
 		}
 	default:
 		_, next := m.Update(msg)
-		run(t, m, next)
+		drive(t, m, next)
 	}
 }
 
 func press(t *testing.T, m *Model, key tea.KeyPressMsg) {
 	t.Helper()
 	_, cmd := m.Update(key)
-	run(t, m, cmd)
+	drive(t, m, cmd)
 }
 
 func content(m *Model) string {
@@ -128,7 +128,7 @@ func TestEveryViewRenders(t *testing.T) {
 		t.Run((&Model{}).getViewName(tc.view), func(t *testing.T) {
 			m := newTestModel(t)
 			_, cmd := m.navigateTo(tc.view)
-			run(t, m, cmd)
+			drive(t, m, cmd)
 
 			v := m.View()
 			if !v.AltScreen {
@@ -150,7 +150,7 @@ func TestEveryViewRenders(t *testing.T) {
 func TestConfigEditBoxWidth(t *testing.T) {
 	m := newTestModel(t)
 	_, cmd := m.navigateTo(ViewConfig)
-	run(t, m, cmd)
+	drive(t, m, cmd)
 	press(t, m, keyEnter)
 
 	for line := range strings.SplitSeq(content(m), "\n") {
