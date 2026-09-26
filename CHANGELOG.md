@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The TUI analysis view said "-0 files" when a squash would remove no file; it says "none" (and
+  "-1 file" for one).
 - The TUI configuration wizard's edit box is indented as a whole. Only its
   top border was indented, so the rest of the box sat two columns to the left.
 - Esc while editing a field in the TUI configuration wizard cancels the edit,

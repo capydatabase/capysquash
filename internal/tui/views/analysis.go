@@ -204,7 +204,7 @@ func (a *AnalysisView) renderOverview() string {
 		lines = append(lines, styles.StatInfo("Potential Savings", savingsPercent))
 	}
 
-	fileReduction := fmt.Sprintf("-%d files", a.stats.FileReduction)
+	fileReduction := formatFileReduction(a.stats.FileReduction)
 	lines = append(lines, styles.StatInfo("File Reduction", fileReduction))
 
 	lines = append(lines, "")
@@ -514,4 +514,17 @@ func (a *AnalysisView) runAnalysis() tea.Msg {
 	}
 
 	return viewtypes.AnalysisCompleteMsg{Stats: stats}
+}
+
+// formatFileReduction renders how many migration files a squash would remove; "none" rather than
+// "-0 files" when it would remove none.
+func formatFileReduction(files int) string {
+	switch {
+	case files <= 0:
+		return "none"
+	case files == 1:
+		return "-1 file"
+	default:
+		return fmt.Sprintf("-%d files", files)
+	}
 }
