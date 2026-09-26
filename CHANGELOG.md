@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-26
+
 ### Added
 
 - The TUI's validation view is reachable: press `v` anywhere (again to go
@@ -733,7 +735,8 @@ Correctness overhaul across the safety ladder, validation, output pipeline, and 
 - Enables better code review, parallel migrations, and incremental deployment
 - CLI: `pgsquash squash --split category` or `--split hybrid`
 
-[Unreleased]: https://github.com/capydatabase/capysquash/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/capydatabase/capysquash/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/capydatabase/capysquash/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/capydatabase/capysquash/compare/v0.11.0...v1.0.0
 [0.11.0]: https://github.com/capydatabase/capysquash/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/capydatabase/capysquash/compare/v0.9.7...v0.10.0
