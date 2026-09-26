@@ -107,33 +107,6 @@ var (
 	// Description style for key bindings
 	DescStyle = lipgloss.NewStyle().
 			Foreground(Muted)
-
-	// Progress bar filled style
-	ProgressFilledStyle = lipgloss.NewStyle().
-				Foreground(Success).
-				Background(Success)
-
-	// Progress bar empty style
-	ProgressEmptyStyle = lipgloss.NewStyle().
-				Foreground(Border).
-				Background(Border)
-
-	// Table header style
-	TableHeaderStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(Secondary).
-				BorderStyle(lipgloss.NormalBorder()).
-				BorderBottom(true).
-				BorderForeground(Border)
-
-	// Table cell style
-	TableCellStyle = lipgloss.NewStyle().
-			Padding(0, 1)
-
-	// Highlighted table row
-	HighlightedRowStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("#2D3748")).
-				Foreground(Primary)
 )
 
 // Stat creates a styled statistic display
