@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -131,15 +132,21 @@ func (lw *logWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// Global default logger
-var defaultLogger = NewLogger(LogLevelInfo, os.Stdout)
+// defaultLogger is swapped while goroutines may be logging through it (the
+// TUI silences it for its lifetime while a squash can still be running), so
+// it is held atomically.
+var defaultLogger atomic.Pointer[Logger]
+
+func init() {
+	defaultLogger.Store(NewLogger(LogLevelInfo, os.Stdout))
+}
 
 // SetDefaultLogger sets the global default logger
 func SetDefaultLogger(logger *Logger) {
-	defaultLogger = logger
+	defaultLogger.Store(logger)
 }
 
 // GetDefaultLogger returns the global default logger
 func GetDefaultLogger() *Logger {
-	return defaultLogger
+	return defaultLogger.Load()
 }
