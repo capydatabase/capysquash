@@ -93,7 +93,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
-			// Return to dashboard from any view
+			// A view using esc itself (the config wizard while editing)
+			// gets it; otherwise return to the dashboard.
+			if c, ok := m.currentView.(EscCapturer); ok && c.CapturesEsc() {
+				break
+			}
 			if m.currentView.Type() != ViewDashboard {
 				return m.navigateTo(ViewDashboard)
 			}

@@ -216,3 +216,29 @@ func TestStatusBarFitsOneLine(t *testing.T) {
 		}
 	}
 }
+
+// Esc while editing a config field cancels the edit and stays in the
+// wizard; a second esc returns to the dashboard.
+func TestEscCancelsConfigEdit(t *testing.T) {
+	m := newTestModel(t)
+	_, cmd := m.navigateTo(ViewConfig)
+	drive(t, m, cmd)
+
+	press(t, m, keyEnter)
+	if !strings.Contains(content(m), "◄") {
+		t.Fatalf("enter did not open the edit box:\n%s", content(m))
+	}
+
+	press(t, m, keyEsc)
+	if got := m.currentView.Type(); got != ViewConfig {
+		t.Fatalf("esc while editing left the wizard for %v", got)
+	}
+	if c := content(m); strings.Contains(c, "◄") || !strings.Contains(c, "Enter: Edit") {
+		t.Fatalf("esc did not cancel the edit:\n%s", c)
+	}
+
+	press(t, m, keyEsc)
+	if got := m.currentView.Type(); got != ViewDashboard {
+		t.Fatalf("esc outside an edit: view = %v, want dashboard", got)
+	}
+}

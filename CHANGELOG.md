@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Esc while editing a field in the TUI configuration wizard cancels the edit,
+  as the on-screen hint says. It used to leave the wizard for the dashboard
+  with the edit still open.
 - The TUI status bar fits on one line. Its width sum left out the bar's own
   padding, so the "q: Quit" hint wrapped onto a second line at every
   terminal width.

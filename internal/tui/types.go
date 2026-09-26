@@ -20,6 +20,9 @@ const (
 // Re-export View for convenience
 type View = viewtypes.View
 
+// Re-export EscCapturer for convenience
+type EscCapturer = viewtypes.EscCapturer
+
 // Re-export message types for convenience
 type (
 	NavigateMsg         = viewtypes.NavigateMsg

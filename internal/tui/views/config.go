@@ -75,6 +75,12 @@ func (c *ConfigView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	return c, nil
 }
 
+// CapturesEsc reports whether a field is being edited, in which case esc
+// cancels the edit instead of leaving the view.
+func (c *ConfigView) CapturesEsc() bool {
+	return c.editingIdx >= 0
+}
+
 // handleNavigationMode handles input in navigation mode
 func (c *ConfigView) handleNavigationMode(msg tea.KeyPressMsg) (viewtypes.View, tea.Cmd) {
 	switch msg.String() {

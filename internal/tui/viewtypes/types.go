@@ -123,6 +123,14 @@ type View interface {
 	OnExit() tea.Cmd
 }
 
+// EscCapturer is implemented by views that sometimes use esc themselves,
+// such as the configuration wizard cancelling an edit. While CapturesEsc
+// reports true, the model hands esc to the view instead of returning to the
+// dashboard.
+type EscCapturer interface {
+	CapturesEsc() bool
+}
+
 // BaseView provides common functionality for all views
 type BaseView struct {
 	Width  int
