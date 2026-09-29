@@ -2382,8 +2382,8 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(ctx context.Context, dsn, m
 			sqlContent = preprocessMigrationSQL(sqlContent, true)
 		}
 
-		// Use executeSQLFile which can handle multiple statements
-		if err := sv.executeSQLFile(ctx, db, sqlContent, migrationPath); err != nil {
+		// Use ExecuteSQLScript which can handle multiple statements
+		if err := ExecuteSQLScript(ctx, db, sqlContent, migrationPath); err != nil {
 			return err
 		}
 
@@ -2408,8 +2408,8 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(ctx context.Context, dsn, m
 			sqlContent = preprocessMigrationSQL(sqlContent, true)
 		}
 
-		// Use executeSQLFile which can handle multiple statements
-		if err := sv.executeSQLFile(ctx, db, sqlContent, path); err != nil {
+		// Use ExecuteSQLScript which can handle multiple statements
+		if err := ExecuteSQLScript(ctx, db, sqlContent, path); err != nil {
 			return err
 		}
 
@@ -2417,9 +2417,10 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(ctx context.Context, dsn, m
 	})
 }
 
-// executeSQLFile executes a SQL file that may contain multiple statements
-// Splits the SQL into individual statements and executes them one by one
-func (sv *SchemaValidator) executeSQLFile(ctx context.Context, db *sql.DB, sqlContent, filePath string) error {
+// ExecuteSQLScript executes a SQL script that may contain multiple statements.
+// It splits the script into individual statements and executes them one by
+// one; filePath only labels errors.
+func ExecuteSQLScript(ctx context.Context, db *sql.DB, sqlContent, filePath string) error {
 	// Split SQL into individual statements
 	statements := splitSQLStatements(sqlContent)
 
