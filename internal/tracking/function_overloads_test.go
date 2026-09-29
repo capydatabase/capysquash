@@ -64,3 +64,23 @@ CREATE TRIGGER t_touch BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION touch();
 		assert.False(t, strings.Contains(warning, "touch"), "unexpected warning: %s", warning)
 	}
 }
+
+// COMMENT ON FUNCTION f without arguments, written while f had one overload,
+// is about that overload; its SQL names the arguments so it stays valid once
+// a later migration adds another overload.
+func TestShortFormStatementsGetTheArgumentsOfTheOnlyOverload(t *testing.T) {
+	tracker := trackSQL(t,
+		"CREATE FUNCTION h(a varchar(20), b int[]) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\nCOMMENT ON FUNCTION h IS 'first';\nGRANT EXECUTE ON FUNCTION h TO PUBLIC;",
+		"CREATE FUNCTION h(a text) RETURNS int LANGUAGE sql AS $$ SELECT 2 $$;",
+	)
+
+	comment := tracker.GetObjects()["public.h(character varying,integer[])::COMMENT"]
+	require.NotNil(t, comment)
+	require.Len(t, comment.History, 1)
+	assert.Equal(t, "COMMENT ON FUNCTION h(varchar(20), int[]) IS 'first'", comment.History[0].Statement.SQL)
+
+	fn := tracker.GetObjects()["public.h(character varying,integer[])::FUNCTION"]
+	require.NotNil(t, fn)
+	require.Len(t, fn.History, 2)
+	assert.Equal(t, "GRANT execute ON FUNCTION h(varchar(20), int[]) TO public", fn.History[1].Statement.SQL, "pg_query deparse spelling")
+}

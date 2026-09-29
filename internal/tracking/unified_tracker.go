@@ -12,6 +12,8 @@ import (
 
 	"github.com/capydatabase/capysquash/internal/errors"
 	"github.com/capydatabase/capysquash/internal/utils"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/capydatabase/capysquash/internal/metadata"
 	"github.com/capydatabase/capysquash/internal/parser"
@@ -48,8 +50,10 @@ type UnifiedTracker struct {
 	statementAnalyzer *parser.StatementAnalyzer
 
 	// routineOverloads maps a function's lower-cased qualified name to the
-	// name+signature identities of its tracked overloads.
+	// name+signature identities of its tracked overloads; routineArgs holds
+	// each identity's input-argument type nodes from its CREATE.
 	routineOverloads map[string][]string
+	routineArgs      map[string][]*pg_query.Node
 
 	// Column type tracking for index optimization
 }
@@ -650,6 +654,7 @@ func NewUnifiedTracker() *UnifiedTracker {
 		detectedCycles:    make([]DDLCycle, 0),
 		statementAnalyzer: parser.NewStatementAnalyzer("17"), // Default to PostgreSQL 17
 		routineOverloads:  make(map[string][]string),
+		routineArgs:       make(map[string][]*pg_query.Node),
 	}
 }
 
@@ -735,6 +740,10 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 		// This must happen before statement processing to respect user intentions
 		ut.statementAnalyzer.AnalyzeStatement(&stmt)
 		ut.statementAnalyzer.AnalyzePragmas(&stmt)
+
+		// A statement naming a function without its arguments gets the
+		// arguments of the overload it refers to, in its SQL too.
+		ut.resolveRoutineArguments(&stmt)
 
 		// Create enhanced lifecycle event
 		event := ut.createLifecycleEvent(stmt, m.Filename, sequence, stmtIndex)
@@ -959,26 +968,110 @@ func (ut *UnifiedTracker) processDependencies(stmt types.Statement, objectID Obj
 // routineIdentity returns the name a statement is tracked under. For a
 // function (and a comment on one) that is the name plus its normalized
 // argument signature, so overloads such as f(integer) and f(text) are
-// separate objects. A statement naming a function without its arguments
-// (DROP FUNCTION f, GRANT ... ON FUNCTION f, COMMENT ON FUNCTION f) refers
-// to the only overload seen so far; with none or several the plain name is
-// kept, which PostgreSQL itself only accepts when the name is unique.
+// separate objects. Without a signature (see resolveRoutineArguments) the
+// plain name is kept, which PostgreSQL only accepts for a unique name.
 func (ut *UnifiedTracker) routineIdentity(stmt types.Statement, name string) string {
-	if !targetsRoutine(stmt) {
+	if !targetsRoutine(stmt) || stmt.FunctionSignature == "" {
 		return name
 	}
-	plain := strings.ToLower(name)
-	if stmt.FunctionSignature != "" {
-		identity := name + stmt.FunctionSignature
-		if stmt.ObjectType == types.TypeFunction && !slices.Contains(ut.routineOverloads[plain], identity) {
+	identity := name + stmt.FunctionSignature
+	if stmt.ObjectType == types.TypeFunction && stmt.Operation == types.OpCreate {
+		plain := strings.ToLower(name)
+		if !slices.Contains(ut.routineOverloads[plain], identity) {
 			ut.routineOverloads[plain] = append(ut.routineOverloads[plain], identity)
 		}
-		return identity
+		if args := createFunctionArgTypes(stmt); args != nil {
+			ut.routineArgs[identity] = args
+		}
 	}
-	if overloads := ut.routineOverloads[plain]; len(overloads) == 1 {
-		return overloads[0]
+	return identity
+}
+
+// resolveRoutineArguments completes DROP FUNCTION f, COMMENT ON FUNCTION f
+// and GRANT ... ON FUNCTION f, written without arguments, when exactly one
+// overload of f exists at that point: the statement is about that overload
+// (PostgreSQL rejects the short form otherwise). Its signature is recorded
+// and its SQL is rewritten with the argument types, so the squashed output
+// stays unambiguous when later migrations add overloads.
+func (ut *UnifiedTracker) resolveRoutineArguments(stmt *types.Statement) {
+	if !targetsRoutine(*stmt) || stmt.FunctionSignature != "" || stmt.ObjectName == "" {
+		return
 	}
-	return name
+	overloads := ut.routineOverloads[strings.ToLower(stmt.ObjectName)]
+	if len(overloads) != 1 {
+		return
+	}
+	identity := overloads[0]
+	stmt.FunctionSignature = identity[len(stmt.ObjectName):]
+
+	args, ok := ut.routineArgs[identity]
+	if !ok || stmt.ParseTree == nil || len(stmt.ParseTree.GetStmts()) != 1 {
+		return
+	}
+	var target *pg_query.ObjectWithArgs
+	switch n := stmt.ParseTree.GetStmts()[0].GetStmt().GetNode().(type) {
+	case *pg_query.Node_DropStmt:
+		if objects := n.DropStmt.GetObjects(); len(objects) == 1 {
+			target = objects[0].GetObjectWithArgs()
+		}
+	case *pg_query.Node_CommentStmt:
+		target = n.CommentStmt.GetObject().GetObjectWithArgs()
+	case *pg_query.Node_GrantStmt:
+		if objects := n.GrantStmt.GetObjects(); len(objects) == 1 {
+			target = objects[0].GetObjectWithArgs()
+		}
+	}
+	if target == nil || !target.GetArgsUnspecified() {
+		return
+	}
+
+	rewritten := proto.Clone(stmt.ParseTree).(*pg_query.ParseResult)
+	switch n := rewritten.GetStmts()[0].GetStmt().GetNode().(type) {
+	case *pg_query.Node_DropStmt:
+		target = n.DropStmt.GetObjects()[0].GetObjectWithArgs()
+	case *pg_query.Node_CommentStmt:
+		target = n.CommentStmt.GetObject().GetObjectWithArgs()
+	case *pg_query.Node_GrantStmt:
+		target = n.GrantStmt.GetObjects()[0].GetObjectWithArgs()
+	}
+	target.ArgsUnspecified = false
+	target.Objargs = args
+	rewritten.GetStmts()[0].StmtLocation = 0
+	rewritten.GetStmts()[0].StmtLen = 0
+
+	sql, err := pg_query.Deparse(rewritten)
+	if err != nil {
+		utils.GetDefaultLogger().WithPrefix("UNIFIED-TRACKER").Warn("Could not add the arguments of %s to %q: %v", identity, stmt.SQL, err)
+		return
+	}
+	stmt.SQL = sql
+	stmt.ParseTree = rewritten
+}
+
+// createFunctionArgTypes returns copies of the input-argument type nodes of
+// a CREATE FUNCTION statement, in order (the nodes an ObjectWithArgs holds).
+func createFunctionArgTypes(stmt types.Statement) []*pg_query.Node {
+	if stmt.ParseTree == nil || len(stmt.ParseTree.GetStmts()) != 1 {
+		return nil
+	}
+	create := stmt.ParseTree.GetStmts()[0].GetStmt().GetCreateFunctionStmt()
+	if create == nil {
+		return nil
+	}
+	args := make([]*pg_query.Node, 0, len(create.GetParameters()))
+	for _, node := range create.GetParameters() {
+		param := node.GetFunctionParameter()
+		if param == nil {
+			continue
+		}
+		switch param.GetMode() {
+		case pg_query.FunctionParameterMode_FUNC_PARAM_OUT, pg_query.FunctionParameterMode_FUNC_PARAM_TABLE:
+			continue
+		}
+		typeName := proto.Clone(param.GetArgType()).(*pg_query.TypeName)
+		args = append(args, &pg_query.Node{Node: &pg_query.Node_TypeName{TypeName: typeName}})
+	}
+	return args
 }
 
 // targetsRoutine reports whether stmt is about a function or procedure:
