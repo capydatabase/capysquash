@@ -81,10 +81,21 @@ where noted. `capysquash <command> --help` is the authoritative flag reference.
 
 | `--safety` | Use for | What it does |
 | --- | --- | --- |
-| `paranoid` | Production | Preserve everything, reorder only |
+| `paranoid` | Production | Preserve everything, reorder only; checks the result against production (below) |
 | `conservative` | Production | Safe merges only |
 | `standard` | Staging, development | Balanced consolidation (default) |
 | `aggressive` | Local development | Maximum cleanup |
+
+`paranoid` needs two databases: `PROD_DB_DSN` (production, only read, in a
+read-only transaction) and `CAPYSQUASH_VALIDATION_DSN` (an empty database
+capysquash may populate and reset; never production). After squashing it
+applies the baseline to the validation database, reads both catalogs with the
+same `pg_catalog` queries (`format_type`, `pg_get_constraintdef`,
+`pg_get_indexdef`, `pg_get_functiondef`, ...), and fails when any table,
+column (type, nullability, default, generation, identity, collation, order),
+constraint, index, trigger, policy, view, function overload, sequence, enum or
+other type in the schemas the baseline creates differs from production.
+Production schemas the baseline creates nothing in are listed as a warning.
 
 ### Manual overrides
 

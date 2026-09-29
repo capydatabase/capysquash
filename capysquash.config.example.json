@@ -1,6 +1,7 @@
 {
   "safety_level": "standard",
   "prod_db_dsn": "",
+  "validation_dsn": "",
   "output": {
     "format": "organized",
     "preserve_comments": true,

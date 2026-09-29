@@ -3,6 +3,7 @@ package squasher
 import (
 	"context"
 	"database/sql"
+	stderrors "errors"
 	"fmt"
 	"maps"
 	"os"
@@ -64,7 +65,10 @@ type Engine struct {
 	lifecycles map[string]*tracking.ObjectLifecycle
 	warnings   []string
 	prodDB     *sql.DB
-	ctx        context.Context
+	// validationDB is the empty scratch database the paranoid level applies
+	// the baseline to (config ValidationDSN / CAPYSQUASH_VALIDATION_DSN).
+	validationDB *sql.DB
+	ctx          context.Context
 
 	// Validators
 	preFlightValidator  *validation.StaticValidator
@@ -291,6 +295,45 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 		}
 	}
 
+	// Paranoid validation applies the baseline to an empty scratch database
+	// and compares its catalog with production's. Never the production
+	// database: nothing is ever executed there.
+	var validationDB *sql.DB
+	if cfg.SafetyLevel == string(Paranoid) {
+		if strings.TrimSpace(cfg.ValidationDSN) == "" {
+			closeDB(db)
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"paranoid safety level requires an empty validation database ("+config.ValidationDSNEnv+")",
+				errors.SeverityError,
+				errors.CategoryValidation,
+			).WithSuggestion("Point " + config.ValidationDSNEnv + " (or validation_dsn in the config) at an empty database capysquash may populate and reset, or use the conservative safety level")
+		}
+		if cfg.ValidationDSN == cfg.ProdDBDSN {
+			closeDB(db)
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"the validation database must not be the production database",
+				errors.SeverityCritical,
+				errors.CategoryValidation,
+			)
+		}
+		validationDB, err = sql.Open("postgres", cfg.ValidationDSN)
+		if err == nil {
+			err = validationDB.Ping()
+		}
+		if err != nil {
+			closeDB(db)
+			closeDB(validationDB)
+			return nil, errors.NewError(
+				errors.ErrorCodeValidationFailed,
+				"failed to connect to the validation database",
+				errors.SeverityCritical,
+				errors.CategoryValidation,
+			).WithInnerError(err)
+		}
+	}
+
 	// Initialize enhanced components
 	var metaMgr *metadata.MetadataManager
 	if db != nil {
@@ -367,12 +410,13 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 
 	return &Engine{
 		// Core components
-		config:     cfg,
-		version:    version,
-		lifecycles: make(map[string]*tracking.ObjectLifecycle),
-		warnings:   []string{},
-		prodDB:     db,
-		ctx:        engineContext,
+		config:       cfg,
+		version:      version,
+		lifecycles:   make(map[string]*tracking.ObjectLifecycle),
+		warnings:     []string{},
+		prodDB:       db,
+		validationDB: validationDB,
+		ctx:          engineContext,
 
 		// Validators
 		preFlightValidator:  preFlightValidator,
@@ -647,6 +691,12 @@ func (e *Engine) Close() error {
 	if e.prodDB != nil {
 		if err := e.prodDB.Close(); err != nil {
 			e.logger.Error("Failed to close production database connection: %v", err)
+			errs = append(errs, err)
+		}
+	}
+	if e.validationDB != nil {
+		if err := e.validationDB.Close(); err != nil {
+			e.logger.Error("Failed to close validation database connection: %v", err)
 			errs = append(errs, err)
 		}
 	}
@@ -3157,11 +3207,7 @@ func (e *Engine) validateAgainstDatabase(ctx context.Context, sql string) error 
 
 	e.logger.Info("Performing comprehensive database validation in paranoid mode")
 
-	// Create schema comparator
-	comparator := metadata.NewSchemaComparator(e.metadataManager)
-
-	// Perform comprehensive schema comparison
-	result, err := comparator.CompareSchema(ctx, sql)
+	result, err := e.compareBaselineWithProduction(ctx, sql)
 	if err != nil {
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
@@ -3171,99 +3217,112 @@ func (e *Engine) validateAgainstDatabase(ctx context.Context, sql string) error 
 		).WithInnerError(err)
 	}
 
-	// Process comparison results
-	if len(result.MissingExtensions) > 0 {
-		e.logger.Info("⚠ Missing extensions: %v", result.MissingExtensions)
-		for _, ext := range result.MissingExtensions {
-			e.warnings = append(e.warnings,
-				fmt.Sprintf("Extension '%s' required but not installed in database", ext))
-		}
+	for _, ext := range result.MissingExtensions {
+		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: the baseline creates extension %s, which production does not have", ext))
 	}
-
-	if len(result.MissingDependencies) > 0 {
-		e.logger.Info("⚠ Missing dependencies detected: %d", len(result.MissingDependencies))
-		for _, dep := range result.MissingDependencies {
-			msg := fmt.Sprintf("%s dependency '%s' not found in database (referenced by: %s)",
-				dep.ObjectType, dep.ObjectName, dep.ReferencedBy)
-
-			if dep.Severity == "error" {
-				e.warnings = append(e.warnings, "ERROR: "+msg)
-			} else {
-				e.warnings = append(e.warnings, "WARNING: "+msg)
-			}
-		}
+	for _, mismatch := range result.TypeMismatches {
+		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: column %s.%s: production type %s, baseline type %s",
+			mismatch.Object, mismatch.Column, mismatch.ExpectedType, mismatch.ActualType))
 	}
-
-	if len(result.TypeMismatches) > 0 {
-		e.logger.Info("⚠ Type mismatches detected: %d", len(result.TypeMismatches))
-		for _, mismatch := range result.TypeMismatches {
-			msg := fmt.Sprintf("Type mismatch in %s.%s: migration expects %s but database has %s",
-				mismatch.Object, mismatch.Column, mismatch.ExpectedType, mismatch.ActualType)
-
-			if mismatch.IsBreaking {
-				e.warnings = append(e.warnings, "ERROR: "+msg+" (BREAKING CHANGE)")
-			} else {
-				e.warnings = append(e.warnings, "WARNING: "+msg)
-			}
-		}
+	for _, conflict := range result.ConstraintConflicts {
+		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: constraint %s on %s (%s): production %q, baseline %q",
+			conflict.ConstraintName, conflict.Table, conflict.ConflictType, conflict.ExpectedDef, conflict.ActualDef))
 	}
-
-	if len(result.ConstraintConflicts) > 0 {
-		e.logger.Info("⚠ Constraint conflicts detected: %d", len(result.ConstraintConflicts))
-		for _, conflict := range result.ConstraintConflicts {
-			e.warnings = append(e.warnings,
-				fmt.Sprintf("Constraint conflict in %s.%s: expected '%s' but found '%s' (%s)",
-					conflict.Table, conflict.ConstraintName,
-					conflict.ExpectedDef, conflict.ActualDef, conflict.ConflictType))
-		}
+	for _, drift := range result.SchemaDrift {
+		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: schema drift (%s): %s", drift.DriftType, drift.Description))
 	}
-
-	if len(result.BreakingChanges) > 0 {
-		e.logger.Info("☒ Breaking changes detected: %d", len(result.BreakingChanges))
-		for _, breaking := range result.BreakingChanges {
-			e.warnings = append(e.warnings,
-				fmt.Sprintf("BREAKING: %s | Impact: %s | Mitigation: %s",
-					breaking.Description, breaking.Impact, breaking.Mitigation))
-		}
-	}
-
-	if len(result.SchemaDrift) > 0 {
-		e.logger.Info("⚠ Schema drift detected: %d instances", len(result.SchemaDrift))
-		for _, drift := range result.SchemaDrift {
-			e.warnings = append(e.warnings,
-				fmt.Sprintf("Schema drift (%s): %s %s - %s",
-					drift.DriftType, drift.ObjectType, drift.Object, drift.Description))
-		}
-	}
-
-	// Add warnings from comparison
 	e.warnings = append(e.warnings, result.Warnings...)
 
-	// Log summary
-	if result.IsValid {
-		e.logger.Info("☑ Database validation passed: schema is compatible")
-	} else {
-		e.logger.Info("☒ Database validation failed: schema incompatibilities detected")
+	differences := len(result.MissingExtensions) + len(result.TypeMismatches) + len(result.ConstraintConflicts) + len(result.SchemaDrift)
+	if !result.IsValid {
+		e.logger.Info("☒ Database validation failed: %d differences from production", differences)
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("schema validation failed: found %d errors, %d warnings, %d breaking changes",
-				len(result.MissingDependencies)+len(result.TypeMismatches),
-				len(result.Warnings),
-				len(result.BreakingChanges)),
+			fmt.Sprintf("the squashed baseline does not reproduce production: %d differences (listed in the warnings)", differences),
 			errors.SeverityError,
 			errors.CategoryValidation,
 		)
 	}
-
-	e.logger.Info("Database validation completed: Extensions=%d, Dependencies=%d, TypeMismatches=%d, Constraints=%d, Breaking=%d, Drift=%d",
-		len(result.MissingExtensions),
-		len(result.MissingDependencies),
-		len(result.TypeMismatches),
-		len(result.ConstraintConflicts),
-		len(result.BreakingChanges),
-		len(result.SchemaDrift))
-
+	e.logger.Info("☑ Database validation passed: the baseline reproduces production")
 	return nil
+}
+
+// compareBaselineWithProduction applies the baseline to the claimed-empty
+// validation database, loads both catalogs with the same pg_catalog queries
+// and compares them structurally. The validation database is reset
+// afterwards; production is only read (in a read-only transaction).
+//
+// Only the schemas the baseline creates objects in are compared: production
+// may hold schemas the migrations do not manage (platform auth, storage),
+// which are listed as a warning instead.
+func (e *Engine) compareBaselineWithProduction(ctx context.Context, baselineSQL string) (result *metadata.ComparisonResult, err error) {
+	if e.validationDB == nil {
+		return nil, fmt.Errorf("no validation database connection")
+	}
+
+	claim, err := validation.ClaimEmptyDatabase(ctx, e.validationDB, nil)
+	if err != nil {
+		return nil, fmt.Errorf("claim the validation database: %w", err)
+	}
+	defer func() {
+		if resetErr := claim.Reset(ctx); resetErr != nil {
+			err = stderrors.Join(err, fmt.Errorf("reset the validation database: %w", resetErr))
+		}
+	}()
+
+	environment, err := metadata.NewMetadataManager(e.validationDB, 0).GetMetadata(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("read the empty validation database: %w", err)
+	}
+	if err := validation.ExecuteSQLScript(ctx, e.validationDB, baselineSQL, "000_baseline.sql"); err != nil {
+		return nil, fmt.Errorf("apply the baseline to the validation database: %w", err)
+	}
+	baseline, err := metadata.NewMetadataManager(e.validationDB, 0).GetMetadata(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("read the baseline catalog: %w", err)
+	}
+	production, err := e.metadataManager.GetMetadata(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("read the production catalog: %w", err)
+	}
+
+	var schemas, unmanaged []string
+	for name := range baseline.Schemas {
+		if _, preexisting := environment.Schemas[name]; !preexisting || schemaHasObjects(baseline.Schemas[name]) {
+			schemas = append(schemas, name)
+		}
+	}
+	for name, schema := range production.Schemas {
+		if !slices.Contains(schemas, name) && schemaHasObjects(schema) {
+			unmanaged = append(unmanaged, name)
+		}
+	}
+	slices.Sort(schemas)
+	slices.Sort(unmanaged)
+
+	result = metadata.CompareDatabaseMetadata(production, baseline, metadata.CompareOptions{
+		Schemas:     schemas,
+		Environment: environment,
+	})
+	if len(unmanaged) > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			"Production schemas the baseline creates nothing in were not compared: %s", strings.Join(unmanaged, ", ")))
+	}
+	return result, nil
+}
+
+// closeDB closes a connection pool opened during engine construction when a
+// later step fails; the construction error is what the caller sees.
+func closeDB(db *sql.DB) {
+	if db != nil {
+		_ = db.Close()
+	}
+}
+
+// schemaHasObjects reports whether a schema holds any compared object.
+func schemaHasObjects(schema *metadata.SchemaMetadata) bool {
+	return len(schema.Tables)+len(schema.Views)+len(schema.MaterializedViews)+
+		len(schema.Functions)+len(schema.Sequences)+len(schema.Types) > 0
 }
 
 // streamParseAndTrack streams parsing and tracking from directory

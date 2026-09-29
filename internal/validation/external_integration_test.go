@@ -132,3 +132,108 @@ GRANT USAGE ON SEQUENCE public.accounts_id_seq TO PUBLIC;
 		}
 	}
 }
+
+func TestClaimedDatabaseResetReturnsDatabaseToEmpty(t *testing.T) {
+	baseDSN := os.Getenv("DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("DATABASE_URL is required for integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	parsed, err := url.Parse(baseDSN)
+	if err != nil {
+		t.Fatalf("parse DATABASE_URL: %v", err)
+	}
+	adminURL := *parsed
+	adminURL.Path = "/postgres"
+	admin, err := sql.Open("postgres", adminURL.String())
+	if err != nil {
+		t.Fatalf("open admin database: %v", err)
+	}
+	defer admin.Close()
+
+	databaseName := fmt.Sprintf("capysquash_reset_%d", time.Now().UnixNano())
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+pq.QuoteIdentifier(databaseName)); err != nil {
+		t.Fatalf("create validation database: %v", err)
+	}
+	defer func() {
+		if _, err := admin.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+pq.QuoteIdentifier(databaseName)+" WITH (FORCE)"); err != nil {
+			t.Errorf("drop validation database: %v", err)
+		}
+	}()
+
+	databaseURL := *parsed
+	databaseURL.Path = "/" + databaseName
+	db, err := sql.Open("postgres", databaseURL.String())
+	if err != nil {
+		t.Fatalf("open validation database: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.ExecContext(ctx, "CREATE SCHEMA platform; CREATE TABLE platform.settings (id int)"); err != nil {
+		t.Fatalf("create allowed platform schema: %v", err)
+	}
+	if _, err := ClaimEmptyDatabase(ctx, db, nil); err == nil {
+		t.Fatal("a database with a platform table must not be claimable without allowing its schema")
+	}
+
+	claimed, err := ClaimEmptyDatabase(ctx, db, []string{"platform"})
+	if err != nil {
+		t.Fatalf("claim empty database: %v", err)
+	}
+	script := `
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE SCHEMA app;
+CREATE TYPE public.state AS ENUM ('on', 'off');
+CREATE DOMAIN public.positive AS integer CHECK (VALUE > 0);
+CREATE TYPE public.span AS RANGE (subtype = float8);
+CREATE TYPE public.pair AS (a int, b text);
+CREATE TABLE public.items (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  legacy_id serial,
+  state public.state,
+  amount public.positive,
+  token text DEFAULT encode(gen_random_bytes(8), 'hex')
+);
+CREATE SEQUENCE public.orders_seq;
+CREATE VIEW public.item_ids AS SELECT id FROM public.items;
+CREATE MATERIALIZED VIEW public.item_count AS SELECT count(*) FROM public.items;
+CREATE FUNCTION public.touch() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
+CREATE TRIGGER items_touch BEFORE UPDATE ON public.items FOR EACH ROW EXECUTE FUNCTION public.touch();
+CREATE PROCEDURE public.noop() LANGUAGE sql AS $$ SELECT 1 $$;
+CREATE TABLE app.events (id int);
+CREATE TABLE platform.extra (id int);
+`
+	if err := ExecuteSQLScript(ctx, db, script, "reset.sql"); err != nil {
+		t.Fatalf("apply script: %v", err)
+	}
+
+	if err := claimed.Reset(ctx); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if _, err := ClaimEmptyDatabase(ctx, db, []string{"platform"}); err != nil {
+		t.Fatalf("reset database cannot be claimed again: %v", err)
+	}
+
+	var remaining int
+	if err := db.QueryRowContext(ctx, `
+SELECT (SELECT count(*) FROM pg_extension WHERE extname = 'pgcrypto')
+     + (SELECT count(*) FROM pg_namespace WHERE nspname = 'app')
+     + (SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE n.nspname = 'public' AND t.typname IN ('state', 'positive', 'span', 'pair'))`).Scan(&remaining); err != nil {
+		t.Fatalf("count remaining objects: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("%d created objects survived the reset", remaining)
+	}
+	var platformTables int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE schemaname = 'platform'`).Scan(&platformTables); err != nil {
+		t.Fatalf("count platform tables: %v", err)
+	}
+	if platformTables != 2 {
+		t.Fatalf("allowed schema was modified: %d tables, want 2", platformTables)
+	}
+}
