@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -22,6 +25,7 @@ var (
 	keyHelp  = tea.KeyPressMsg{Code: '?', Text: "?"}
 	keyQuit  = tea.KeyPressMsg{Code: 'q', Text: "q"}
 	keyValid = tea.KeyPressMsg{Code: 'v', Text: "v"}
+	keyCtrlC = tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 )
 
 // newTestModel builds a model over a fixture migration set, sized like a
@@ -114,6 +118,123 @@ func TestKeysSwitchViews(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatal("q did not quit")
+	}
+}
+
+func wantView(t *testing.T, m *Model, want ViewType, step string) {
+	t.Helper()
+	if got := m.currentView.Type(); got != want {
+		t.Fatalf("after %s: view = %s, want %s", step, m.getViewName(got), m.getViewName(want))
+	}
+}
+
+// Back (esc, ? on help, v on validation) returns to the view that was
+// showing before, not to the dashboard.
+func TestBackReturnsToPreviousView(t *testing.T) {
+	m := newTestModel(t)
+
+	press(t, m, keySpace)
+	wantView(t, m, ViewAnalysis, "space")
+	press(t, m, keyHelp)
+	wantView(t, m, ViewHelp, "?")
+	press(t, m, keyHelp)
+	wantView(t, m, ViewAnalysis, "second ?")
+
+	press(t, m, keyValid)
+	wantView(t, m, ViewValidation, "v")
+	press(t, m, keyHelp)
+	wantView(t, m, ViewHelp, "? on validation")
+	press(t, m, keyEsc)
+	wantView(t, m, ViewValidation, "esc on help")
+	press(t, m, keyValid)
+	wantView(t, m, ViewAnalysis, "second v")
+
+	press(t, m, keyEsc)
+	wantView(t, m, ViewDashboard, "esc on analysis")
+	if len(m.stack) != 0 {
+		t.Fatalf("stack not empty on the dashboard: %v", m.stack)
+	}
+	press(t, m, keyEsc)
+	wantView(t, m, ViewDashboard, "esc on dashboard")
+}
+
+// A view the program starts on has nothing to go back to but the dashboard.
+func TestBackWithEmptyStackGoesToDashboard(t *testing.T) {
+	dir, err := filepath.Abs("../../test-fixtures/fk_cycles/original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+
+	m := NewModel(dir, "capysquash.config.json")
+	m.startAt(ViewAnalysis)
+	drive(t, m, m.Init())
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	press(t, m, keyEsc)
+	wantView(t, m, ViewDashboard, "esc")
+}
+
+// Navigating to the showing view or to one already on the stack does not
+// push it again; navigating to the dashboard forgets every view.
+func TestNavigateKeepsStackFree(t *testing.T) {
+	m := newTestModel(t)
+
+	press(t, m, keySpace)
+	_, cmd := m.Update(NavigateMsg{View: ViewAnalysis})
+	drive(t, m, cmd)
+	wantView(t, m, ViewAnalysis, "navigate to analysis on analysis")
+
+	// Help and validation toggled over each other return to the one
+	// already open instead of stacking up.
+	for range 3 {
+		press(t, m, keyValid)
+		press(t, m, keyHelp)
+	}
+	press(t, m, keyValid)
+	wantView(t, m, ViewValidation, "v")
+	if want := []ViewType{ViewDashboard, ViewAnalysis}; !slices.Equal(m.stack, want) {
+		t.Fatalf("stack = %v, want %v", m.stack, want)
+	}
+	press(t, m, keyEsc)
+	wantView(t, m, ViewAnalysis, "esc on validation")
+
+	press(t, m, keyHelp)
+	_, cmd = m.Update(NavigateMsg{View: ViewDashboard})
+	drive(t, m, cmd)
+	wantView(t, m, ViewDashboard, "navigate to dashboard")
+	if len(m.stack) != 0 {
+		t.Fatalf("navigating to the dashboard left a stack: %v", m.stack)
+	}
+}
+
+// Going back to the squash view enters it again, which starts a new squash
+// (OnEnter runs on every entry). Enter on the finished squash goes to the
+// dashboard.
+func TestBackToProgressReentersIt(t *testing.T) {
+	m := newTestModel(t)
+	_, cmd := m.navigateTo(ViewProgress)
+	drive(t, m, cmd)
+	if !strings.Contains(content(m), "Press Enter to return to dashboard") {
+		t.Fatalf("squash did not finish:\n%s", content(m))
+	}
+
+	// The working directory is the test's temp dir; squashed/ is the
+	// squash output, so its reappearance shows the squash ran again.
+	if err := os.RemoveAll("squashed"); err != nil {
+		t.Fatal(err)
+	}
+	press(t, m, keyHelp)
+	press(t, m, keyHelp)
+	wantView(t, m, ViewProgress, "? ?")
+	if _, err := os.Stat(filepath.Join("squashed", "squashed.sql")); err != nil {
+		t.Fatalf("going back to the squash view did not squash again: %v", err)
+	}
+
+	press(t, m, keyEnter)
+	wantView(t, m, ViewDashboard, "enter on finished squash")
+	if len(m.stack) != 0 {
+		t.Fatalf("stack not empty on the dashboard: %v", m.stack)
 	}
 }
 
@@ -234,6 +355,68 @@ func TestStatusBarFitsOneLine(t *testing.T) {
 	}
 }
 
+// The status bar is one unbroken band: every cell, including the gap between
+// its sections and the text after each styled segment, has a background.
+func TestStatusBarBackgroundIsContinuous(t *testing.T) {
+	for _, width := range []int{80, 120, 160} {
+		m := newTestModel(t)
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+		m.Update(SuccessMsg{Message: "Configuration saved"})
+
+		bar := m.renderStatusBar()
+		if n := unpaintedCells(bar); n != 0 {
+			t.Errorf("width %d: %d status bar cells have no background: %q", width, n, bar)
+		}
+	}
+}
+
+// unpaintedCells counts the printable characters of s drawn without a
+// background colour, following the SGR escapes Lip Gloss emits.
+func unpaintedCells(s string) int {
+	n, bg := 0, false
+	for len(s) > 0 {
+		if loc := sgr.FindStringIndex(s); loc != nil && loc[0] == 0 {
+			bg = applySGR(bg, s[2:loc[1]-1])
+			s = s[loc[1]:]
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s)
+		s = s[size:]
+		if r != '\n' && !bg {
+			n++
+		}
+	}
+	return n
+}
+
+// applySGR returns whether a background is set after the SGR parameters.
+func applySGR(bg bool, params string) bool {
+	ps := strings.Split(params, ";")
+	for i := 0; i < len(ps); i++ {
+		code, _, colon := strings.Cut(ps[i], ":")
+		c, _ := strconv.Atoi(code) // an empty parameter means 0
+		switch {
+		case c == 0, c == 49:
+			bg = false
+		case c == 38, c == 48, c == 58:
+			bg = bg || c == 48
+			// Extended colours take their arguments as further
+			// parameters unless they are colon-separated.
+			if !colon && i+1 < len(ps) {
+				switch ps[i+1] {
+				case "5":
+					i += 2
+				case "2":
+					i += 4
+				}
+			}
+		case c >= 40 && c <= 47, c >= 100 && c <= 107:
+			bg = true
+		}
+	}
+	return bg
+}
+
 // Esc while editing a config field cancels the edit and stays in the
 // wizard; a second esc returns to the dashboard.
 func TestEscCancelsConfigEdit(t *testing.T) {
@@ -257,6 +440,37 @@ func TestEscCancelsConfigEdit(t *testing.T) {
 	press(t, m, keyEsc)
 	if got := m.currentView.Type(); got != ViewDashboard {
 		t.Fatalf("esc outside an edit: view = %v, want dashboard", got)
+	}
+}
+
+// While a config field is being edited, q, ? and v go to the edit: they do
+// not quit or switch views. Ctrl+C still quits.
+func TestConfigEditCapturesKeys(t *testing.T) {
+	m := newTestModel(t)
+	_, cmd := m.navigateTo(ViewConfig)
+	drive(t, m, cmd)
+	press(t, m, keyEnter)
+
+	for _, key := range []tea.KeyPressMsg{keyQuit, keyHelp, keyValid} {
+		_, cmd := m.Update(key)
+		if cmd != nil {
+			if _, ok := cmd().(tea.QuitMsg); ok {
+				t.Fatalf("%s quit while editing", key.String())
+			}
+			drive(t, m, cmd)
+		}
+		wantView(t, m, ViewConfig, key.String()+" while editing")
+		if !strings.Contains(content(m), "◄") {
+			t.Fatalf("%s ended the edit:\n%s", key.String(), content(m))
+		}
+	}
+
+	_, cmd = m.Update(keyCtrlC)
+	if cmd == nil {
+		t.Fatal("ctrl+c while editing returned no command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("ctrl+c while editing did not quit")
 	}
 }
 
