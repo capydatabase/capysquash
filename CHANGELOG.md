@@ -15,6 +15,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The baseline keeps the history's security posture. `GRANT`/`REVOKE` (table, column, sequence,
+  function and procedure overloads, schema, type and domain privileges, grant options included),
+  ownership changes (`ALTER ... OWNER TO`) and `ALTER DEFAULT PRIVILEGES` are replayed through a
+  model of PostgreSQL's access control lists that follows renames, `SET SCHEMA` and drops; the
+  baseline ends with a `=== PRIVILEGES ===` section that takes each object it creates from the
+  built-in default privileges to the net state the history leaves, once every object exists.
+  Default privileges only reach objects created after them, so what each object received at
+  creation is written as explicit grants and the final default privileges come last.
+  `ALTER DEFAULT PRIVILEGES FOR ROLE name` applies to history objects only when `name` runs the
+  migrations; the privileges that depend on it go into a `DO` block that checks `current_user`.
+  Statements on objects the history does not create (the `public` schema, extension objects) and
+  `ON ALL ... IN SCHEMA` statements are replayed in history order. What the model cannot carry is
+  reported as a `Privileges:` warning. Every grant used to be dropped.
+- A `=== ROLES ===` section at the top of the baseline: each `CREATE ROLE` of the history, run only
+  when the role does not exist yet (roles are shared by every database of a cluster), then role
+  membership (`GRANT role TO role`) in history order. `CREATE ROLE` used to be emitted after the
+  objects that named the role (`CREATE SCHEMA ... AUTHORIZATION`), and membership was dropped.
+- Catalog validation compares owners, privileges and default privileges at every level that
+  validates (Docker validation, `validate-external`, and `paranoid` against production): `relacl`,
+  `attacl`, `proacl`, `nspacl`, `typacl` (a `NULL` ACL counts as the `acldefault()` it stands for)
+  and `pg_default_acl`, per function overload. Role names compare as they are except the role that
+  owns the database, which both sides name `<database owner>`. It used to compare
+  `information_schema` privilege views, which merge overloads, leave out schemas, types and
+  default privileges, and hide rows from a non-superuser.
+- Privilege fixtures in the e2e suite: `privileges_tables_columns`, `privileges_routines`,
+  `privileges_schemas_sequences_types`, `privileges_default_privileges`, `privileges_drop_rename`.
+- A schema statement the squash does not track (`ALTER SCHEMA ... RENAME`, `ALTER TYPE ... RENAME`,
+  `DROP SCHEMA`) is reported as not carried into the baseline instead of vanishing silently.
+
+### Changed
+
+- Catalog snapshots are `capysquash.catalog-snapshot.v2`: owners, privileges and default privileges
+  were added and owner names are normalized, so compare snapshots taken by the same version.
+- Resetting a claimed validation database (the `paranoid` level) also removes the default
+  privileges set since the claim.
+- `scripts/run-e2e.sh` runs every fixture; none is skipped any more.
+
+### Fixed
+
+- `ALTER TABLE` statements that cannot merge into `CREATE TABLE` are replayed after it in history
+  order. Only `ADD COLUMN` and `ADD CONSTRAINT` were kept; everything else was dropped - including
+  `ENABLE ROW LEVEL SECURITY`, which left squashed tables without RLS.
+- Enum values added `BEFORE`/`AFTER` a label, and renamed with `RENAME VALUE`, are placed where
+  PostgreSQL places them; merges appended them, changing the label order. Conservative mode only
+  merges true appends, and labels with a quote are escaped when rewritten.
+- `REFRESH MATERIALIZED VIEW` is a data operation, run in history order after the schema; it was
+  sorted among the schema objects, ahead of the unique index and the plain refresh `CONCURRENTLY`
+  needs.
+- `ALTER FUNCTION/PROCEDURE ... RENAME TO` is carried into the baseline; it was dropped. A function
+  whose history ends with an `ALTER` keeps its `CREATE` at the `paranoid` level.
+- The orphaned-statement safety net no longer removes a `COMMENT ON FUNCTION f(args)` that names a
+  `public` function without its schema.
+- The TUI validation view and `validate`'s post-flight static check keep a file's findings when one
+  lint rule fails; the whole file used to be reported as the error only.
+- The `enums_append_reorder`, `generated_columns_identity`, `matviews` and `rls_policies` fixtures
+  had histories PostgreSQL rejects (type used before it was created; a generation expression
+  reading another generated column and a missing column; `REFRESH ... CONCURRENTLY` on an
+  unpopulated view without a unique index; policies calling functions and granting roles no
+  migration created). The fixtures are fixed and the e2e suite runs them.
+
 ## [1.2.0] - 2026-09-29
 
 ### Added
