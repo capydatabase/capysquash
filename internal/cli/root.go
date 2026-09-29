@@ -1550,9 +1550,11 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		squashedSQL, err := readDirToSQL(squashedDir)
 		if err == nil {
 			violations, err := staticValidator.Check(squashedSQL)
+			// A failing rule does not void the findings of the others.
 			if err != nil {
 				color.Red("❌ Static validation execution failed: %v", err)
-			} else if len(violations) > 0 {
+			}
+			if len(violations) > 0 {
 				color.Yellow("\nStatic Analysis Findings:")
 				for _, v := range violations {
 					symbol := "⚠️"
