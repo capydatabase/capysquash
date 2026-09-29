@@ -261,14 +261,30 @@ func renderBulk(b *bulkGrant) string {
 	return statement
 }
 
+// asRole runs statements as the role a history ran them as, when that is
+// not the role running the baseline.
+func asRole(role grantee, statements []string) []string {
+	if role.token == roleMigrator || len(statements) == 0 {
+		return statements
+	}
+	out := make([]string, 0, len(statements)+2)
+	out = append(out, "SET ROLE "+role.spelled)
+	out = append(out, statements...)
+	return append(out, "RESET ROLE")
+}
+
 // stateAfterReplays is what an object holds once the baseline has created
 // it and replayed the bulk statements: its built-in default, changed by every
-// ON ALL ... IN SCHEMA statement that reaches it.
+// ON ALL ... IN SCHEMA statement that reaches it and grants as its owner
+// (one run as another role is written out with that role's grants).
 func (m *model) stateAfterReplays(obj *object) acl {
 	state := defaultACL(obj.class(), obj.owner)
 	for _, r := range m.replays {
 		b := r.bulk
 		if b == nil || !inBulkScope(b.objtype, obj) {
+			continue
+		}
+		if role := r.role.token; role != roleMigrator && role != obj.owner && !m.superusers[role] && !m.memberOf(role, obj.owner) {
 			continue
 		}
 		for _, ref := range b.schemas {
@@ -325,7 +341,7 @@ func (m *model) render(alive func(*object) bool) []item {
 			sql = renderBulk(r.bulk)
 		}
 		if sql != "" {
-			items = append(items, item{id: fmt.Sprintf("replay|%d", i), statements: []string{sql}})
+			items = append(items, item{id: fmt.Sprintf("replay|%d", i), statements: asRole(r.role, []string{sql})})
 		}
 	}
 	for _, obj := range objects {
@@ -341,6 +357,18 @@ func (m *model) render(alive func(*object) bool) []item {
 		sort.Strings(columns)
 		for _, column := range columns {
 			statements = append(statements, m.aclStatements(classColumn, acl{}, obj.columns[column], "TABLE "+qualified(obj.schema, obj.name), column, "")...)
+		}
+		// What another role granted with its grant option is granted by that
+		// role, so PostgreSQL records it as the grantor: GRANTED BY only
+		// accepts the current role, in every version.
+		grantors := make([]string, 0, len(obj.delegated))
+		for grantor := range obj.delegated {
+			grantors = append(grantors, grantor)
+		}
+		sort.Strings(grantors)
+		for _, grantor := range grantors {
+			delegated := m.aclStatements(obj.class(), acl{}, obj.delegated[grantor], obj.grantTarget(), "", "")
+			statements = append(statements, asRole(grantee{token: grantor, spelled: quoteIdent(grantor)}, delegated)...)
 		}
 		items = append(items, item{id: "acl|" + obj.key(), statements: statements})
 	}

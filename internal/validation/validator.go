@@ -2441,6 +2441,9 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(ctx context.Context, dsn, m
 	if err != nil {
 		return err
 	}
+	// Every file runs in the same session, as with a migration tool that
+	// keeps one connection: a SET ROLE in one file still holds in the next.
+	db.SetMaxOpenConns(1)
 	defer func() {
 		if err := db.Close(); err != nil {
 			utils.GetDefaultLogger().Warn("Failed to close database: %v", err)
@@ -2553,6 +2556,20 @@ func ExecuteSQLScript(ctx context.Context, db *sql.DB, sqlContent, filePath stri
 	// Split SQL into individual statements
 	statements := splitSQLStatements(sqlContent)
 
+	// One session runs the whole script, as psql or a migration tool would:
+	// SET ROLE, SET search_path and BEGIN ... COMMIT reach the statements
+	// after them.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeDatabaseNotAccessible,
+			fmt.Sprintf("open a session to apply %s", filePath),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+	defer func() { _ = conn.Close() }()
+
 	// Execute each statement
 	for i, stmt := range statements {
 		// Skip empty statements
@@ -2562,7 +2579,7 @@ func ExecuteSQLScript(ctx context.Context, db *sql.DB, sqlContent, filePath stri
 		}
 
 		// Execute the statement
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return errors.NewError(
 				errors.ErrorCodeInvalidSQL,
 				fmt.Sprintf("failed to execute statement %d in migration %s", i+1, filePath),

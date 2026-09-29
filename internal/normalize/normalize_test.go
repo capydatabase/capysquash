@@ -264,3 +264,18 @@ CREATE INDEX plain_id ON public.plain (id);`
 		}
 	}
 }
+
+func TestTransactionStatementsAreTakenOut(t *testing.T) {
+	n := run(t, `
+BEGIN;
+CREATE TABLE public.a (id int);
+COMMIT;
+START TRANSACTION;
+CREATE TABLE public.b (id int);
+ROLLBACK;`)
+	assertNotContains(t, n.sql(), "BEGIN", "COMMIT", "START", "ROLLBACK")
+	assertContains(t, n.sql(), "CREATE TABLE public.a", "CREATE TABLE public.b")
+	if len(n.warnings) != 1 || !strings.Contains(n.warnings[0], "ROLLBACK") {
+		t.Errorf("want one warning about ROLLBACK, got %v", n.warnings)
+	}
+}

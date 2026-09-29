@@ -21,12 +21,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as written (`IF NOT EXISTS`, `AUTHORIZATION`) under their final names, preceded by the renames
   and drops of schemas the history did not create (`DROP SCHEMA public CASCADE`), in history
   order. Elements of `CREATE SCHEMA ... CREATE TABLE ...` become statements of their own.
-- Fixtures `rename_schema`, `rename_types`, `rename_table_dependents`, `drop_schema_recreate` and
-  `privileges_preexisting` in the e2e suite; `privileges_drop_rename` now also renames a schema, an enum and a domain with
+- Fixtures `rename_schema`, `rename_types`, `rename_table_dependents`, `drop_schema_recreate`,
+  `privileges_preexisting` and `privileges_set_role` in the e2e suite; `privileges_drop_rename` now also renames a schema, an enum and a domain with
   privileges and drops and recreates a schema.
 
 ### Fixed
 
+- `SET ROLE`, `SET SESSION AUTHORIZATION` and `SET LOCAL ROLE` in a history are followed. The
+  privilege model assumed the migrating role ran every statement: objects created as another role
+  came out owned by the role running the baseline, default privileges set as that role were
+  attributed to the migrating role, and a grant made by a role other than the owner (with a grant
+  option it holds) came out with the owner as grantor. The model now tracks the role each
+  statement runs as - `CURRENT_USER`, object owners, `ALTER DEFAULT PRIVILEGES`, grantors, role
+  membership and superusers created by the history, `REVOKE ... CASCADE` of what a grant option
+  passed on - and the baseline writes the outcome out explicitly: `ALTER ... OWNER TO` for each
+  owner, `ALTER DEFAULT PRIVILEGES FOR ROLE`, and a delegated grant between `SET ROLE` and
+  `RESET ROLE`, because PostgreSQL records the current role as the grantor and `GRANTED BY`
+  cannot name another. The `SET ROLE` statements themselves used to land among the object
+  definitions of the baseline.
+- `BEGIN`, `COMMIT` and the other transaction statements of individual migrations are left out of
+  the baseline. They used to land among the regrouped statements, which could leave the rest of
+  the baseline in a transaction that never committed; a `ROLLBACK` is reported as a warning.
+- Validation runs every migration file, and the baseline, in one database session, so session
+  settings (`SET ROLE`, `BEGIN ... COMMIT`) reach the statements after them as they do with a
+  migration tool; statements used to go through a connection pool one by one.
 - `ALTER SCHEMA ... RENAME`, `ALTER TYPE ... RENAME` (enums and composite types),
   `ALTER DOMAIN ... RENAME`, `ALTER TYPE ... RENAME VALUE` and `ALTER TYPE ... RENAME ATTRIBUTE`
   reach the baseline. The history is rewritten to final names before consolidation: every object

@@ -121,6 +121,11 @@ func GetAllFixtures() []FixtureTest {
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
+			Name:        "privileges_set_role",
+			Path:        "privileges_set_role",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
 			Name:        "privileges_preexisting",
 			Path:        "privileges_preexisting",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},

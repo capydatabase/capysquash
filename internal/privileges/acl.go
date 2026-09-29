@@ -14,14 +14,22 @@
 //
 // Assumptions, stated where the output relies on them:
 //
-//   - One role runs the whole history (the migrating role) and it runs the
-//     baseline; SET ROLE and SET SESSION AUTHORIZATION are not followed. Every
-//     grant it makes is therefore recorded with the object's owner as grantor,
-//     as PostgreSQL does for superusers and owners, so grant chains between
-//     other roles cannot arise.
+//   - One role runs the history (the migrating role) and the baseline, in one
+//     session. The history can switch roles: SET ROLE, SET SESSION
+//     AUTHORIZATION and SET LOCAL ROLE (inside BEGIN ... COMMIT) are
+//     followed, so objects created as another role are that role's, ALTER
+//     DEFAULT PRIVILEGES without FOR ROLE belongs to the current role, and
+//     CURRENT_USER names it. The baseline creates everything as the migrating
+//     role and writes the outcome out: ALTER ... OWNER TO for the owners, and
+//     for privileges a role granted on an object it neither owns nor is a
+//     member of the owner of (with a grant option it holds), SET ROLE around
+//     the grant, since PostgreSQL records the grantor as the current role and
+//     GRANTED BY cannot name another. The migrating role grants as the owner,
+//     as PostgreSQL records it for superusers and owners.
 //   - Objects start from PostgreSQL's built-in default privileges; default
-//     privileges that already exist in the target database are not known.
-//   - ALTER DEFAULT PRIVILEGES without FOR ROLE applies to the migrating role.
+//     privileges that already exist in the target database are not known, nor
+//     are role memberships and superusers the history does not create.
+//   - ALTER DEFAULT PRIVILEGES without FOR ROLE applies to the current role.
 //     FOR ROLE naming a role only applies to history objects when that role
 //     is the one running the migrations, which cannot be known statically: the
 //     privileges that depend on it are emitted in a DO block that checks
@@ -93,8 +101,8 @@ func (c aclClass) universe() []string {
 type privSet map[string]bool
 
 // acl maps each grantee (a role name, rolePublic or roleMigrator) to what it
-// holds. Grantors are not tracked: under the single-role assumption every
-// grant is made by the object's owner.
+// holds from one grantor: an object's acl holds what its owner granted, and
+// object.delegated what other roles granted.
 type acl map[string]privSet
 
 func (a acl) clone() acl {

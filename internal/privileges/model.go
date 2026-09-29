@@ -39,8 +39,12 @@ type object struct {
 
 	owner        string // role token
 	ownerSpelled string // the role an explicit ownership change named, as written
-	acl          acl    // nil while the object has its built-in default privileges
+	acl          acl    // granted by the owner; nil while the object has its built-in default privileges
 	columns      map[string]acl
+	// delegated holds what roles other than the owner granted with a grant
+	// option they hold, by grantor. PostgreSQL records such a role as the
+	// grantor; everything else is granted by the owner.
+	delegated map[string]acl
 
 	// linked is the table a sequence belongs to (serial, identity, OWNED BY)
 	// or the range type a multirange belongs to: it follows that object's
@@ -162,10 +166,11 @@ type bulkGrant struct {
 // replay is a statement the PRIVILEGES section repeats in history order:
 // one that acts on objects the history does not create (pre-existing ones
 // such as schema public, or ones an extension creates), or a bulk statement,
-// which also reaches such objects.
+// which also reaches such objects. role is the role it ran as.
 type replay struct {
 	sql  string
 	bulk *bulkGrant
+	role grantee
 }
 
 // model replays a history's privilege-relevant statements.
@@ -174,6 +179,17 @@ type model struct {
 	// not one the history names).
 	self       string
 	searchPath []string
+
+	// current is the role the statements run as: the migrating role until
+	// SET ROLE or SET SESSION AUTHORIZATION name another; session is the
+	// role RESET ROLE returns to. local is the role SET LOCAL ROLE replaced,
+	// restored when the transaction block ends.
+	current       grantee
+	session       grantee
+	local         *grantee
+	inTransaction bool
+	members       map[string][]string // role token -> the roles it is a member of (GRANT role TO member)
+	superusers    map[string]bool     // roles created with SUPERUSER
 
 	objects  map[string]*object
 	all      []*object
@@ -188,9 +204,14 @@ type model struct {
 }
 
 func newModel(self string) *model {
+	migrator := grantee{token: roleMigrator, spelled: "CURRENT_USER"}
 	return &model{
 		self:       self,
 		searchPath: []string{"public"},
+		current:    migrator,
+		session:    migrator,
+		members:    make(map[string][]string),
+		superusers: make(map[string]bool),
 		objects:    make(map[string]*object),
 		defaults:   make(map[defaultKey]acl),
 		warned:     make(map[string]bool),
@@ -205,28 +226,78 @@ func (m *model) warn(format string, args ...any) {
 	}
 }
 
-// role normalizes a RoleSpec to a token.
+// role normalizes a RoleSpec to a token. CURRENT_USER and CURRENT_ROLE
+// name the role the statement runs as, SESSION_USER the session's role.
 func (m *model) role(spec *pg_query.RoleSpec) grantee {
 	if spec == nil {
-		return grantee{token: roleMigrator, spelled: "CURRENT_USER"}
+		return m.current
 	}
 	switch spec.GetRoletype() {
 	case pg_query.RoleSpecType_ROLESPEC_PUBLIC:
 		return grantee{token: rolePublic, spelled: "PUBLIC"}
 	case pg_query.RoleSpecType_ROLESPEC_CURRENT_USER:
-		return grantee{token: roleMigrator, spelled: "CURRENT_USER"}
+		return m.current
 	case pg_query.RoleSpecType_ROLESPEC_CURRENT_ROLE:
-		return grantee{token: roleMigrator, spelled: "CURRENT_ROLE"}
-	case pg_query.RoleSpecType_ROLESPEC_SESSION_USER:
-		return grantee{token: roleMigrator, spelled: "SESSION_USER"}
-	default:
-		name := spec.GetRolename()
-		token := name
-		if m.self != "" && name == m.self {
-			token = roleMigrator
+		if m.current.token == roleMigrator && m.current.spelled == "CURRENT_USER" {
+			return grantee{token: roleMigrator, spelled: "CURRENT_ROLE"}
 		}
-		return grantee{token: token, spelled: quoteIdent(name)}
+		return m.current
+	case pg_query.RoleSpecType_ROLESPEC_SESSION_USER:
+		if m.session.token == roleMigrator && m.session.spelled == "CURRENT_USER" {
+			return grantee{token: roleMigrator, spelled: "SESSION_USER"}
+		}
+		return m.session
+	default:
+		return m.named(spec.GetRolename())
 	}
+}
+
+// named returns the grantee for a role name.
+func (m *model) named(name string) grantee {
+	token := name
+	if m.self != "" && name == m.self {
+		token = roleMigrator
+	}
+	return grantee{token: token, spelled: quoteIdent(name)}
+}
+
+// explicitOwner reports whether the baseline must name an owner: any role
+// but the one running it, or the migrating role when the history names it.
+func (m *model) explicitOwner(owner grantee) bool {
+	return owner.token != roleMigrator || m.self != "" && owner.spelled == quoteIdent(m.self)
+}
+
+// grantorFor is the role PostgreSQL records as the grantor when the current
+// role grants on obj: the owner when the current role is the migrating role
+// (a superuser or the owner), the owner, one of its members or a superuser;
+// the current role itself otherwise, granting with a grant option it holds.
+func (m *model) grantorFor(obj *object) string {
+	current := m.current.token
+	if current == roleMigrator || current == obj.owner || m.superusers[current] || m.memberOf(current, obj.owner) {
+		return obj.owner
+	}
+	return current
+}
+
+// memberOf reports whether role is a member of parent, directly or through
+// other roles, as far as the history's GRANT role TO role statements tell.
+func (m *model) memberOf(role, parent string) bool {
+	seen := map[string]bool{}
+	queue := []string{role}
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		for _, p := range m.members[next] {
+			if p == parent {
+				return true
+			}
+			if !seen[p] {
+				seen[p] = true
+				queue = append(queue, p)
+			}
+		}
+	}
+	return false
 }
 
 func (m *model) roleNode(node *pg_query.Node) grantee {
@@ -316,6 +387,10 @@ func (m *model) create(kind, keyword, schema, name, args, owner string, defaults
 		owner:   owner,
 		created: m.position,
 	}
+	// An object created while SET ROLE names another role is that role's.
+	if owner == m.current.token && m.explicitOwner(m.current) {
+		obj.ownerSpelled = m.current.spelled
+	}
 	obj.acl = m.initialACL(obj, defaults)
 	m.objects[obj.key()] = obj
 	m.all = append(m.all, obj)
@@ -380,9 +455,14 @@ func (m *model) changeOwner(obj *object, owner grantee) {
 	for _, column := range obj.columns {
 		column.changeOwner(obj.owner, owner.token)
 	}
+	// What the new owner had granted is now granted by the owner.
+	if granted, ok := obj.delegated[owner.token]; ok {
+		obj.currentACL().merge(granted)
+		delete(obj.delegated, owner.token)
+	}
 	obj.owner = owner.token
 	obj.ownerSpelled = ""
-	if owner.token != roleMigrator || m.self != "" && owner.spelled == quoteIdent(m.self) {
+	if m.explicitOwner(owner) {
 		obj.ownerSpelled = owner.spelled
 	}
 	for _, other := range m.all {
@@ -481,6 +561,24 @@ func (m *model) apply(node *pg_query.Node) {
 		m.alterDefaultPrivileges(n.AlterDefaultPrivilegesStmt)
 	case *pg_query.Node_VariableSetStmt:
 		m.variableSet(n.VariableSetStmt)
+	case *pg_query.Node_CreateRoleStmt:
+		for _, option := range n.CreateRoleStmt.GetOptions() {
+			if def := option.GetDefElem(); def.GetDefname() == "superuser" && def.GetArg().GetBoolean().GetBoolval() {
+				m.superusers[m.named(n.CreateRoleStmt.GetRole()).token] = true
+			}
+		}
+	case *pg_query.Node_GrantRoleStmt:
+		m.membership(n.GrantRoleStmt)
+	case *pg_query.Node_TransactionStmt:
+		switch n.TransactionStmt.GetKind() {
+		case pg_query.TransactionStmtKind_TRANS_STMT_BEGIN, pg_query.TransactionStmtKind_TRANS_STMT_START:
+			m.inTransaction = true
+		case pg_query.TransactionStmtKind_TRANS_STMT_COMMIT, pg_query.TransactionStmtKind_TRANS_STMT_ROLLBACK:
+			m.inTransaction = false
+			if m.local != nil {
+				m.current, m.local = *m.local, nil
+			}
+		}
 	case *pg_query.Node_DropOwnedStmt, *pg_query.Node_ReassignOwnedStmt:
 		m.warn("DROP OWNED and REASSIGN OWNED are not modeled; check the ownership and privileges they change")
 	}
@@ -519,7 +617,7 @@ func (m *model) createRelation(rv *pg_query.RangeVar, keyword string, ifNotExist
 	if keyword == "SEQUENCE" {
 		defaults = defaultsSequences
 	}
-	return m.create(kindRelation, keyword, m.creationSchema(rv.GetSchemaname()), rv.GetRelname(), "", roleMigrator, defaults)
+	return m.create(kindRelation, keyword, m.creationSchema(rv.GetSchemaname()), rv.GetRelname(), "", m.current.token, defaults)
 }
 
 func (m *model) sequenceOwnedBy(seq *object, options []*pg_query.Node) {
@@ -560,7 +658,7 @@ func (m *model) createRoutine(stmt *pg_query.CreateFunctionStmt) {
 	if stmt.GetIsProcedure() {
 		keyword = "PROCEDURE"
 	}
-	m.create(kindRoutine, keyword, m.creationSchema(schema), name, args, roleMigrator, defaultsFunctions)
+	m.create(kindRoutine, keyword, m.creationSchema(schema), name, args, m.current.token, defaultsFunctions)
 }
 
 func (m *model) createType(names []*pg_query.Node, keyword string) *object {
@@ -572,7 +670,7 @@ func (m *model) createTypeNamed(schema, name, keyword string) *object {
 	if existing := m.find(kindType, schema, name, ""); existing != nil {
 		m.drop(existing)
 	}
-	return m.create(kindType, keyword, m.creationSchema(schema), name, "", roleMigrator, defaultsTypes)
+	return m.create(kindType, keyword, m.creationSchema(schema), name, "", m.current.token, defaultsTypes)
 }
 
 // createRange also creates the multirange type PostgreSQL 14+ derives from
@@ -599,7 +697,7 @@ func (m *model) createRange(stmt *pg_query.CreateRangeStmt) {
 
 func (m *model) createSchema(stmt *pg_query.CreateSchemaStmt) {
 	name := stmt.GetSchemaname()
-	owner := grantee{token: roleMigrator}
+	owner := m.current
 	if stmt.GetAuthrole() != nil {
 		owner = m.role(stmt.GetAuthrole())
 		if name == "" {
@@ -610,7 +708,7 @@ func (m *model) createSchema(stmt *pg_query.CreateSchemaStmt) {
 		return
 	}
 	obj := &object{kind: kindSchema, keyword: "SCHEMA", name: name, owner: owner.token, created: m.position}
-	if owner.token != roleMigrator || m.self != "" && owner.spelled == quoteIdent(m.self) {
+	if m.explicitOwner(owner) {
 		obj.ownerSpelled = owner.spelled
 	}
 	obj.acl = m.initialACL(obj, defaultsSchemas)
@@ -874,19 +972,82 @@ func (m *model) variableSet(stmt *pg_query.VariableSetStmt) {
 		if len(path) > 0 {
 			m.searchPath = path
 		}
-	case "role", "session_authorization":
-		m.warn("SET ROLE and SET SESSION AUTHORIZATION are not followed; privileges are modeled as if the migrating role ran every statement")
+	case "role":
+		m.setRole(stmt)
+	case "session_authorization":
+		switch stmt.GetKind() {
+		case pg_query.VariableSetKind_VAR_RESET, pg_query.VariableSetKind_VAR_SET_DEFAULT:
+			m.session = grantee{token: roleMigrator, spelled: "CURRENT_USER"}
+		default:
+			m.session = m.named(settingValue(stmt))
+		}
+		m.current, m.local = m.session, nil
+	}
+	if stmt.GetKind() == pg_query.VariableSetKind_VAR_RESET_ALL {
+		m.current, m.local = m.session, nil
+		m.searchPath = []string{"public"}
 	}
 }
 
-// replayStatement keeps a statement on objects the history does not create.
+// setRole follows SET ROLE, SET ROLE NONE, RESET ROLE and SET LOCAL ROLE.
+func (m *model) setRole(stmt *pg_query.VariableSetStmt) {
+	next := m.session
+	if stmt.GetKind() == pg_query.VariableSetKind_VAR_SET_VALUE {
+		if value := settingValue(stmt); !strings.EqualFold(value, "none") {
+			next = m.named(value)
+		}
+	}
+	if stmt.GetIsLocal() {
+		if !m.inTransaction {
+			// PostgreSQL ignores it, with a warning.
+			m.warn("SET LOCAL ROLE outside BEGIN ... COMMIT has no effect in PostgreSQL and is ignored; a migration tool that wraps each file in a transaction would apply it to the rest of the file")
+			return
+		}
+		if m.local == nil {
+			saved := m.current
+			m.local = &saved
+		}
+	} else {
+		m.local = nil
+	}
+	m.current = next
+}
+
+func settingValue(stmt *pg_query.VariableSetStmt) string {
+	for _, arg := range stmt.GetArgs() {
+		if value := arg.GetAConst().GetSval(); value != nil {
+			return value.GetSval()
+		}
+	}
+	return ""
+}
+
+// membership records GRANT role TO member and its REVOKE.
+func (m *model) membership(stmt *pg_query.GrantRoleStmt) {
+	for _, granted := range stmt.GetGrantedRoles() {
+		parent := m.named(granted.GetAccessPriv().GetPrivName()).token
+		for _, node := range stmt.GetGranteeRoles() {
+			member := m.roleNode(node).token
+			if stmt.GetIsGrant() {
+				if !slices.Contains(m.members[member], parent) {
+					m.members[member] = append(m.members[member], parent)
+				}
+				continue
+			}
+			m.members[member] = slices.DeleteFunc(m.members[member], func(p string) bool { return p == parent })
+		}
+	}
+}
+
+// replayStatement keeps a statement on objects the history does not create,
+// with the role it ran as.
 func (m *model) replayStatement(node *pg_query.Node) {
 	sql, err := deparse(node)
 	if err != nil {
 		m.warn("a privilege statement could not be rendered and is not in the baseline: %v", err)
 		return
 	}
-	m.replays = append(m.replays, replay{sql: sql})
+	m.replays = append(m.replays, replay{sql: sql, role: m.current})
 }
 
 // ---- GRANT / REVOKE ------------------------------------------------------
@@ -971,6 +1132,10 @@ func (m *model) applyGrant(obj *object, isGrant, grantOption bool, grantees []gr
 	if all || len(tablePrivs) > 0 {
 		privs = normalizePrivileges(class, tablePrivs)
 	}
+	if grantor := m.grantorFor(obj); grantor != obj.owner {
+		m.applyDelegatedGrant(obj, grantor, isGrant, grantOption, grantees, privs, len(columnPrivs) > 0)
+		return
+	}
 	for _, g := range grantees {
 		if len(privs) > 0 {
 			current := obj.currentACL()
@@ -978,6 +1143,7 @@ func (m *model) applyGrant(obj *object, isGrant, grantOption bool, grantees []gr
 				current.grant(g.token, privs, grantOption)
 			} else {
 				current.revoke(g.token, privs, grantOption)
+				m.revokeDependents(obj, g.token, privs)
 				// Revoking a table privilege revokes it from every column too.
 				columnLevel := normalizePrivileges(classColumn, privs)
 				for _, column := range obj.columns {
@@ -1004,6 +1170,101 @@ func (m *model) applyGrant(obj *object, isGrant, grantOption bool, grantees []gr
 				column.revoke(g.token, colPrivs, grantOption)
 			}
 		}
+	}
+}
+
+// applyDelegatedGrant applies a GRANT or REVOKE made by a role other than
+// the owner. A grant reaches only the privileges that role holds with a
+// grant option (PostgreSQL grants the rest with a warning: none); a revoke
+// takes back only what that role granted.
+func (m *model) applyDelegatedGrant(obj *object, grantor string, isGrant, grantOption bool, grantees []grantee, privs []string, columns bool) {
+	if columns {
+		m.warn("column privileges granted or revoked by %s, which does not own %s, are not modeled", m.current.spelled, obj.display())
+	}
+	if obj.delegated == nil {
+		obj.delegated = map[string]acl{}
+	}
+	given := obj.delegated[grantor]
+	if given == nil {
+		given = acl{}
+	}
+	if isGrant {
+		var allowed []string
+		for _, p := range privs {
+			if m.holdsGrantOption(obj, grantor, p) {
+				allowed = append(allowed, p)
+			}
+		}
+		if len(allowed) == 0 && len(privs) > 0 {
+			m.warn("%s grants on %s without holding a grant option; PostgreSQL grants nothing", m.current.spelled, obj.display())
+		}
+		for _, g := range grantees {
+			if len(allowed) > 0 {
+				given.grant(g.token, allowed, grantOption)
+			}
+		}
+	} else {
+		for _, g := range grantees {
+			given.revoke(g.token, privs, grantOption)
+			m.revokeDependents(obj, g.token, privs)
+		}
+	}
+	if len(given) == 0 {
+		delete(obj.delegated, grantor)
+		return
+	}
+	obj.delegated[grantor] = given
+}
+
+// holdsGrantOption reports whether role may grant privilege p on obj.
+func (m *model) holdsGrantOption(obj *object, role, p string) bool {
+	owned := obj.acl
+	if owned == nil {
+		owned = defaultACL(obj.class(), obj.owner)
+	}
+	if option, ok := owned[role][p]; ok && option {
+		return true
+	}
+	for _, given := range obj.delegated {
+		if option, ok := given[role][p]; ok && option {
+			return true
+		}
+	}
+	return false
+}
+
+// revokeDependents follows REVOKE ... CASCADE: once a grantee no longer
+// holds a privilege with a grant option, what it granted of that privilege
+// goes too.
+func (m *model) revokeDependents(obj *object, grantee string, privs []string) {
+	given, ok := obj.delegated[grantee]
+	if !ok {
+		return
+	}
+	var gone []string
+	for _, p := range privs {
+		if !m.holdsGrantOption(obj, grantee, p) {
+			gone = append(gone, p)
+		}
+	}
+	if len(gone) == 0 {
+		return
+	}
+	for dependent, held := range given {
+		var lost []string
+		for _, p := range gone {
+			if _, ok := held[p]; ok {
+				lost = append(lost, p)
+			}
+		}
+		if len(lost) == 0 {
+			continue
+		}
+		given.revoke(dependent, lost, false)
+		m.revokeDependents(obj, dependent, lost)
+	}
+	if len(given) == 0 {
+		delete(obj.delegated, grantee)
 	}
 }
 
@@ -1049,7 +1310,7 @@ func (m *model) bulkGrant(stmt *pg_query.GrantStmt, grantees []grantee, tablePri
 			m.applyGrant(obj, bulk.isGrant, bulk.grantOption, grantees, tablePrivs, nil, all)
 		}
 	}
-	m.replays = append(m.replays, replay{bulk: bulk})
+	m.replays = append(m.replays, replay{bulk: bulk, role: m.current})
 }
 
 // ---- ALTER DEFAULT PRIVILEGES --------------------------------------------
@@ -1077,7 +1338,7 @@ func (m *model) alterDefaultPrivileges(stmt *pg_query.AlterDefaultPrivilegesStmt
 		m.warn("ALTER DEFAULT PRIVILEGES on %s is not modeled and is not in the baseline", action.GetObjtype())
 		return
 	}
-	roles := []string{roleMigrator}
+	roles := []string{m.current.token}
 	schemas := []string{""}
 	for _, option := range stmt.GetOptions() {
 		def := option.GetDefElem()

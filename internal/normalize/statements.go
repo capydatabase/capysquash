@@ -126,10 +126,28 @@ func (r *rewriter) statement(node *pg_query.Node) []result {
 		r.doBlock(n.DoStmt)
 	case *pg_query.Node_RefreshMatViewStmt:
 		r.subject = r.relRef(n.RefreshMatViewStmt.GetRelation())
+	case *pg_query.Node_TransactionStmt:
+		return r.transaction(n.TransactionStmt)
 	default:
 		r.walk(node, nil)
 	}
 	return r.keep(node)
+}
+
+// transaction takes BEGIN, COMMIT and the like out: they delimit what one
+// migration applies atomically, and the baseline, which regroups
+// statements, is applied however its runner applies a script. Left in, they
+// landed among the regrouped statements and could leave the rest of the
+// baseline in a transaction that never commits.
+func (r *rewriter) transaction(stmt *pg_query.TransactionStmt) []result {
+	switch stmt.GetKind() {
+	case pg_query.TransactionStmtKind_TRANS_STMT_ROLLBACK, pg_query.TransactionStmtKind_TRANS_STMT_ROLLBACK_TO:
+		r.n.warn("%s: the statements this ROLLBACK undoes are still in the baseline", r.sql)
+	case pg_query.TransactionStmtKind_TRANS_STMT_PREPARE, pg_query.TransactionStmtKind_TRANS_STMT_COMMIT_PREPARED,
+		pg_query.TransactionStmtKind_TRANS_STMT_ROLLBACK_PREPARED:
+		r.n.warn("%s: two-phase commit statements are not carried into the baseline", r.sql)
+	}
+	return removed()
 }
 
 // ---- schemas -------------------------------------------------------------

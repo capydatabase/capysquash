@@ -180,8 +180,19 @@ recreated one starts clean - and the baseline gets two sections:
   reach objects created after them, so the privileges each object received at
   creation are written out as explicit grants.
 
-The model assumes one role runs the whole history and the baseline (`SET ROLE`
-is not followed, and objects start from the built-in defaults).
+The model assumes one role runs the history and the baseline, in one session,
+and that objects start from the built-in defaults. Role switches in the
+history are followed: after `SET ROLE`, `SET SESSION AUTHORIZATION` or
+`SET LOCAL ROLE` (until the transaction block ends), created objects belong to
+that role, `ALTER DEFAULT PRIVILEGES` without `FOR ROLE` is that role's, and
+grants are made by it. The baseline creates everything as the role that runs
+it and spells the outcome out: `ALTER ... OWNER TO` for each owner, and a
+grant another role made with a grant option it holds (on an object it neither
+owns nor belongs to the owner of) between `SET ROLE` and `RESET ROLE`, because
+PostgreSQL records the current role as the grantor and `GRANTED BY` cannot name
+another. `SET ROLE` and `SET SESSION AUTHORIZATION` themselves are not
+repeated among the object definitions, and `BEGIN`/`COMMIT` of individual
+migrations are left out of the baseline.
 `ALTER DEFAULT PRIVILEGES FOR ROLE name` reaches history objects only when
 `name` is that role, which cannot be known when squashing: the privileges that
 depend on it go into a `DO` block that checks `current_user` when the baseline
