@@ -10,7 +10,7 @@ import (
 	"github.com/lib/pq"
 )
 
-const CatalogSnapshotContractVersion = "capysquash.catalog-snapshot.v1"
+const CatalogSnapshotContractVersion = "capysquash.catalog-snapshot.v2"
 
 // CatalogSnapshot is a portable, deterministic representation of a PostgreSQL
 // schema. It contains no connection details or data values.
@@ -108,6 +108,7 @@ type ClaimedDatabase struct {
 	schemas        []string // every non-system schema present at claim time
 	extensions     []string // every extension installed at claim time
 	resetSchemas   []string // pre-existing schemas whose contents Reset drops (not allowed, not extension-owned)
+	defaultACLs    []string // pg_default_acl entries (OIDs) present at claim time
 }
 
 // ClaimEmptyDatabase refuses a database that is not empty, with the same check
@@ -131,22 +132,30 @@ func ClaimEmptyDatabase(ctx context.Context, db *sql.DB, allowedSchemas []string
 	if err != nil {
 		return nil, fmt.Errorf("list validation database schemas to reset: %w", err)
 	}
+	defaultACLs, err := queryNames(ctx, db, "SELECT oid::text FROM pg_catalog.pg_default_acl ORDER BY oid")
+	if err != nil {
+		return nil, fmt.Errorf("list validation database default privileges: %w", err)
+	}
 	return &ClaimedDatabase{
 		db:             db,
 		allowedSchemas: allowed,
 		schemas:        schemas,
 		extensions:     extensions,
 		resetSchemas:   resetSchemas,
+		defaultACLs:    defaultACLs,
 	}, nil
 }
 
 // Reset drops what was created since the claim: new extensions and new
 // schemas (CASCADE), then every relation, routine and type left in the
-// pre-existing schemas that were required to be empty (usually public).
-// Allowed schemas are not touched, and objects that live outside schemas are
-// kept: roles are cluster-wide, and publications and event triggers belong to
-// the database. Reset finally re-runs the emptiness check, so a database it
-// returns without error can be claimed again.
+// pre-existing schemas that were required to be empty (usually public), and
+// the default privileges (ALTER DEFAULT PRIVILEGES) set since the claim,
+// which would otherwise reach the objects the next run creates. Allowed
+// schemas are not touched, and objects that live outside schemas are kept:
+// roles are cluster-wide, and publications and event triggers belong to the
+// database; privileges granted on the pre-existing schemas themselves stay
+// too. Reset finally re-runs the emptiness check, so a database it returns
+// without error can be claimed again.
 func (c *ClaimedDatabase) Reset(ctx context.Context) error {
 	extensions, err := queryNames(ctx, c.db, "SELECT extname FROM pg_catalog.pg_extension ORDER BY extname")
 	if err != nil {
@@ -179,6 +188,16 @@ func (c *ClaimedDatabase) Reset(ctx context.Context) error {
 		return fmt.Errorf("list validation database objects to drop: %w", err)
 	}
 	for _, statement := range objectDrops {
+		if _, err := c.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("reset validation database (%s): %w", statement, err)
+		}
+	}
+
+	defaultResets, err := queryNames(ctx, c.db, resetDefaultACLsQuery, pq.Array(c.defaultACLs))
+	if err != nil {
+		return fmt.Errorf("list validation database default privileges to reset: %w", err)
+	}
+	for _, statement := range defaultResets {
 		if _, err := c.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("reset validation database (%s): %w", statement, err)
 		}
@@ -281,6 +300,45 @@ FROM (
     )
 ) drops
 ORDER BY phase, statement`
+
+// resetDefaultACLsQuery lists the statements that remove the pg_default_acl
+// entries not in $1: revoke everything the entry grants, and for a
+// database-wide entry grant the built-in default back (owner: everything;
+// PUBLIC: EXECUTE on functions, USAGE on types), at which point PostgreSQL
+// deletes the entry.
+const resetDefaultACLsQuery = `
+SELECT statement
+FROM (
+  SELECT d.oid, 1 AS step,
+    format('ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE ALL ON %s FROM %s',
+      pg_catalog.pg_get_userbyid(d.defaclrole),
+      CASE WHEN d.defaclnamespace = 0 THEN '' ELSE ' IN SCHEMA ' || pg_catalog.quote_ident(n.nspname) END,
+      objects.name,
+      (SELECT pg_catalog.string_agg(DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+         ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END, ', ')
+       FROM pg_catalog.aclexplode(d.defaclacl) a)) AS statement
+  FROM pg_catalog.pg_default_acl d
+  LEFT JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace
+  CROSS JOIN LATERAL (SELECT CASE d.defaclobjtype
+    WHEN 'r' THEN 'TABLES' WHEN 'S' THEN 'SEQUENCES' WHEN 'f' THEN 'FUNCTIONS'
+    WHEN 'T' THEN 'TYPES' WHEN 'n' THEN 'SCHEMAS' END AS name) objects
+  WHERE NOT (d.oid::text = ANY($1::text[])) AND pg_catalog.cardinality(d.defaclacl) > 0
+  UNION ALL
+  SELECT d.oid, 2,
+    format('ALTER DEFAULT PRIVILEGES FOR ROLE %1$I GRANT ALL ON %2$s TO %1$I%3$s',
+      pg_catalog.pg_get_userbyid(d.defaclrole),
+      objects.name,
+      CASE d.defaclobjtype
+        WHEN 'f' THEN format('; ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT EXECUTE ON FUNCTIONS TO PUBLIC', pg_catalog.pg_get_userbyid(d.defaclrole))
+        WHEN 'T' THEN format('; ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT USAGE ON TYPES TO PUBLIC', pg_catalog.pg_get_userbyid(d.defaclrole))
+        ELSE '' END)
+  FROM pg_catalog.pg_default_acl d
+  CROSS JOIN LATERAL (SELECT CASE d.defaclobjtype
+    WHEN 'r' THEN 'TABLES' WHEN 'S' THEN 'SEQUENCES' WHEN 'f' THEN 'FUNCTIONS'
+    WHEN 'T' THEN 'TYPES' WHEN 'n' THEN 'SCHEMAS' END AS name) objects
+  WHERE NOT (d.oid::text = ANY($1::text[])) AND d.defaclnamespace = 0
+) resets
+ORDER BY oid, step`
 
 func requireEmptyValidationDatabase(ctx context.Context, db *sql.DB, allowedSchemas []string) error {
 	const query = `

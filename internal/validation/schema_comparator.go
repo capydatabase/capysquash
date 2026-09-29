@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/metadata"
 	catalogsqlc "github.com/capydatabase/capysquash/internal/metadata/sqlc"
 	schemamodel "github.com/capydatabase/capysquash/internal/schema"
 )
@@ -106,13 +107,10 @@ func collectSchemaSignature(ctx context.Context, db *sql.DB) ([]string, error) {
 	if err := collectCatalogDefinitions(ctx, db, "relation", signatureRelationsQuery, &lines); err != nil {
 		return nil, err
 	}
-	if err := collectCatalogDefinitions(ctx, db, "ownership", signatureOwnershipQuery, &lines); err != nil {
-		return nil, err
-	}
 	if err := collectCatalogDefinitions(ctx, db, "policy_roles", signaturePolicyRolesQuery, &lines); err != nil {
 		return nil, err
 	}
-	if err := collectCatalogDefinitions(ctx, db, "grant", signatureGrantsQuery, &lines); err != nil {
+	if err := collectPrivileges(ctx, db, &lines); err != nil {
 		return nil, err
 	}
 	if err := collectCatalogDefinitions(ctx, db, "comment", signatureCommentsQuery, &lines); err != nil {
@@ -255,6 +253,21 @@ func collectPolicies(ctx context.Context, queries *catalogsqlc.Queries, lines *[
 	return nil
 }
 
+// collectPrivileges adds one line per object with its owner and effective
+// privileges, and one per default-privilege entry, in clear text so a
+// difference shows who holds what. See metadata.DatabaseOwnerRole for how
+// role names are compared.
+func collectPrivileges(ctx context.Context, db *sql.DB, lines *[]string) error {
+	privileges, err := metadata.LoadPrivileges(ctx, db)
+	if err != nil {
+		return err
+	}
+	for _, p := range privileges {
+		*lines = append(*lines, "privileges|"+p.Identifier()+"|"+p.Definition())
+	}
+	return nil
+}
+
 func collectCatalogDefinitions(ctx context.Context, db *sql.DB, kind, query string, lines *[]string) error {
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
@@ -305,7 +318,6 @@ SELECT
   n.nspname || '.' || t.typname AS identifier,
   concat_ws('|',
     t.typtype::text,
-    pg_catalog.pg_get_userbyid(t.typowner),
     pg_catalog.format_type(t.typbasetype, t.typtypmod),
     t.typnotnull::text,
     COALESCE(pg_catalog.pg_get_expr(t.typdefaultbin, 0), t.typdefault, ''),
@@ -345,7 +357,6 @@ SELECT
   n.nspname || '.' || c.relname AS identifier,
   concat_ws('|',
     c.relkind::text,
-    pg_catalog.pg_get_userbyid(c.relowner),
     c.relpersistence::text,
     c.relrowsecurity::text,
     c.relforcerowsecurity::text,
@@ -360,69 +371,28 @@ WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
   AND n.nspname NOT LIKE 'pg_temp_%'
 ORDER BY identifier`
 
-const signatureOwnershipQuery = `
-SELECT identifier, definition
-FROM (
-  SELECT
-    'schema|' || n.nspname AS identifier,
-    pg_catalog.pg_get_userbyid(n.nspowner) AS definition
-  FROM pg_catalog.pg_namespace n
-  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND n.nspname NOT LIKE 'pg_toast%'
-    AND n.nspname NOT LIKE 'pg_temp_%'
-  UNION ALL
-  SELECT
-    'function|' || n.nspname || '.' || p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',
-    pg_catalog.pg_get_userbyid(p.proowner)
-  FROM pg_catalog.pg_proc p
-  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND n.nspname NOT LIKE 'pg_toast%'
-    AND n.nspname NOT LIKE 'pg_temp_%'
-) ownership
-ORDER BY identifier`
-
+// signaturePolicyRolesQuery names each policy's roles, with the database
+// owner normalized as metadata.DatabaseOwnerRole describes.
 const signaturePolicyRolesQuery = `
 SELECT
   n.nspname || '.' || c.relname || ':' || p.polname AS identifier,
-  COALESCE(string_agg(r.rolname, ',' ORDER BY r.rolname), 'PUBLIC') AS definition
+  COALESCE(string_agg(roles.name, ',' ORDER BY roles.name), 'PUBLIC') AS definition
 FROM pg_catalog.pg_policy p
 JOIN pg_catalog.pg_class c ON c.oid = p.polrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-LEFT JOIN pg_catalog.pg_roles r ON r.oid = ANY(p.polroles)
+LEFT JOIN LATERAL (
+  SELECT CASE
+    WHEN r.oid = (SELECT d.datdba FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())
+      THEN '` + metadata.DatabaseOwnerRole + `'
+    ELSE r.rolname
+  END AS name
+  FROM pg_catalog.pg_roles r
+  WHERE r.oid = ANY(p.polroles)
+) roles ON true
 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
   AND n.nspname NOT LIKE 'pg_toast%'
   AND n.nspname NOT LIKE 'pg_temp_%'
 GROUP BY n.nspname, c.relname, p.polname
-ORDER BY identifier`
-
-const signatureGrantsQuery = `
-SELECT identifier, definition
-FROM (
-  SELECT
-    'table|' || table_schema || '.' || table_name || '|' || grantee || '|' || privilege_type AS identifier,
-    is_grantable AS definition
-  FROM information_schema.table_privileges
-  WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-  UNION ALL
-  SELECT
-    'column|' || table_schema || '.' || table_name || '.' || column_name || '|' || grantee || '|' || privilege_type,
-    is_grantable
-  FROM information_schema.column_privileges
-  WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-  UNION ALL
-  SELECT
-    'routine|' || routine_schema || '.' || routine_name || '|' || grantee || '|' || privilege_type,
-    is_grantable
-  FROM information_schema.routine_privileges
-  WHERE routine_schema NOT IN ('pg_catalog', 'information_schema')
-  UNION ALL
-  SELECT
-    'usage|' || object_type || '|' || object_schema || '.' || object_name || '|' || grantee || '|' || privilege_type,
-    is_grantable
-  FROM information_schema.usage_privileges
-  WHERE object_schema NOT IN ('pg_catalog', 'information_schema')
-) grants
 ORDER BY identifier`
 
 const signatureCommentsQuery = `

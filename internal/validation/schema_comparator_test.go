@@ -3,6 +3,7 @@ package validation
 import (
 	"testing"
 
+	"github.com/capydatabase/capysquash/internal/metadata"
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 )
 
@@ -134,9 +135,8 @@ func TestCatalogSignatureQueriesParse(t *testing.T) {
 		"sequences":    signatureSequencesQuery,
 		"types":        signatureTypesQuery,
 		"relations":    signatureRelationsQuery,
-		"ownership":    signatureOwnershipQuery,
 		"policy_roles": signaturePolicyRolesQuery,
-		"grants":       signatureGrantsQuery,
+		"privileges":   metadata.PrivilegeSignatureQuery,
 		"comments":     signatureCommentsQuery,
 	}
 	for name, query := range queries {
