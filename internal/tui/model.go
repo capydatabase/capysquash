@@ -221,23 +221,27 @@ func (m *Model) switchTo(viewType ViewType) (tea.Model, tea.Cmd) {
 
 // renderStatusBar renders the bottom status bar
 func (m *Model) renderStatusBar() string {
+	// Every segment carries the bar's background itself: each one ends in a
+	// reset, which would otherwise leave the rest of the bar unpainted.
+	bar := lipgloss.NewStyle().Background(styles.Background)
+
 	// Current view name
 	viewName := m.getViewName(m.currentView.Type())
 	viewBadge := styles.PrimaryBadge(viewName)
 
 	// Navigation hints
-	hints := styles.MutedStyle.Render("ESC: Back  ►  v: Validation  ►  ?: Help  ►  q: Quit")
+	hints := styles.MutedStyle.Background(styles.Background).Render("ESC: Back  ►  v: Validation  ►  ?: Help  ►  q: Quit")
 
 	// Status message
 	status := ""
 	if m.statusMsg != "" {
-		status = m.statusStyle.Render(m.statusMsg)
+		status = m.statusStyle.Background(styles.Background).Render(m.statusMsg)
 	}
 
 	leftSection := lipgloss.JoinHorizontal(
 		lipgloss.Left,
 		viewBadge,
-		"  ",
+		bar.Render("  "),
 		status,
 	)
 
@@ -251,7 +255,7 @@ func (m *Model) renderStatusBar() string {
 	statusContent := lipgloss.JoinHorizontal(
 		lipgloss.Left,
 		leftSection,
-		lipgloss.NewStyle().Width(padding).Render(""),
+		bar.Width(padding).Render(""),
 		rightSection,
 	)
 

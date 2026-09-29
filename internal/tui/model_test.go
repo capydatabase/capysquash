@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -351,6 +353,68 @@ func TestStatusBarFitsOneLine(t *testing.T) {
 			t.Errorf("width %d: status bar is %d columns", width, w)
 		}
 	}
+}
+
+// The status bar is one unbroken band: every cell, including the gap between
+// its sections and the text after each styled segment, has a background.
+func TestStatusBarBackgroundIsContinuous(t *testing.T) {
+	for _, width := range []int{80, 120, 160} {
+		m := newTestModel(t)
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+		m.Update(SuccessMsg{Message: "Configuration saved"})
+
+		bar := m.renderStatusBar()
+		if n := unpaintedCells(bar); n != 0 {
+			t.Errorf("width %d: %d status bar cells have no background: %q", width, n, bar)
+		}
+	}
+}
+
+// unpaintedCells counts the printable characters of s drawn without a
+// background colour, following the SGR escapes Lip Gloss emits.
+func unpaintedCells(s string) int {
+	n, bg := 0, false
+	for len(s) > 0 {
+		if loc := sgr.FindStringIndex(s); loc != nil && loc[0] == 0 {
+			bg = applySGR(bg, s[2:loc[1]-1])
+			s = s[loc[1]:]
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s)
+		s = s[size:]
+		if r != '\n' && !bg {
+			n++
+		}
+	}
+	return n
+}
+
+// applySGR returns whether a background is set after the SGR parameters.
+func applySGR(bg bool, params string) bool {
+	ps := strings.Split(params, ";")
+	for i := 0; i < len(ps); i++ {
+		code, _, colon := strings.Cut(ps[i], ":")
+		c, _ := strconv.Atoi(code) // an empty parameter means 0
+		switch {
+		case c == 0, c == 49:
+			bg = false
+		case c == 38, c == 48, c == 58:
+			bg = bg || c == 48
+			// Extended colours take their arguments as further
+			// parameters unless they are colon-separated.
+			if !colon && i+1 < len(ps) {
+				switch ps[i+1] {
+				case "5":
+					i += 2
+				case "2":
+					i += 4
+				}
+			}
+		case c >= 40 && c <= 47, c >= 100 && c <= 107:
+			bg = true
+		}
+	}
+	return bg
 }
 
 // Esc while editing a config field cancels the edit and stays in the
