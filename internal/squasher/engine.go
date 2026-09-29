@@ -6,7 +6,6 @@ import (
 	stderrors "errors"
 	"fmt"
 	"maps"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -373,7 +372,7 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 
 	if enableStreaming {
 		memManager = performance.NewMemoryManager(memoryLimitMB)
-		streamingTracker = tracking.NewStreamingTracker(batchSize, workerCount, memManager)
+		streamingTracker = tracking.NewStreamingTracker()
 		batchProcessor = performance.NewBatchProcessor(batchSize, memoryLimitMB/4, memManager)
 	}
 
@@ -1243,206 +1242,6 @@ func (e *Engine) SquashStreaming(migrations map[int]string) (*SquashResult, erro
 		AuthCompatibilitySQL: e.GetAuthCompatibilitySQL(),
 		Extensions:           extAnalysis.RequiredExtensions,
 	}, nil
-}
-
-// SquashFromDirectory processes migrations from a directory using streaming
-func (e *Engine) SquashFromDirectory(dir string) (*SquashResult, error) {
-	if !e.enableStreaming {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"streaming not enabled for this engine instance",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		)
-	}
-
-	startTime := time.Now()
-
-	ctx := e.ctx
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	e.updatePhase("Initializing")
-	e.logger.Info("Starting streaming squash process from directory: %s", dir)
-
-	// Same contract as SquashStreaming: post-flight validation does not run in
-	// streaming mode, so record that in the result instead of skipping silently.
-	e.warnings = append(e.warnings,
-		"Streaming mode: post-flight validation is not executed (run 'capysquash lint' or a non-streaming squash to validate the output)")
-
-	// Phase 0: Plugin initialization + extension analysis. Directory streaming
-	// must run the same plugin enrichment and extension detection as the
-	// in-memory paths, so load file contents once for analysis.
-	migrationContents, err := loadMigrationContentsFromDir(dir)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("failed to read migration files from directory %s", dir),
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err)
-	}
-	extAnalysis := e.prepareMigrationEnvironment(ctx, migrationContents)
-
-	// The streaming tracker may see the files in any order, but privileges
-	// and the rewrite to final names depend on it: record the privileges and
-	// rewrite each file from the loaded contents, in sequence order, and let
-	// the tracker see each file's rewritten statements.
-	files, err := migrationFilesInDir(dir)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("failed to read migration files from directory %s", dir),
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err)
-	}
-	parsed := make([]*types.Migration, len(files))
-	for i, path := range files {
-		migration, err := parser.ParseMigration(migrationContents[i], path)
-		if err != nil {
-			return nil, errors.NewError(
-				errors.ErrorCodeSyntaxError,
-				fmt.Sprintf("parse migration %s", path),
-				errors.SeverityError,
-				errors.CategoryParsing,
-			).WithInnerError(err)
-		}
-		parsed[i] = migration
-		e.normalizer.Observe(privileges.Filter(migration.Statements))
-	}
-	e.normalizer.Finish()
-	trackedByFile := make(map[string][]types.Statement, len(files))
-	for i, path := range files {
-		tracked, err := e.trackedStatements(parsed[i])
-		if err != nil {
-			return nil, err
-		}
-		trackedByFile[path] = tracked.Statements
-	}
-	e.recordNormalizerWarnings()
-	e.streamingTracker.SetStatementFilter(func(statements []types.Statement) []types.Statement {
-		if len(statements) > 0 {
-			if tracked, ok := trackedByFile[statements[0].Filename]; ok {
-				return tracked
-			}
-		}
-		return privileges.Filter(statements)
-	})
-
-	// Phase 1: Stream parse and track migrations
-	e.updatePhase("Parsing and Tracking")
-	if err := e.streamParseAndTrack(ctx, dir); err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeConsolidationFailed,
-			"stream parse and track",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err)
-	}
-
-	// Get the underlying tracker from streaming tracker
-	tracker := e.streamingTracker.GetTracker()
-
-	// Update engine's tracker to use the streaming tracker's results
-	e.tracker = tracker
-
-	// Phase 2: Analyze dependencies (using existing engine logic)
-	e.updatePhase("Analyzing Dependencies")
-	if err := e.analyzeDependenciesAndRisks(ctx); err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeDependencyError,
-			"analyze dependencies",
-			errors.SeverityError,
-			errors.CategoryDependency,
-		).WithInnerError(err)
-	}
-
-	// Phase 3: Apply consolidation rules (using existing engine logic)
-	e.updatePhase("Applying Consolidations")
-	consolidatedObjects, err := e.applyConsolidationRules(ctx)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeConsolidationFailed,
-			"apply consolidation rules",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err)
-	}
-
-	e.stats.ConsolidationsApplied = int64(len(consolidatedObjects))
-
-	// Phase 4: Generate final SQL (using existing engine logic)
-	e.updatePhase("Generating SQL")
-	finalSQL, err := e.generateOptimizedSQL(ctx, consolidatedObjects)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeSQLGenerationFailed,
-			"generate final SQL",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err)
-	}
-
-	// Update final statistics
-	e.stats.ProcessingTime = time.Since(startTime)
-	e.updatePhase("Completed")
-
-	if e.progressCb != nil && e.enableProgressTrack {
-		e.progressCb(e.stats.MigrationsProcessed, e.stats.TotalMigrations, "Completed")
-	}
-
-	e.logger.Info("Streaming squash completed in %v", e.stats.ProcessingTime)
-	return &SquashResult{
-		BaselineSQL:          finalSQL,
-		Warnings:             e.warnings,
-		AuthCompatibilitySQL: e.GetAuthCompatibilitySQL(),
-		Extensions:           extAnalysis.RequiredExtensions,
-	}, nil
-}
-
-// loadMigrationContentsFromDir reads the contents of all .sql files in a
-// directory (sorted by filename) keyed by their sequence position. It is used
-// by directory streaming to run plugin detection and extension analysis.
-func loadMigrationContentsFromDir(dir string) (map[int]string, error) {
-	files, err := migrationFilesInDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	contents := make(map[int]string, len(files))
-	for i, path := range files {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
-		}
-		contents[i] = string(data)
-	}
-
-	return contents, nil
-}
-
-// migrationFilesInDir lists the .sql files of a directory in name order, as
-// paths joined to dir the way the streaming processor spells them.
-func migrationFilesInDir(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []string
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".sql") {
-			continue
-		}
-		files = append(files, entry.Name())
-	}
-	sort.Strings(files)
-	for i, name := range files {
-		files[i] = filepath.Join(dir, name)
-	}
-	return files, nil
 }
 
 // prepareMigrationEnvironment initializes plugins and analyzes required
@@ -3552,42 +3351,6 @@ func schemaHasObjects(schema *metadata.SchemaMetadata) bool {
 		len(schema.Functions)+len(schema.Sequences)+len(schema.Types) > 0
 }
 
-// streamParseAndTrack streams parsing and tracking from directory
-func (e *Engine) streamParseAndTrack(ctx context.Context, dir string) error {
-	// Set up progress tracking
-	if e.enableProgressTrack {
-		e.streamingTracker.SetProgressCallback(func(processed, total int64, throughput float64) {
-			e.mu.Lock()
-			e.stats.MigrationsProcessed = processed
-			e.mu.Unlock()
-
-			if e.progressCb != nil {
-				e.progressCb(processed, total, e.stats.Phase)
-			}
-		})
-	}
-
-	// Process directory with streaming
-	if err := e.streamingTracker.ProcessDirectory(dir); err != nil {
-		return errors.NewError(
-			errors.ErrorCodeConsolidationFailed,
-			"streaming tracker failed",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err)
-	}
-
-	// Update statistics
-	streamStats, _ := e.streamingTracker.GetCombinedStats()
-	e.mu.Lock()
-	e.stats.MigrationsProcessed = streamStats.MigrationsProcessed
-	e.stats.ObjectsTracked = streamStats.ObjectsTracked
-	e.stats.PeakMemoryUsage = e.memManager.GetMemoryStats().PeakMemoryBytes
-	e.mu.Unlock()
-
-	return nil
-}
-
 // streamProcessMigrations processes migrations using batching for memory efficiency
 func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int]string) error {
 	migrationFiles := make([]*performance.MigrationFile, 0, len(migrations))
@@ -3762,27 +3525,4 @@ func OptimizedSquashForLargeDatasets(cfg *config.Config, migrations map[int]stri
 	defer func() { _ = engine.Close() }()
 
 	return engine.SquashStreaming(migrations)
-}
-
-// OptimizedSquashFromDirectory provides a high-level interface for directory processing
-func OptimizedSquashFromDirectory(cfg *config.Config, dir string, memoryLimitMB int) (*SquashResult, error) {
-	engineConfig := EngineConfig{
-		Config:              cfg,
-		EnableStreaming:     true,
-		BatchSize:           50,
-		WorkerCount:         2, // Conservative for directory processing
-		MemoryLimitMB:       memoryLimitMB,
-		EnableProgressTrack: true,
-		ProgressCallback: func(processed, total int64, phase string) {
-			utils.GetDefaultLogger().WithPrefix("ENGINE").Info("Processing: %d files - %s", processed, phase)
-		},
-	}
-
-	engine, err := NewEngine(engineConfig)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = engine.Close() }()
-
-	return engine.SquashFromDirectory(dir)
 }

@@ -424,21 +424,8 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 		} else {
 			color.Cyan("🚀 Auto-enabling streaming mode: %s\n", autoStreamReason)
 		}
-		// Create memory-optimized tracker for large datasets
-		memTracker := tracking.NewMemoryOptimizedTracker(memoryLimitMB, 50)
-
-		if showProgress {
-			memTracker.SetProgressCallback(func(processed, total int64, throughput float64) {
-				if total > 0 {
-					progress := float64(processed) / float64(total) * 100
-					fmt.Printf("\rAnalyzing: %.1f%% (%d/%d) - %.1f files/sec",
-						progress, processed, total, throughput)
-				} else {
-					fmt.Printf("\rAnalyzing: %d files processed - %.1f files/sec",
-						processed, throughput)
-				}
-			})
-		}
+		// Feed the tracker one file at a time, in the order given.
+		memTracker := tracking.NewStreamingTracker()
 
 		// Process only the specified files using streaming
 		for _, migrationFile := range args {
@@ -453,6 +440,9 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 			}
 			memTracker.GetTracker().ProcessMigration(migration.Migration, len(migrations))
 			migrations = append(migrations, migration)
+			if showProgress {
+				fmt.Printf("\rAnalyzing: %d/%d files", len(migrations), len(args))
+			}
 		}
 
 		if showProgress {

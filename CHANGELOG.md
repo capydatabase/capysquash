@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `SquashDirectory` with streaming enabled (the programmatic API in `internal/engine`) no longer
+  hangs. It ran a concurrent parse pipeline whose output channel was never closed, so the
+  goroutines waiting for the last parsed file waited forever, and it handed the tracker the files
+  in whatever order the parse workers finished them. It now reads the directory's `*.sql` files
+  in name order and squashes them the way `capysquash squash --streaming` does; files in
+  subdirectories are no longer read. `capysquash analyze --streaming` prints its progress, which
+  it never did.
+
 ## [1.4.0] - 2026-09-29
 
 ### Added
