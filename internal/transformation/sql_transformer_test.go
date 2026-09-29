@@ -1,6 +1,7 @@
 package transformation
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -32,18 +33,20 @@ func TestConvertDeleteToSelect(t *testing.T) {
 	}
 }
 
-func TestReplaceBareLengthFunction(t *testing.T) {
-	input := "SELECT length(name), char_length(name), character_length(name), my_length(name) FROM users"
-	got := replaceBareLengthFunction(input)
+// Modern-syntax transformation leaves function calls alone: renaming them
+// changes catalog definitions, and position(a IN b) -> strpos(a IN b) is not
+// even valid SQL.
+func TestTransformKeepsFunctionCallsVerbatim(t *testing.T) {
+	cfg := DefaultTransformationConfig()
+	tr := NewSQLTransformer(cfg)
+	sql := `CREATE TABLE users (name text CHECK (length(name) > 3), code text CHECK (position('x' IN code) = 0), tag text DEFAULT substr('abcdef', 1, 3));`
 
-	if !strings.Contains(got, "char_length(name)") {
-		t.Fatalf("expected length(name) rewrite, got: %s", got)
+	result, err := tr.Transform(context.Background(), sql)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
 	}
-	if strings.Contains(got, "char_char_length") {
-		t.Fatalf("unexpected double rewrite: %s", got)
-	}
-	if strings.Contains(got, "character_char_length") {
-		t.Fatalf("unexpected rewrite of character_length: %s", got)
+	if result.TransformedSQL != sql {
+		t.Fatalf("Transform changed function calls:\n%s", result.TransformedSQL)
 	}
 }
 

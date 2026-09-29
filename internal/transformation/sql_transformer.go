@@ -551,43 +551,6 @@ func hasLegacyJoinPredicate(sql string) bool {
 	return strings.Contains(leftToken, ".") && strings.Contains(rightToken, ".")
 }
 
-func hasLegacyFunctionNames(sql string) bool {
-	lower := strings.ToLower(sql)
-	return strings.Contains(lower, "substr(") || strings.Contains(lower, "length(") || strings.Contains(lower, "position(")
-}
-
-func replaceBareLengthFunction(sql string) string {
-	lower := strings.ToLower(sql)
-	needle := "length("
-
-	var builder strings.Builder
-	start := 0
-	for {
-		relIdx := strings.Index(lower[start:], needle)
-		if relIdx == -1 {
-			builder.WriteString(sql[start:])
-			break
-		}
-
-		idx := start + relIdx
-		builder.WriteString(sql[start:idx])
-
-		if idx > 0 {
-			prev := sql[idx-1]
-			if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
-				builder.WriteString(sql[idx : idx+len(needle)])
-				start = idx + len(needle)
-				continue
-			}
-		}
-
-		builder.WriteString("char_length(")
-		start = idx + len(needle)
-	}
-
-	return builder.String()
-}
-
 func hasSimpleWhereEquality(sql string) bool {
 	upper := strings.ToUpper(sql)
 	whereIdx := strings.Index(upper, "WHERE")
@@ -777,26 +740,10 @@ func (st *SQLTransformer) transformToModernSyntax(ctx context.Context, sql strin
 		result.Warnings = append(result.Warnings, "Consider converting old-style joins to ANSI join syntax")
 	}
 
-	// Convert old function names to modern equivalents
-	if hasLegacyFunctionNames(sql) {
-		modernSQL := strings.ReplaceAll(transformedSQL, "substr(", "substring(")
-
-		modernSQL = replaceBareLengthFunction(modernSQL)
-
-		modernSQL = strings.ReplaceAll(modernSQL, "position(", "strpos(")
-
-		if modernSQL != transformedSQL {
-			result.Transformations = append(result.Transformations, TransformationApplied{
-				Type:        ModernSyntax,
-				Description: "Updated function names to modern equivalents",
-				LineStart:   1,
-				LineEnd:     len(strings.Split(sql, "\n")),
-				Before:      "Old function names",
-				After:       "Modern function names",
-			})
-			transformedSQL = modernSQL
-		}
-	}
+	// Function calls are never renamed: substr/length/position are current
+	// PostgreSQL, a rename changes the definitions the squash must reproduce
+	// (CHECK constraints, defaults, view and function bodies), and position(a
+	// IN b) has no strpos spelling with the same arguments.
 
 	return transformedSQL, nil
 }
