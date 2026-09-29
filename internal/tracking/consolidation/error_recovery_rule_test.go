@@ -17,7 +17,7 @@ type stubRule struct {
 }
 
 func (r *stubRule) CanApply(*tracking.ObjectLifecycle) bool { return r.applies }
-func (r *stubRule) Risk() tracking.RiskLevel                 { return tracking.RiskLevelLow }
+func (r *stubRule) Risk() tracking.RiskLevel                { return tracking.RiskLevelLow }
 func (r *stubRule) Apply(*tracking.ObjectLifecycle, ConsolidationEngine) (*tracking.ConsolidationResult, error) {
 	r.ran = true
 	return r.result, r.err
