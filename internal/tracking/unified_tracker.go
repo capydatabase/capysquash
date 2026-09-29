@@ -16,7 +16,6 @@ import (
 	"github.com/capydatabase/capysquash/internal/metadata"
 	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/types"
-	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // UnifiedTracker provides comprehensive object lifecycle tracking with advanced metadata integration
@@ -49,7 +48,6 @@ type UnifiedTracker struct {
 	statementAnalyzer *parser.StatementAnalyzer
 
 	// Column type tracking for index optimization
-	columnTypes map[string]map[string]*ColumnTypeInfo // table -> column -> type info
 }
 
 // ObjectLifecycle tracks complete database object lifecycle with advanced metadata integration
@@ -166,15 +164,6 @@ type SourceRange struct {
 	EndCol    int    `json:"end_col"`
 	Text      string `json:"text"`
 	Context   string `json:"context,omitempty"`
-}
-
-// ColumnTypeInfo tracks column types for index optimization
-type ColumnTypeInfo struct {
-	TableName  string
-	ColumnName string
-	DataType   string // Full type name (e.g., "double precision[]", "point", "geometry")
-	IsArray    bool   // True if column is an array type
-	IsSpatial  bool   // True if column is an actual spatial type (point, geography, geometry, etc.)
 }
 
 // ObjectInfo represents information about a database object
@@ -656,7 +645,6 @@ func NewUnifiedTracker() *UnifiedTracker {
 		cycleDetector:     NewAdvancedDDLCycleDetector(cycleConfig),
 		detectedCycles:    make([]DDLCycle, 0),
 		statementAnalyzer: parser.NewStatementAnalyzer("17"), // Default to PostgreSQL 17
-		columnTypes:       make(map[string]map[string]*ColumnTypeInfo),
 	}
 }
 
@@ -690,171 +678,9 @@ func NewRiskAssessment() *RiskAssessment {
 	return assessment
 }
 
-// IsSpatialDataType determines if a PostgreSQL type is a spatial/geometric type
-func IsSpatialDataType(typeName string) bool {
-	typeName = strings.ToLower(strings.TrimSpace(typeName))
-
-	// PostGIS types
-	if strings.HasPrefix(typeName, "geometry") ||
-		strings.HasPrefix(typeName, "geography") {
-		return true
-	}
-
-	// PostgreSQL built-in geometric types
-	spatialTypes := map[string]bool{
-		"point":   true,
-		"line":    true,
-		"lseg":    true,
-		"box":     true,
-		"path":    true,
-		"polygon": true,
-		"circle":  true,
-	}
-
-	return spatialTypes[typeName]
-}
-
 // IsArrayDataType determines if a type is an array
 func IsArrayDataType(typeName string) bool {
 	return strings.HasSuffix(typeName, "[]")
-}
-
-// GetBaseTypeName extracts the base type from an array type
-// E.g., "double precision[]" -> "double precision"
-func GetBaseTypeName(typeName string) string {
-	return strings.TrimSuffix(typeName, "[]")
-}
-
-// extractTypeName converts a pg_query TypeName to a string representation
-func extractTypeName(typeName *pg_query.TypeName) string {
-	if typeName == nil {
-		return ""
-	}
-
-	// Get the type names array
-	var typeNames []string
-	for _, name := range typeName.Names {
-		if name.GetString_() != nil {
-			typeNames = append(typeNames, name.GetString_().Sval)
-		}
-	}
-
-	// Use the last element for simplicity (e.g., ["pg_catalog", "float8"] -> "float8")
-	var typStr string
-	if len(typeNames) > 0 {
-		typStr = typeNames[len(typeNames)-1]
-	}
-
-	// Handle common PostgreSQL type aliases
-	typeMap := map[string]string{
-		"float8":  "double precision",
-		"float4":  "real",
-		"int4":    "integer",
-		"int8":    "bigint",
-		"int2":    "smallint",
-		"varchar": "character varying",
-	}
-
-	if mapped, ok := typeMap[typStr]; ok {
-		typStr = mapped
-	}
-
-	// Add array suffix if necessary
-	if len(typeName.ArrayBounds) > 0 {
-		typStr += "[]"
-	}
-
-	return typStr
-}
-
-// ExtractColumnTypes extracts column type information from a CREATE TABLE statement
-func (ut *UnifiedTracker) ExtractColumnTypes(tableName string, stmt *types.Statement) {
-	// ParseTree is *pg_query.ParseResult (strongly typed)
-	if stmt.ParseTree == nil {
-		return
-	}
-
-	parseResult := stmt.ParseTree
-	if parseResult == nil || parseResult.Stmts == nil || len(parseResult.Stmts) == 0 {
-		return
-	}
-
-	// Get the first statement
-	stmtNode := parseResult.Stmts[0]
-	if stmtNode.Stmt == nil {
-		return
-	}
-
-	// Check if it's a CREATE TABLE statement
-	createStmt := stmtNode.Stmt.GetCreateStmt()
-	if createStmt == nil {
-		return
-	}
-
-	// Ensure the table entry exists in columnTypes
-	if ut.columnTypes[tableName] == nil {
-		ut.columnTypes[tableName] = make(map[string]*ColumnTypeInfo)
-	}
-
-	// Iterate through table elements to find column definitions
-	for _, element := range createStmt.TableElts {
-		colDef := element.GetColumnDef()
-		if colDef == nil {
-			continue
-		}
-
-		columnName := colDef.Colname
-		if columnName == "" {
-			continue
-		}
-
-		// Extract type name
-		if colDef.TypeName == nil {
-			continue
-		}
-
-		typeName := extractTypeName(colDef.TypeName)
-		isArray := len(colDef.TypeName.ArrayBounds) > 0
-
-		// Check if it's a spatial type (but not an array of spatial types)
-		baseTypeName := typeName
-		if isArray {
-			baseTypeName = GetBaseTypeName(typeName)
-		}
-		isSpatial := IsSpatialDataType(baseTypeName) && !isArray
-
-		// Preserve the first-seen column type for a table+column pair.
-		// This avoids incorrect rewrites when later migrations include duplicate
-		// CREATE TABLE IF NOT EXISTS definitions with divergent schemas.
-		if existing, exists := ut.columnTypes[tableName][columnName]; exists {
-			if existing.DataType != typeName || existing.IsArray != isArray || existing.IsSpatial != isSpatial {
-				utils.GetDefaultLogger().WithPrefix("UNIFIED-TRACKER").Debug(
-					"Preserving initial column type for %s.%s (%s); ignoring conflicting duplicate definition (%s)",
-					tableName,
-					columnName,
-					existing.DataType,
-					typeName,
-				)
-			}
-			continue
-		}
-
-		ut.columnTypes[tableName][columnName] = &ColumnTypeInfo{
-			TableName:  tableName,
-			ColumnName: columnName,
-			DataType:   typeName,
-			IsArray:    isArray,
-			IsSpatial:  isSpatial,
-		}
-	}
-}
-
-// GetColumnType retrieves column type information
-func (ut *UnifiedTracker) GetColumnType(tableName, columnName string) *ColumnTypeInfo {
-	if ut.columnTypes[tableName] == nil {
-		return nil
-	}
-	return ut.columnTypes[tableName][columnName]
 }
 
 // ProcessMigration processes a migration with comprehensive tracking
@@ -931,11 +757,6 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 
 			// Add event to object lifecycle
 			lifecycle.History = append(lifecycle.History, *event)
-
-			// Extract column types from CREATE TABLE statements for index optimization
-			if stmt.Operation == types.OpCreate && stmt.ObjectType == types.TypeTable {
-				ut.ExtractColumnTypes(stmt.ObjectName, &stmt)
-			}
 
 			// Debug: track profiles events
 			if strings.ToLower(stmt.ObjectName) == "profiles" {
