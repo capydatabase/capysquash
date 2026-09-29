@@ -71,8 +71,11 @@ type CompareOptions struct {
 	// schema present in either model.
 	Schemas []string
 	// Environment describes what the scratch database already contained before
-	// the baseline was applied (platform schemas, auth compatibility objects,
-	// preinstalled extensions). Those objects are excluded from both sides.
+	// the baseline was applied (the public schema, platform schemas, auth
+	// compatibility objects, preinstalled extensions). Those objects are
+	// excluded from both sides, except their owners and privileges: a baseline
+	// grants and revokes on them (REVOKE CREATE ON SCHEMA public FROM PUBLIC),
+	// so they are compared wherever both sides have the object, in any schema.
 	Environment *DatabaseMetadata
 }
 
@@ -138,13 +141,23 @@ func CompareDatabaseMetadata(expected, actual *DatabaseMetadata, opts CompareOpt
 	}
 	inScope := func(o catalogObject) bool {
 		if _, preexisting := environment[o.key()]; preexisting {
-			return false
+			return o.kind == kindPrivileges
 		}
 		// Database-wide default privileges belong to no schema.
 		return len(opts.Schemas) == 0 || o.schema == "" || slices.Contains(opts.Schemas, o.schema)
 	}
 	expectedObjects = filterObjects(expectedObjects, inScope)
 	actualObjects = filterObjects(actualObjects, inScope)
+	// A pre-existing object only one side has belongs to that side's
+	// environment (an extension object production lacks), not to the baseline.
+	for key := range environment {
+		_, inExpected := expectedObjects[key]
+		_, inActual := actualObjects[key]
+		if inExpected != inActual {
+			delete(expectedObjects, key)
+			delete(actualObjects, key)
+		}
+	}
 
 	keys := make([]string, 0, len(expectedObjects)+len(actualObjects))
 	for key := range expectedObjects {

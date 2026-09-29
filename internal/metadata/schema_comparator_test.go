@@ -394,6 +394,34 @@ func TestCompareDatabaseMetadataScopeAndEnvironment(t *testing.T) {
 	}
 }
 
+// The baseline grants and revokes on objects that existed before it ran
+// (the public schema): their owners and privileges are compared too, even
+// in a schema the baseline creates nothing in, while pre-existing objects
+// only one side has stay out.
+func TestCompareDatabaseMetadataComparesPrivilegesOfPreexistingObjects(t *testing.T) {
+	publicDefault := PrivilegeMetadata{Kind: "schema", Schema: "public", Name: "public", Owner: "pg_database_owner",
+		ACL: "PUBLIC=USAGE/pg_database_owner,pg_database_owner=CREATE/pg_database_owner,pg_database_owner=USAGE/pg_database_owner"}
+	extensionFunction := PrivilegeMetadata{Kind: "routine", Schema: "extensions", Name: "uuid_nil()", Owner: DatabaseOwnerRole,
+		ACL: "PUBLIC=EXECUTE/<database owner>"}
+	environment := &DatabaseMetadata{
+		Schemas:    map[string]*SchemaMetadata{"public": {Name: "public"}},
+		Privileges: []PrivilegeMetadata{publicDefault, extensionFunction},
+	}
+	revoked := publicDefault
+	revoked.ACL = "pg_database_owner=CREATE/pg_database_owner,pg_database_owner=USAGE/pg_database_owner,reader=USAGE/pg_database_owner"
+
+	expected, actual := fixtureMetadata(), fixtureMetadata()
+	expected.Privileges = []PrivilegeMetadata{revoked}
+	actual.Privileges = []PrivilegeMetadata{publicDefault, extensionFunction}
+	result := CompareDatabaseMetadata(expected, actual, CompareOptions{Schemas: []string{"app"}, Environment: environment})
+	requireSingleDrift(t, result, SchemaDrift{Object: "schema public", ObjectType: kindPrivileges, DriftType: "definition_mismatch", Description: "reader=USAGE"})
+
+	actual.Privileges = []PrivilegeMetadata{revoked, extensionFunction}
+	if result := CompareDatabaseMetadata(expected, actual, CompareOptions{Schemas: []string{"app"}, Environment: environment}); !result.IsValid {
+		t.Fatalf("matching privileges of a pre-existing object must compare equal: %+v", result.SchemaDrift)
+	}
+}
+
 func TestCompareDatabaseMetadataIsDeterministic(t *testing.T) {
 	mutate := func(expected, actual *DatabaseMetadata) {
 		for _, name := range []string{"t3", "t1", "t2"} {

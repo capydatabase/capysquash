@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as written (`IF NOT EXISTS`, `AUTHORIZATION`) under their final names, preceded by the renames
   and drops of schemas the history did not create (`DROP SCHEMA public CASCADE`), in history
   order. Elements of `CREATE SCHEMA ... CREATE TABLE ...` become statements of their own.
-- Fixtures `rename_schema`, `rename_types`, `rename_table_dependents` and `drop_schema_recreate`
-  in the e2e suite; `privileges_drop_rename` now also renames a schema, an enum and a domain with
+- Fixtures `rename_schema`, `rename_types`, `rename_table_dependents`, `drop_schema_recreate` and
+  `privileges_preexisting` in the e2e suite; `privileges_drop_rename` now also renames a schema, an enum and a domain with
   privileges and drops and recreates a schema.
 
 ### Fixed
@@ -47,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way, and a renamed table is no longer merged across the rename by the consolidation rules.
 - Grants on a function follow its signature when a type it takes, or that type's schema, is
   renamed; they used to be reported as not in the baseline.
+- The `paranoid` level compares the owners and privileges of objects that existed before the
+  baseline ran - the `public` schema, extension objects - with production, wherever production has
+  the object too. It used to leave every pre-existing object out, so a history's
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC` or `GRANT USAGE ON SCHEMA public TO app` missing
+  from the baseline went unnoticed. Resetting the validation database now also gives such objects
+  their owners and privileges back, where they used to keep what the baseline changed. A failed
+  paranoid check lists the differences in its error; it used to point at warnings that were never
+  shown.
 - `SCHEMA_DIFF` validation no longer fails a history that creates roles. It applies the squashed
   baseline and the original history one after the other in the same cluster, and roles belong to
   the cluster: the original's `CREATE ROLE` found the role the baseline had created and failed,

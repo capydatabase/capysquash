@@ -106,7 +106,7 @@ Tests manual override pragmas (` -  capysquash:ignore`, ` -  capysquash:no-merge
 
 **Files:** 3 migrations demonstrating pragma usage
 
-### 7. Privileges: `privileges_tables_columns`, `privileges_routines`, `privileges_schemas_sequences_types`, `privileges_default_privileges`, `privileges_drop_rename`
+### 7. Privileges: `privileges_tables_columns`, `privileges_routines`, `privileges_schemas_sequences_types`, `privileges_default_privileges`, `privileges_drop_rename`, `privileges_preexisting`
 
 Test that the baseline ends with the owners, privileges and default privileges
 the history leaves: table, column, view, sequence, function-overload, procedure,

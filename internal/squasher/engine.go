@@ -3439,28 +3439,33 @@ func (e *Engine) validateAgainstDatabase(ctx context.Context, sql string) error 
 		).WithInnerError(err)
 	}
 
+	var differences []string
 	for _, ext := range result.MissingExtensions {
-		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: the baseline creates extension %s, which production does not have", ext))
+		differences = append(differences, fmt.Sprintf("the baseline creates extension %s, which production does not have", ext))
 	}
 	for _, mismatch := range result.TypeMismatches {
-		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: column %s.%s: production type %s, baseline type %s",
+		differences = append(differences, fmt.Sprintf("column %s.%s: production type %s, baseline type %s",
 			mismatch.Object, mismatch.Column, mismatch.ExpectedType, mismatch.ActualType))
 	}
 	for _, conflict := range result.ConstraintConflicts {
-		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: constraint %s on %s (%s): production %q, baseline %q",
+		differences = append(differences, fmt.Sprintf("constraint %s on %s (%s): production %q, baseline %q",
 			conflict.ConstraintName, conflict.Table, conflict.ConflictType, conflict.ExpectedDef, conflict.ActualDef))
 	}
 	for _, drift := range result.SchemaDrift {
-		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: schema drift (%s): %s", drift.DriftType, drift.Description))
+		differences = append(differences, fmt.Sprintf("schema drift (%s) %s %s: %s", drift.DriftType, drift.ObjectType, drift.Object, drift.Description))
+	}
+	for _, difference := range differences {
+		e.warnings = append(e.warnings, "ERROR: "+difference)
 	}
 	e.warnings = append(e.warnings, result.Warnings...)
 
-	differences := len(result.MissingExtensions) + len(result.TypeMismatches) + len(result.ConstraintConflicts) + len(result.SchemaDrift)
 	if !result.IsValid {
-		e.logger.Info("☒ Database validation failed: %d differences from production", differences)
+		e.logger.Info("☒ Database validation failed: %d differences from production", len(differences))
+		// The warnings are not shown when the squash fails, so the error
+		// carries the differences.
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("the squashed baseline does not reproduce production: %d differences (listed in the warnings)", differences),
+			fmt.Sprintf("the squashed baseline does not reproduce production: %d differences:\n  %s", len(differences), strings.Join(differences, "\n  ")),
 			errors.SeverityError,
 			errors.CategoryValidation,
 		)

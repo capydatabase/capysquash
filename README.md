@@ -99,8 +99,14 @@ same `pg_catalog` queries (`format_type`, `pg_get_constraintdef`,
 column (type, nullability, default, generation, identity, collation, order),
 constraint, index, trigger, policy, view, function overload, sequence, enum or
 other type in the schemas the baseline creates differs from production, and
-when any owner, privilege or default privilege differs.
-Production schemas the baseline creates nothing in are listed as a warning.
+when any owner, privilege or default privilege differs - including those of
+objects that were in the validation database before the baseline ran (the
+`public` schema, extension objects), wherever production has them too, since
+a history grants and revokes on them. Privileges a platform granted on such
+objects in production (outside the history) therefore show up as
+differences. The validation database gets its owners and privileges back when
+it is reset. Production schemas the baseline creates nothing in are listed as
+a warning.
 
 ### Manual overrides
 

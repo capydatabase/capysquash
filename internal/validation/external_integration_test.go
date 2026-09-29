@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -180,9 +181,34 @@ func TestClaimedDatabaseResetReturnsDatabaseToEmpty(t *testing.T) {
 		t.Fatal("a database with a platform table must not be claimable without allowing its schema")
 	}
 
+	owner := fmt.Sprintf("csq_reset_owner_%d", time.Now().UnixNano())
+	if _, err := db.ExecContext(ctx, "CREATE ROLE "+owner); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+	defer func() {
+		if _, err := db.ExecContext(context.Background(), "DROP ROLE IF EXISTS "+owner); err != nil {
+			t.Errorf("drop role: %v", err)
+		}
+	}()
+	before, err := loadObjectPrivileges(ctx, db)
+	if err != nil {
+		t.Fatalf("list privileges: %v", err)
+	}
+
 	claimed, err := ClaimEmptyDatabase(ctx, db, []string{"platform"})
 	if err != nil {
 		t.Fatalf("claim empty database: %v", err)
+	}
+	// Privileges and owners of pre-existing objects change too.
+	if err := ExecuteSQLScript(ctx, db, fmt.Sprintf(`
+REVOKE USAGE ON SCHEMA public FROM PUBLIC;
+GRANT CREATE ON SCHEMA public TO PUBLIC;
+GRANT SELECT ON platform.settings TO PUBLIC;
+GRANT UPDATE ON platform.settings TO %[1]s WITH GRANT OPTION;
+ALTER TABLE platform.settings OWNER TO %[1]s;
+ALTER SCHEMA platform OWNER TO %[1]s;
+`, owner), "preexisting.sql"); err != nil {
+		t.Fatalf("change pre-existing privileges: %v", err)
 	}
 	script := `
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -246,6 +272,20 @@ SELECT (SELECT count(*) FROM pg_extension WHERE extname = 'pgcrypto')
 	}
 	if defaultACLs != 0 {
 		t.Fatalf("%d default privilege entries survived the reset", defaultACLs)
+	}
+	after, err := loadObjectPrivileges(ctx, db)
+	if err != nil {
+		t.Fatalf("list privileges: %v", err)
+	}
+	for key, want := range before {
+		got, ok := after[key]
+		if !ok {
+			t.Errorf("%s is gone after the reset", key)
+			continue
+		}
+		if got.owner != want.owner || !reflect.DeepEqual(got.acl, want.acl) {
+			t.Errorf("%s: owner %s privileges %v after the reset, want owner %s privileges %v", key, got.owner, got.acl, want.owner, want.acl)
+		}
 	}
 }
 
