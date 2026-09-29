@@ -71,10 +71,6 @@ var (
 			BorderForeground(Primary).
 			Padding(1, 2)
 
-	// List item style
-	ListItemStyle = lipgloss.NewStyle().
-			PaddingLeft(2)
-
 	// Selected list item style
 	SelectedItemStyle = lipgloss.NewStyle().
 				Foreground(Primary).
@@ -137,11 +133,6 @@ func StatInfo(label, value string) string {
 	return Stat(label, value, Secondary)
 }
 
-// StatDanger creates a danger-colored statistic
-func StatDanger(label, value string) string {
-	return Stat(label, value, Danger)
-}
-
 // Badge creates a styled badge
 func Badge(text string, c color.Color) string {
 	return lipgloss.NewStyle().
@@ -155,16 +146,6 @@ func Badge(text string, c color.Color) string {
 // SuccessBadge creates a success badge
 func SuccessBadge(text string) string {
 	return Badge(text, Success)
-}
-
-// WarningBadge creates a warning badge
-func WarningBadge(text string) string {
-	return Badge(text, Warning)
-}
-
-// DangerBadge creates a danger badge
-func DangerBadge(text string) string {
-	return Badge(text, Danger)
 }
 
 // InfoBadge creates an info badge
