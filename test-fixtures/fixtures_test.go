@@ -95,6 +95,31 @@ func GetAllFixtures() []FixtureTest {
 			Path:        "pragma_examples",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
+		{
+			Name:        "privileges_tables_columns",
+			Path:        "privileges_tables_columns",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "privileges_routines",
+			Path:        "privileges_routines",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "privileges_schemas_sequences_types",
+			Path:        "privileges_schemas_sequences_types",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "privileges_default_privileges",
+			Path:        "privileges_default_privileges",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "privileges_drop_rename",
+			Path:        "privileges_drop_rename",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
 	}
 }
 

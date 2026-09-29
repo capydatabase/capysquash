@@ -106,6 +106,16 @@ Tests manual override pragmas (` -  capysquash:ignore`, ` -  capysquash:no-merge
 
 **Files:** 3 migrations demonstrating pragma usage
 
+### 7. Privileges: `privileges_tables_columns`, `privileges_routines`, `privileges_schemas_sequences_types`, `privileges_default_privileges`, `privileges_drop_rename`
+
+Test that the baseline ends with the owners, privileges and default privileges
+the history leaves: table, column, view, sequence, function-overload, procedure,
+schema and type privileges, `REVOKE` after `GRANT`, grant options, ownership
+changes, `ALTER DEFAULT PRIVILEGES` (including `FOR ROLE`), bulk
+`ON ALL ... IN SCHEMA` statements, drop and recreate, renames and `SET SCHEMA`.
+Each fixture's README lists what it covers. Role names carry a per-fixture
+prefix because roles are shared by every database of the e2e container.
+
 ## Running Tests
 
 ### Unit Tests

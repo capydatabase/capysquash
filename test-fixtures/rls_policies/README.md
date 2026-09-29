@@ -12,8 +12,8 @@ This fixture tests how capysquash handles RLS policies and role-based access:
 
 001_create_organizations.sql: Creates organizations table.
 002_create_users.sql: Creates users table with org_id.
-003_setup_rls.sql: Enables RLS and creates policies.
-004_add_admin_role.sql: Creates admin role and policies.
+003_setup_rls.sql: Creates the session helper functions the policies call, enables RLS and creates policies.
+004_add_admin_role.sql: Creates the admin role and two login roles that are members of it, and admin policies for that role.
 
 ## Expected behavior:
 
