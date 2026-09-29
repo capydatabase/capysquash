@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/run-e2e.sh` runs the end-to-end suite (`go test ./tests/e2e/...`) from any directory
+  with a 30-minute timeout for the container-backed tests.
+
+### Changed
+
+- `github.com/charmbracelet/ultraviolet` (indirect) moved to the 2026-09-22 pseudo-version
+  `v0.0.0-20260922123528-4e49372c11f9`.
+
 ## [1.1.0] - 2026-09-26
 
 ### Added
