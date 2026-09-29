@@ -5,11 +5,14 @@ CREATE TABLE orders (
     order_number VARCHAR(20) GENERATED ALWAYS AS ('ORD-' || id::text) STORED,
     total_amount DECIMAL(10,2) NOT NULL,
     tax_amount DECIMAL(10,2) GENERATED ALWAYS AS (total_amount * 0.08) STORED,
-    final_amount DECIMAL(10,2) GENERATED ALWAYS AS (total_amount + tax_amount) STORED,
+    -- A generation expression cannot reference another generated column, so
+    -- the tax is computed again rather than read from tax_amount.
+    final_amount DECIMAL(10,2) GENERATED ALWAYS AS (total_amount * 1.08) STORED,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Add more complex generated column
+-- Add more complex generated column over a new description column
+ALTER TABLE products ADD COLUMN description TEXT;
 ALTER TABLE products ADD COLUMN search_vector TSVECTOR GENERATED ALWAYS AS (
     to_tsvector('english', name || ' ' || COALESCE(description, ''))
 ) STORED;
