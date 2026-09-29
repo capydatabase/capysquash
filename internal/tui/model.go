@@ -82,9 +82,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		// A view taking key input (the config wizard while editing) gets
+		// every other key before the global bindings.
+		if c, ok := m.currentView.(KeyCapturer); ok && c.CapturesKeys() {
+			break
+		}
+
 		// Global key bindings
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "q":
 			return m, tea.Quit
 
 		case "?":
@@ -102,11 +111,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.navigateTo(ViewValidation)
 
 		case "esc":
-			// A view using esc itself (the config wizard while editing)
-			// gets it; otherwise return to the previous view.
-			if c, ok := m.currentView.(EscCapturer); ok && c.CapturesEsc() {
-				break
-			}
 			if m.currentView.Type() != ViewDashboard {
 				return m.back()
 			}

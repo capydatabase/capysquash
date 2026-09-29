@@ -23,6 +23,7 @@ var (
 	keyHelp  = tea.KeyPressMsg{Code: '?', Text: "?"}
 	keyQuit  = tea.KeyPressMsg{Code: 'q', Text: "q"}
 	keyValid = tea.KeyPressMsg{Code: 'v', Text: "v"}
+	keyCtrlC = tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 )
 
 // newTestModel builds a model over a fixture migration set, sized like a
@@ -375,6 +376,37 @@ func TestEscCancelsConfigEdit(t *testing.T) {
 	press(t, m, keyEsc)
 	if got := m.currentView.Type(); got != ViewDashboard {
 		t.Fatalf("esc outside an edit: view = %v, want dashboard", got)
+	}
+}
+
+// While a config field is being edited, q, ? and v go to the edit: they do
+// not quit or switch views. Ctrl+C still quits.
+func TestConfigEditCapturesKeys(t *testing.T) {
+	m := newTestModel(t)
+	_, cmd := m.navigateTo(ViewConfig)
+	drive(t, m, cmd)
+	press(t, m, keyEnter)
+
+	for _, key := range []tea.KeyPressMsg{keyQuit, keyHelp, keyValid} {
+		_, cmd := m.Update(key)
+		if cmd != nil {
+			if _, ok := cmd().(tea.QuitMsg); ok {
+				t.Fatalf("%s quit while editing", key.String())
+			}
+			drive(t, m, cmd)
+		}
+		wantView(t, m, ViewConfig, key.String()+" while editing")
+		if !strings.Contains(content(m), "◄") {
+			t.Fatalf("%s ended the edit:\n%s", key.String(), content(m))
+		}
+	}
+
+	_, cmd = m.Update(keyCtrlC)
+	if cmd == nil {
+		t.Fatal("ctrl+c while editing returned no command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("ctrl+c while editing did not quit")
 	}
 }
 

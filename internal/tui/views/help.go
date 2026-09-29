@@ -82,6 +82,7 @@ func (h *HelpView) View() string {
 		{"Enter", "Edit field", ""},
 		{"←/→, h/l", "Change value (while editing)", ""},
 		{"ESC", "Cancel editing", ""},
+		{"q, ?, v", "Ignored while editing; Ctrl+C still quits", ""},
 		{"s, Ctrl+S", "Save configuration", ""},
 		{"d", "Reset to defaults", ""},
 	}))
