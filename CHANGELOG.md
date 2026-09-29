@@ -15,10 +15,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A `=== SCHEMAS ===` section after the roles: the schemas the history creates and keeps, created
+  as written (`IF NOT EXISTS`, `AUTHORIZATION`) under their final names, preceded by the renames
+  and drops of schemas the history did not create (`DROP SCHEMA public CASCADE`), in history
+  order. Elements of `CREATE SCHEMA ... CREATE TABLE ...` become statements of their own.
+- Fixtures `rename_schema`, `rename_types`, `rename_table_dependents` and `drop_schema_recreate`
+  in the e2e suite; `privileges_drop_rename` now also renames a schema, an enum and a domain with
+  privileges and drops and recreates a schema.
+
 ### Fixed
 
+- `ALTER SCHEMA ... RENAME`, `ALTER TYPE ... RENAME` (enums and composite types),
+  `ALTER DOMAIN ... RENAME`, `ALTER TYPE ... RENAME VALUE` and `ALTER TYPE ... RENAME ATTRIBUTE`
+  reach the baseline. The history is rewritten to final names before consolidation: every object
+  is created under the name it ends with, and everything that names it - objects in a renamed
+  schema, column types, function signatures, casts, defaults and comparisons with a renamed enum
+  value, grants - uses that name. These statements used to be dropped with a "not carried into
+  the baseline" warning, leaving a baseline that did not apply.
+- `DROP SCHEMA` is carried: schemas are tracked as objects. A schema the history creates and
+  drops (with `CASCADE`, or once empty) leaves nothing in the baseline, what it held included,
+  and a schema created again under the same name starts from the defaults. `DROP SCHEMA` used to
+  be ignored while the schema's `CREATE SCHEMA` and contents stayed.
+- A table rename no longer breaks the baseline's order. An index, foreign key, view, policy,
+  trigger, comment or row created before the rename named the old table and was emitted after
+  the rename. A renamed table's own statements now stay together and in history order, so the
+  constraint, index and sequence names PostgreSQL derived from its old name stay, and every
+  dependent names the table and its columns as they end up: an index created without a name gets
+  the name PostgreSQL gave it, and a view keeps its column names. Column renames are carried the
+  same way, and a renamed table is no longer merged across the rename by the consolidation rules.
+- Grants on a function follow its signature when a type it takes, or that type's schema, is
+  renamed; they used to be reported as not in the baseline.
 - `scripts/run-e2e.sh` skips a fixture directory without migrations (an empty `original/` left in
   a checkout) instead of failing on it.
+
+### Known issues
+
+- The order of a table whose column default calls `nextval('sequence')` against the
+  `CREATE SEQUENCE` it names is not derived from the default (the sequence can be emitted after
+  the table). This predates this release.
 
 ## [1.3.0] - 2026-09-29
 

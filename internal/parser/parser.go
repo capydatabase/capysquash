@@ -114,6 +114,31 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 	return migration, nil
 }
 
+// ReparseStatement analyzes sql, a rewritten form of original, the way a
+// statement of a migration file is analyzed. The result keeps where original
+// came from and the comments attached to it, so its pragmas still apply.
+func ReparseStatement(original types.Statement, sql string) (types.Statement, error) {
+	errorHandler := NewErrorHandler(context.Background())
+	normalizer := NewContextualNormalizer(DefaultNormalizationContext())
+	stmt, err := parseStatementWithNormalizationAndContext(sql, original.Comments, original.Line, original.Column, normalizer, errorHandler, original.Filename)
+	if err != nil {
+		return types.Statement{}, fmt.Errorf("analyze rewritten statement %q: %w", sql, err)
+	}
+	stmt.Category = categorizeStatement(*stmt)
+	return *stmt, nil
+}
+
+// QualifiedTableName names a table the way statements about it are tracked
+// under ("schema.table", identifiers normalized).
+func QualifiedTableName(schema, name string) string {
+	return getTableNameWithNormalization(&pg_query.RangeVar{Schemaname: schema, Relname: name}, NewContextualNormalizer(DefaultNormalizationContext()))
+}
+
+// CategorizeStatement returns the category a statement is emitted in.
+func CategorizeStatement(stmt types.Statement) types.Category {
+	return categorizeStatement(stmt)
+}
+
 // parseStatementWithNormalizationAndContext parses a statement with context and error handling.
 // comments are the source comments attached to the statement; pragmas in them
 // are analyzed here.
@@ -161,6 +186,8 @@ func parseStatementWithNormalizationAndContext(sql string, comments []string, li
 		stmt.IfNotExists = n.IndexStmt.IfNotExists
 	case *pg_query.Node_CreateExtensionStmt:
 		stmt.IfNotExists = n.CreateExtensionStmt.IfNotExists
+	case *pg_query.Node_CreateSchemaStmt:
+		stmt.IfNotExists = n.CreateSchemaStmt.IfNotExists
 	}
 
 	// Enhanced analysis for new features
@@ -594,6 +621,14 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 			// which would mess up sorting (using the first block's position for all)
 			sum := sha256.Sum256([]byte(stmt.SQL))
 			stmt.ObjectName = fmt.Sprintf("anonymous_block_%x", sum[:8])
+		}
+
+	case *pg_query.Node_CreateSchemaStmt:
+		stmt.ObjectType = types.TypeSchema
+		stmt.Operation = types.OpCreate
+		stmt.ObjectName = normalizer.NormalizeIdentifier(node.CreateSchemaStmt.GetSchemaname())
+		if stmt.ObjectName == "" && node.CreateSchemaStmt.GetAuthrole() != nil {
+			stmt.ObjectName = normalizer.NormalizeIdentifier(node.CreateSchemaStmt.GetAuthrole().GetRolename())
 		}
 
 	case *pg_query.Node_CreateEnumStmt:

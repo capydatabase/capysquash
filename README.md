@@ -115,6 +115,43 @@ Two comment pragmas are honoured inside migrations:
 the next statement or the whole file. Rule codes are listed by
 `capysquash lint --help`.
 
+### Renames and schemas
+
+A baseline emits objects by kind (types, tables, indexes, policies, ...), so a
+rename cannot stay where it was in the history. Before consolidating,
+capysquash rewrites the history to the names objects end with:
+
+- Schemas, enums, composite and domain types, views, materialized views,
+  sequences and indexes are created under their final names, with their final
+  enum values and attributes; `ALTER ... RENAME`, `SET SCHEMA`,
+  `ALTER TYPE ... RENAME VALUE` and `RENAME ATTRIBUTE` disappear. Column types,
+  function signatures, casts, defaults and comparisons with a renamed enum
+  value, and grants follow. A domain's unnamed `CHECK` keeps the name
+  PostgreSQL derived from the domain's first name.
+- A table keeps its own statements (`CREATE TABLE`, its `ALTER TABLE`s and
+  its renames, including column renames and `SET SCHEMA`) as written and in
+  order, because PostgreSQL names a table's constraints, indexes and sequences
+  after the table and column names they had at creation. Every other
+  statement - indexes, foreign keys from other tables, views, policies,
+  triggers, comments, data - names the table and its columns as they end up
+  and runs after them. An index created without a name gets the name
+  PostgreSQL gave it; a view keeps its column names (`new AS old`, `*`
+  spelled out).
+- Schemas are objects: the baseline creates them in a `=== SCHEMAS ===`
+  section after the roles (with `IF NOT EXISTS` and `AUTHORIZATION` as
+  written). A schema the history creates and drops - `DROP SCHEMA ... CASCADE`,
+  or once empty - leaves nothing in the baseline, contents included; one
+  created again starts clean. Dropping or renaming a schema the history did
+  not create (`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) is
+  replayed at the start of that section.
+
+Text PostgreSQL does not rewrite either - `DO` blocks, function bodies written
+as strings - is left as it is; when it names an object by a name it later
+gave up, a `Renames and schemas:` warning says so, as it does for anything
+else the rewrite cannot carry (a `NATURAL` join or `USING` list over a renamed
+column, a field of a renamed composite attribute, a statement that stays but
+uses an object `DROP SCHEMA ... CASCADE` removes, a renamed range type).
+
 ### Privileges, ownership and roles
 
 `GRANT`/`REVOKE`, ownership changes (`ALTER ... OWNER TO`) and
