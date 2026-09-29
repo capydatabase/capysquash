@@ -8,8 +8,12 @@ import (
 )
 
 type Config struct {
-	SafetyLevel            string                   `json:"safety_level"`
-	ProdDBDSN              string                   `json:"prod_db_dsn"`
+	SafetyLevel string `json:"safety_level"`
+	ProdDBDSN   string `json:"prod_db_dsn"`
+	// ValidationDSN is an empty, disposable database the paranoid level
+	// applies the squashed baseline to, so its catalog can be compared with
+	// production's. Defaults to CAPYSQUASH_VALIDATION_DSN.
+	ValidationDSN          string                   `json:"validation_dsn,omitempty"`
 	Output                 OutputConfig             `json:"output"`
 	Rules                  RulesConfig              `json:"rules"`
 	ExcludePatterns        []string                 `json:"exclude_patterns"`
@@ -164,10 +168,16 @@ type ValidationConfig struct {
 	Verbose                  bool   `json:"verbose"`                    // Show detailed validation output (default: true)
 }
 
+// ValidationDSNEnv names the environment variable holding the validation
+// database connection string (the same one validate-external reads with
+// --dsn-env CAPYSQUASH_VALIDATION_DSN).
+const ValidationDSNEnv = "CAPYSQUASH_VALIDATION_DSN"
+
 func DefaultConfig() *Config {
 	return &Config{
-		SafetyLevel: "standard",
-		ProdDBDSN:   os.Getenv("PROD_DB_DSN"), // Default to environment variable
+		SafetyLevel:   "standard",
+		ProdDBDSN:     os.Getenv("PROD_DB_DSN"), // Default to environment variable
+		ValidationDSN: os.Getenv(ValidationDSNEnv),
 		Output: OutputConfig{
 			Format:                   "organized",
 			PreserveComments:         true,
@@ -287,6 +297,9 @@ func mergeConfigs(loaded, defaults *Config) *Config {
 	}
 	if result.ProdDBDSN == "" {
 		result.ProdDBDSN = defaults.ProdDBDSN
+	}
+	if result.ValidationDSN == "" {
+		result.ValidationDSN = defaults.ValidationDSN
 	}
 
 	// Merge nested struct fields
@@ -496,6 +509,9 @@ func LoadConfig(configPath string) (*Config, error) {
 		// persisting them to disk.
 		if envDSN := os.Getenv("PROD_DB_DSN"); envDSN != "" {
 			cfg.ProdDBDSN = envDSN
+		}
+		if envDSN := os.Getenv(ValidationDSNEnv); envDSN != "" {
+			cfg.ValidationDSN = envDSN
 		}
 
 		// Validate config values

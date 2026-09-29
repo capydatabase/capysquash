@@ -1,3 +1,12 @@
+-- The metadata loader reads pg_catalog directly and renders every definition
+-- with PostgreSQL's own canonical functions (format_type, pg_get_expr,
+-- pg_get_constraintdef, pg_get_indexdef, pg_get_viewdef, pg_get_functiondef,
+-- pg_get_triggerdef), so two databases built by the same server major version
+-- can be compared structurally. information_schema is avoided: it hides
+-- objects the connecting role has no privileges on. Objects that belong to an
+-- extension (pg_depend deptype 'e') are skipped; extensions are compared by
+-- name and version instead.
+
 -- name: GetPostgresVersion :one
 SELECT version() AS version;
 
@@ -5,12 +14,16 @@ SELECT version() AS version;
 SELECT current_setting('search_path') AS search_path;
 
 -- name: ListUserSchemas :many
-SELECT schema_name::text AS schema_name
-FROM information_schema.schemata
-WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-  AND schema_name NOT LIKE 'pg_temp_%'
-  AND schema_name NOT LIKE 'pg_toast_%'
-ORDER BY schema_name;
+SELECT n.nspname::text AS schema_name
+FROM pg_namespace n
+WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+  AND n.nspname NOT LIKE 'pg_temp_%'
+  AND n.nspname NOT LIKE 'pg_toast_%'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e'
+  )
+ORDER BY n.nspname;
 
 -- name: ListExtensions :many
 SELECT
@@ -32,69 +45,111 @@ FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = sqlc.arg(schema_name)::text
   AND c.relkind IN ('r', 'p')
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
 ORDER BY c.relname;
 
 -- name: ListColumnsForTable :many
 SELECT
-  c.column_name::text AS column_name,
-  c.data_type::text AS data_type,
-  (c.is_nullable = 'YES') AS is_nullable,
-  COALESCE(c.column_default, '')::text AS column_default,
-  (c.is_generated = 'ALWAYS') AS is_generated,
-  COALESCE(c.generation_expression, '')::text AS generation_expression,
-  (c.is_identity = 'YES') AS is_identity,
-  COALESCE(c.identity_generation, '')::text AS identity_generation,
-  COALESCE(c.collation_name, '')::text AS collation_name,
+  a.attname::text AS column_name,
+  format_type(a.atttypid, a.atttypmod)::text AS data_type,
+  (NOT a.attnotnull)::boolean AS is_nullable,
   COALESCE(
-    col_description(
-      (quote_ident(sqlc.arg(schema_name)::text) || '.' || quote_ident(sqlc.arg(table_name)::text))::regclass,
-      c.ordinal_position
-    ),
+    CASE WHEN a.attgenerated = '' THEN pg_get_expr(ad.adbin, ad.adrelid, true) END,
     ''
-  )::text AS column_comment
-FROM information_schema.columns c
-WHERE c.table_schema = sqlc.arg(schema_name)::text
-  AND c.table_name = sqlc.arg(table_name)::text
-ORDER BY c.ordinal_position;
+  )::text AS column_default,
+  (a.attgenerated <> '')::boolean AS is_generated,
+  COALESCE(
+    CASE WHEN a.attgenerated <> '' THEN pg_get_expr(ad.adbin, ad.adrelid, true) END,
+    ''
+  )::text AS generation_expression,
+  (a.attidentity <> '')::boolean AS is_identity,
+  CASE a.attidentity
+    WHEN 'a' THEN 'ALWAYS'
+    WHEN 'd' THEN 'BY DEFAULT'
+    ELSE ''
+  END::text AS identity_generation,
+  CASE WHEN a.attcollation <> t.typcollation
+    THEN a.attcollation::regcollation::text
+    ELSE ''
+  END::text AS collation_name,
+  COALESCE(col_description(a.attrelid, a.attnum), '')::text AS column_comment
+FROM pg_attribute a
+JOIN pg_class c ON c.oid = a.attrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_type t ON t.oid = a.atttypid
+LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+WHERE n.nspname = sqlc.arg(schema_name)::text
+  AND c.relname = sqlc.arg(table_name)::text
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+ORDER BY a.attnum;
 
 -- name: ListConstraintsForTable :many
+-- NOT NULL constraints (contype 'n', catalogued since PostgreSQL 18) are
+-- skipped: nullability is compared as a column property.
 SELECT
-  tc.constraint_name::text AS constraint_name,
-  tc.constraint_type::text AS constraint_type,
+  con.conname::text AS constraint_name,
+  CASE con.contype
+    WHEN 'p' THEN 'PRIMARY KEY'
+    WHEN 'f' THEN 'FOREIGN KEY'
+    WHEN 'u' THEN 'UNIQUE'
+    WHEN 'c' THEN 'CHECK'
+    WHEN 'x' THEN 'EXCLUDE'
+    WHEN 't' THEN 'TRIGGER'
+    ELSE 'OTHER'
+  END::text AS constraint_type,
   COALESCE(
-    array_agg(DISTINCT kcu.column_name ORDER BY kcu.ordinal_position)
-      FILTER (WHERE kcu.column_name IS NOT NULL),
+    (SELECT array_agg(a.attname::text ORDER BY array_position(con.conkey, a.attnum))
+     FROM pg_attribute a
+     WHERE a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey)),
     ARRAY[]::text[]
   )::text[] AS columns,
-  COALESCE(MAX(ccu.table_name), '')::text AS ref_table,
   COALESCE(
-    array_agg(DISTINCT ccu.column_name ORDER BY ccu.column_name)
-      FILTER (WHERE ccu.column_name IS NOT NULL),
+    (SELECT fn.nspname || '.' || fc.relname
+     FROM pg_class fc
+     JOIN pg_namespace fn ON fn.oid = fc.relnamespace
+     WHERE fc.oid = con.confrelid),
+    ''
+  )::text AS ref_table,
+  COALESCE(
+    (SELECT array_agg(a.attname::text ORDER BY array_position(con.confkey, a.attnum))
+     FROM pg_attribute a
+     WHERE a.attrelid = con.confrelid AND a.attnum = ANY(con.confkey)),
     ARRAY[]::text[]
   )::text[] AS ref_columns,
-  COALESCE(MAX(rc.delete_rule), '')::text AS on_delete,
-  COALESCE(MAX(rc.update_rule), '')::text AS on_update,
-  COALESCE(bool_or(pgc.condeferrable), false)::boolean AS is_deferrable,
-  COALESCE(bool_or(pgc.condeferred), false)::boolean AS initially_deferred,
-  COALESCE(MAX(pg_get_constraintdef(pgc.oid)), '')::text AS check_expr
-FROM information_schema.table_constraints tc
-LEFT JOIN information_schema.key_column_usage kcu
-  ON tc.constraint_name = kcu.constraint_name
-  AND tc.table_schema = kcu.table_schema
-  AND tc.table_name = kcu.table_name
-LEFT JOIN information_schema.constraint_column_usage ccu
-  ON tc.constraint_name = ccu.constraint_name
-  AND tc.table_schema = ccu.constraint_schema
-LEFT JOIN information_schema.referential_constraints rc
-  ON tc.constraint_name = rc.constraint_name
-  AND tc.table_schema = rc.constraint_schema
-LEFT JOIN pg_constraint pgc
-  ON pgc.conname = tc.constraint_name
-  AND pgc.connamespace = (SELECT oid FROM pg_namespace WHERE nspname = tc.table_schema)
-WHERE tc.table_schema = sqlc.arg(schema_name)::text
-  AND tc.table_name = sqlc.arg(table_name)::text
-GROUP BY tc.constraint_name, tc.constraint_type
-ORDER BY tc.constraint_name;
+  CASE con.confdeltype
+    WHEN 'a' THEN 'NO ACTION'
+    WHEN 'r' THEN 'RESTRICT'
+    WHEN 'c' THEN 'CASCADE'
+    WHEN 'n' THEN 'SET NULL'
+    WHEN 'd' THEN 'SET DEFAULT'
+    ELSE ''
+  END::text AS on_delete,
+  CASE con.confupdtype
+    WHEN 'a' THEN 'NO ACTION'
+    WHEN 'r' THEN 'RESTRICT'
+    WHEN 'c' THEN 'CASCADE'
+    WHEN 'n' THEN 'SET NULL'
+    WHEN 'd' THEN 'SET DEFAULT'
+    ELSE ''
+  END::text AS on_update,
+  con.condeferrable::boolean AS is_deferrable,
+  con.condeferred::boolean AS initially_deferred,
+  COALESCE(
+    CASE WHEN con.contype = 'c' THEN pg_get_expr(con.conbin, con.conrelid, true) END,
+    ''
+  )::text AS check_expr,
+  pg_get_constraintdef(con.oid, true)::text AS definition
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = sqlc.arg(schema_name)::text
+  AND c.relname = sqlc.arg(table_name)::text
+  AND con.contype <> 'n'
+ORDER BY con.conname;
 
 -- name: ListIndexesForTable :many
 SELECT
@@ -142,8 +197,10 @@ SELECT
     ], NULL),
     ARRAY[]::text[]
   )::text[] AS events,
-  COALESCE(pg_get_expr(t.tgqual, t.tgrelid), '')::text AS condition,
-  (t.tgenabled = 'O') AS is_enabled
+  -- pg_get_expr cannot deparse a WHEN clause that references both OLD and NEW.
+  COALESCE(substring(pg_get_triggerdef(t.oid, true) FROM ' WHEN \((.+)\) EXECUTE '), '')::text AS condition,
+  (t.tgenabled = 'O') AS is_enabled,
+  pg_get_triggerdef(t.oid, true)::text AS definition
 FROM pg_trigger t
 JOIN pg_class c ON c.oid = t.tgrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -154,6 +211,7 @@ WHERE n.nspname = sqlc.arg(schema_name)::text
 ORDER BY t.tgname;
 
 -- name: ListPoliciesForTable :many
+-- polroles holds 0 for PUBLIC, which has no pg_roles row.
 SELECT
   pol.polname::text AS policy_name,
   CASE pol.polcmd
@@ -165,7 +223,10 @@ SELECT
   END::text AS command,
   pol.polpermissive AS permissive,
   COALESCE(
-    array_agg(r.rolname ORDER BY r.rolname) FILTER (WHERE r.rolname IS NOT NULL),
+    (SELECT array_agg(
+       CASE WHEN r.role_oid = 0 THEN 'public' ELSE pg_get_userbyid(r.role_oid)::text END
+       ORDER BY 1)
+     FROM unnest(pol.polroles) AS r(role_oid)),
     ARRAY[]::text[]
   )::text[] AS roles,
   COALESCE(pg_get_expr(pol.polqual, pol.polrelid), '')::text AS using_expr,
@@ -173,10 +234,8 @@ SELECT
 FROM pg_policy pol
 JOIN pg_class c ON c.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
-LEFT JOIN pg_roles r ON r.oid = ANY(pol.polroles)
 WHERE n.nspname = sqlc.arg(schema_name)::text
   AND c.relname = sqlc.arg(table_name)::text
-GROUP BY pol.polname, pol.polcmd, pol.polpermissive, pol.polrelid, pol.polqual, pol.polwithcheck
 ORDER BY pol.polname;
 
 -- name: GetTableRowSecurity :one
@@ -189,35 +248,43 @@ LIMIT 1;
 
 -- name: ListViewsForSchema :many
 SELECT
-  v.table_name::text AS view_name,
-  COALESCE(v.view_definition, '')::text AS definition,
-  COALESCE(
-    obj_description((quote_ident(sqlc.arg(schema_name)::text) || '.' || quote_ident(v.table_name))::regclass),
-    ''
-  )::text AS comment
-FROM information_schema.views v
-WHERE v.table_schema = sqlc.arg(schema_name)::text
-ORDER BY v.table_name;
+  c.relname::text AS view_name,
+  pg_get_viewdef(c.oid, true)::text AS definition,
+  COALESCE(obj_description(c.oid, 'pg_class'), '')::text AS comment
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = sqlc.arg(schema_name)::text
+  AND c.relkind = 'v'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
+ORDER BY c.relname;
 
 -- name: ListMaterializedViewsForSchema :many
 SELECT
-  m.matviewname::text AS matview_name,
-  COALESCE(m.definition, '')::text AS definition,
-  m.ispopulated AS is_populated,
-  COALESCE(
-    obj_description((quote_ident(sqlc.arg(schema_name)::text) || '.' || quote_ident(m.matviewname))::regclass),
-    ''
-  )::text AS comment
-FROM pg_matviews m
-WHERE m.schemaname = sqlc.arg(schema_name)::text
-ORDER BY m.matviewname;
+  c.relname::text AS matview_name,
+  pg_get_viewdef(c.oid, true)::text AS definition,
+  c.relispopulated AS is_populated,
+  COALESCE(obj_description(c.oid, 'pg_class'), '')::text AS comment
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = sqlc.arg(schema_name)::text
+  AND c.relkind = 'm'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
+ORDER BY c.relname;
 
 -- name: ListFunctionsForSchema :many
+-- Functions, procedures and window functions; aggregates are skipped because
+-- pg_get_functiondef rejects them.
 SELECT
   p.proname::text AS function_name,
   pg_get_function_identity_arguments(p.oid)::text AS signature,
   l.lanname::text AS language,
-  pg_get_function_result(p.oid)::text AS return_type,
+  COALESCE(pg_get_function_result(p.oid), '')::text AS return_type,
   pg_get_functiondef(p.oid)::text AS body,
   CASE p.provolatile
     WHEN 'i' THEN 'IMMUTABLE'
@@ -234,10 +301,16 @@ FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
 JOIN pg_language l ON l.oid = p.prolang
 WHERE n.nspname = sqlc.arg(schema_name)::text
-  AND p.prokind = 'f'
-ORDER BY p.proname, p.oid;
+  AND p.prokind IN ('f', 'p', 'w')
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+  )
+ORDER BY p.proname, pg_get_function_identity_arguments(p.oid);
 
 -- name: ListSequencesForSchema :many
+-- owned_by covers both OWNED BY (deptype 'a') and identity columns (deptype
+-- 'i'), rendered as schema.table.column independent of search_path.
 SELECT
   c.relname::text AS sequence_name,
   format_type(s.seqtypid, NULL)::text AS data_type,
@@ -248,20 +321,32 @@ SELECT
   s.seqcache::bigint AS cache_size,
   s.seqcycle AS is_cycle,
   COALESCE(
-    (SELECT attrelid::regclass::text || '.' || attname
-     FROM pg_attribute
-     WHERE attrelid = d.refobjid AND attnum = d.refobjsubid),
+    (SELECT dn.nspname || '.' || dc.relname || '.' || da.attname
+     FROM pg_depend d
+     JOIN pg_class dc ON dc.oid = d.refobjid
+     JOIN pg_namespace dn ON dn.oid = dc.relnamespace
+     JOIN pg_attribute da ON da.attrelid = d.refobjid AND da.attnum = d.refobjsubid
+     WHERE d.classid = 'pg_class'::regclass
+       AND d.objid = c.oid
+       AND d.refclassid = 'pg_class'::regclass
+       AND d.deptype IN ('a', 'i')
+     LIMIT 1),
     ''
   )::text AS owned_by
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_sequence s ON s.seqrelid = c.oid
-LEFT JOIN pg_depend d ON d.objid = c.oid AND d.deptype = 'a'
 WHERE n.nspname = sqlc.arg(schema_name)::text
   AND c.relkind = 'S'
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
 ORDER BY c.relname;
 
 -- name: ListTypesForSchema :many
+-- Composite types are limited to standalone ones (CREATE TYPE ... AS); every
+-- table also has a row type that is compared through the table itself.
 SELECT
   t.typname::text AS type_name,
   CASE t.typtype
@@ -272,25 +357,55 @@ SELECT
     ELSE 'OTHER'
   END::text AS type_kind,
   COALESCE(
-    (SELECT array_agg(enumlabel ORDER BY enumsortorder)
-     FROM pg_enum
-     WHERE enumtypid = t.oid),
+    (SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder)
+     FROM pg_enum e
+     WHERE e.enumtypid = t.oid),
     ARRAY[]::text[]
   )::text[] AS enum_elements,
+  COALESCE(
+    CASE t.typtype
+      WHEN 'd' THEN
+        format_type(t.typbasetype, t.typtypmod)
+        || CASE WHEN t.typnotnull THEN ' NOT NULL' ELSE '' END
+        || COALESCE(' DEFAULT ' || pg_get_expr(t.typdefaultbin, 0, true), '')
+        || COALESCE(
+          (SELECT string_agg(' CONSTRAINT ' || quote_ident(con.conname) || ' ' || pg_get_constraintdef(con.oid, true), '' ORDER BY con.conname)
+           FROM pg_constraint con
+           WHERE con.contypid = t.oid AND con.contype <> 'n'),
+          ''
+        )
+      WHEN 'c' THEN
+        (SELECT string_agg(
+           quote_ident(a.attname) || ' ' || format_type(a.atttypid, a.atttypmod)
+           || CASE WHEN a.attcollation <> at.typcollation
+                THEN ' COLLATE ' || a.attcollation::regcollation::text
+                ELSE '' END,
+           ', ' ORDER BY a.attnum)
+         FROM pg_attribute a
+         JOIN pg_type at ON at.oid = a.atttypid
+         WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped)
+      WHEN 'r' THEN
+        (SELECT 'SUBTYPE ' || format_type(r.rngsubtype, NULL)
+         FROM pg_range r
+         WHERE r.rngtypid = t.oid)
+    END,
+    ''
+  )::text AS definition,
   COALESCE(obj_description(t.oid, 'pg_type'), '')::text AS comment
 FROM pg_type t
 JOIN pg_namespace n ON n.oid = t.typnamespace
 WHERE n.nspname = sqlc.arg(schema_name)::text
-  AND t.typtype IN ('e', 'c', 'd', 'r')
+  AND (
+    t.typtype IN ('e', 'd', 'r')
+    OR (t.typtype = 'c' AND EXISTS (
+      SELECT 1 FROM pg_class tc WHERE tc.oid = t.typrelid AND tc.relkind = 'c'
+    ))
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e'
+  )
 ORDER BY t.typname;
-
--- name: GetTypeDefinition :one
-SELECT COALESCE(pg_catalog.format_type(t.oid, NULL), '')::text AS definition
-FROM pg_type t
-JOIN pg_namespace n ON n.oid = t.typnamespace
-WHERE t.typname = sqlc.arg(type_name)::text
-  AND n.nspname = sqlc.arg(schema_name)::text
-LIMIT 1;
 
 -- name: ListSignatureExtensions :many
 SELECT

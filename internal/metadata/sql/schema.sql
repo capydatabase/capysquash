@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS pg_catalog.pg_class (
 	relnamespace bigint,
 	relkind text,
 	relam bigint,
-	relrowsecurity boolean
+	relrowsecurity boolean,
+	relispopulated boolean
 );
 
 CREATE TABLE IF NOT EXISTS pg_catalog.pg_index (
@@ -111,7 +112,10 @@ CREATE TABLE IF NOT EXISTS pg_catalog.pg_attribute (
 	atttypid bigint,
 	atttypmod integer,
 	attnotnull boolean,
-	attisdropped boolean
+	attisdropped boolean,
+	attgenerated text,
+	attidentity text,
+	attcollation bigint
 );
 
 CREATE TABLE IF NOT EXISTS pg_catalog.pg_trigger (
@@ -178,14 +182,22 @@ CREATE TABLE IF NOT EXISTS pg_catalog.pg_depend (
 	objid bigint,
 	deptype text,
 	refobjid bigint,
-	refobjsubid integer
+	refobjsubid integer,
+	classid bigint,
+	refclassid bigint
 );
 
 CREATE TABLE IF NOT EXISTS pg_catalog.pg_type (
 	oid bigint,
 	typname text,
 	typnamespace bigint,
-	typtype text
+	typtype text,
+	typcollation bigint,
+	typbasetype bigint,
+	typtypmod integer,
+	typnotnull boolean,
+	typdefaultbin text,
+	typrelid bigint
 );
 
 CREATE TABLE IF NOT EXISTS pg_catalog.pg_enum (
@@ -206,7 +218,15 @@ CREATE TABLE IF NOT EXISTS pg_catalog.pg_constraint (
 	connamespace bigint,
 	condeferrable boolean,
 	condeferred boolean,
-	conrelid bigint
+	conrelid bigint,
+	contype text,
+	conkey integer[],
+	confrelid bigint,
+	confkey integer[],
+	confdeltype text,
+	confupdtype text,
+	conbin text,
+	contypid bigint
 );
 
 CREATE TABLE IF NOT EXISTS pg_catalog.pg_indexes (
@@ -214,6 +234,11 @@ CREATE TABLE IF NOT EXISTS pg_catalog.pg_indexes (
 	tablename text,
 	indexname text,
 	indexdef text
+);
+
+CREATE TABLE IF NOT EXISTS pg_catalog.pg_range (
+	rngtypid bigint,
+	rngsubtype bigint
 );
 
 -- Unqualified aliases used by queries where PostgreSQL would normally resolve
@@ -232,7 +257,8 @@ CREATE TABLE IF NOT EXISTS pg_class (
 	relnamespace bigint,
 	relkind text,
 	relam bigint,
-	relrowsecurity boolean
+	relrowsecurity boolean,
+	relispopulated boolean
 );
 
 CREATE TABLE IF NOT EXISTS pg_constraint (
@@ -241,7 +267,15 @@ CREATE TABLE IF NOT EXISTS pg_constraint (
 	connamespace bigint,
 	condeferrable boolean,
 	condeferred boolean,
-	conrelid bigint
+	conrelid bigint,
+	contype text,
+	conkey integer[],
+	confrelid bigint,
+	confkey integer[],
+	confdeltype text,
+	confupdtype text,
+	conbin text,
+	contypid bigint
 );
 
 CREATE TABLE IF NOT EXISTS pg_index (
@@ -299,7 +333,10 @@ CREATE TABLE IF NOT EXISTS pg_attribute (
 	atttypid bigint,
 	atttypmod integer,
 	attnotnull boolean,
-	attisdropped boolean
+	attisdropped boolean,
+	attgenerated text,
+	attidentity text,
+	attcollation bigint
 );
 
 CREATE TABLE IF NOT EXISTS pg_enum (
@@ -312,7 +349,13 @@ CREATE TABLE IF NOT EXISTS pg_type (
 	oid bigint,
 	typname text,
 	typnamespace bigint,
-	typtype text
+	typtype text,
+	typcollation bigint,
+	typbasetype bigint,
+	typtypmod integer,
+	typnotnull boolean,
+	typdefaultbin text,
+	typrelid bigint
 );
 
 CREATE TABLE IF NOT EXISTS pg_namespace (
@@ -356,11 +399,18 @@ CREATE TABLE IF NOT EXISTS pg_depend (
 	objid bigint,
 	deptype text,
 	refobjid bigint,
-	refobjsubid integer
+	refobjsubid integer,
+	classid bigint,
+	refclassid bigint
 );
 
 CREATE TABLE IF NOT EXISTS pg_attrdef (
 	adrelid bigint,
 	adnum integer,
 	adbin text
+);
+
+CREATE TABLE IF NOT EXISTS pg_range (
+	rngtypid bigint,
+	rngsubtype bigint
 );

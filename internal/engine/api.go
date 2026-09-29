@@ -99,6 +99,11 @@ type Config struct {
 	// generation. When empty, the PROD_DB_DSN environment variable is used.
 	ProdDBDSN string
 
+	// ValidationDSN is the empty, disposable database the Paranoid safety
+	// level applies the squashed baseline to before comparing its catalog
+	// with production's. When empty, CAPYSQUASH_VALIDATION_DSN is used.
+	ValidationDSN string
+
 	// Version is the caller's tool version stamped into provenance metadata
 	// (SquashResult.ProvenanceInfo.Version / .squashmap.json). Callers should
 	// set it from their release metadata; empty falls back to "dev".
@@ -521,6 +526,9 @@ func convertConfig(config *Config) (*internal_config.Config, error) {
 	// internal_config.DefaultConfig() already applied.
 	if dsn := strings.TrimSpace(config.ProdDBDSN); dsn != "" {
 		internalCfg.ProdDBDSN = dsn
+	}
+	if dsn := strings.TrimSpace(config.ValidationDSN); dsn != "" {
+		internalCfg.ValidationDSN = dsn
 	}
 
 	// Map the public output format onto the internal format vocabulary
