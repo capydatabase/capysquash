@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `github.com/charmbracelet/ultraviolet` (indirect) moved to the 2026-09-22 pseudo-version
   `v0.0.0-20260922123528-4e49372c11f9`.
+- CI lint job pins golangci-lint v2.14.0 (was v2.13.2); it runs clean on the `go 1.27.1` module.
 
 ## [1.1.0] - 2026-09-26
 
