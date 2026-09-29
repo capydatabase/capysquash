@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/capydatabase/capysquash/internal/config"
 	"github.com/capydatabase/capysquash/internal/tracking"
@@ -132,9 +133,30 @@ func createDefaultConsolidation(lifecycle *tracking.ObjectLifecycle) *tracking.C
 		return nil
 	}
 
+	// No rule merged the history, so the ALTERs made after the final CREATE
+	// are replayed as written; the final state alone would lose them (a
+	// column added later, a default changed later).
+	statements := []types.Statement{*finalState}
+	sql := strings.TrimRight(strings.TrimSpace(finalState.SQL), ";") + ";"
+	lastCreate := -1
+	for i, event := range lifecycle.History {
+		if event.Operation == types.OpCreate {
+			lastCreate = i
+		}
+	}
+	if lastCreate >= 0 {
+		for _, event := range lifecycle.History[lastCreate+1:] {
+			if event.Operation != types.OpAlter || strings.TrimSpace(event.Statement.SQL) == "" {
+				continue
+			}
+			statements = append(statements, event.Statement)
+			sql += "\n\n" + strings.TrimRight(strings.TrimSpace(event.Statement.SQL), ";") + ";"
+		}
+	}
+
 	return &tracking.ConsolidationResult{
-		OriginalStatements: []types.Statement{*finalState},
-		ConsolidatedSQL:    finalState.SQL,
+		OriginalStatements: statements,
+		ConsolidatedSQL:    sql,
 		Optimizations:      []string{"preserved_as_is"},
 		RiskLevel:          tracking.RiskLevelLow,
 		Warnings:           []string{},

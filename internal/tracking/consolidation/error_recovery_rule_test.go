@@ -142,3 +142,22 @@ func TestValidateConsolidatedSQLLooksAtStatementsNotText(t *testing.T) {
 		}
 	}
 }
+
+// With no rule merging a table's history, the ALTERs after its final CREATE
+// are replayed; the final CREATE alone would drop the added column.
+func TestDefaultConsolidationReplaysAltersAfterTheFinalCreate(t *testing.T) {
+	lifecycle := twoStepTableLifecycle()
+	lifecycle.History = append(lifecycle.History, tracking.LifecycleEvent{
+		Operation: types.OpAlter,
+		Statement: types.Statement{SQL: "ALTER TABLE users ALTER COLUMN name SET DEFAULT 'x';", Operation: types.OpAlter, ObjectType: types.TypeTable},
+	})
+
+	result := createDefaultConsolidation(lifecycle)
+	want := "CREATE TABLE users (id int);\n\nALTER TABLE users ADD COLUMN name text;\n\nALTER TABLE users ALTER COLUMN name SET DEFAULT 'x';"
+	if result.ConsolidatedSQL != want {
+		t.Fatalf("ConsolidatedSQL = %q, want %q", result.ConsolidatedSQL, want)
+	}
+	if len(result.OriginalStatements) != 3 {
+		t.Fatalf("OriginalStatements = %d, want 3", len(result.OriginalStatements))
+	}
+}
