@@ -13,6 +13,7 @@ import (
 type MemoryManager struct {
 	maxMemoryBytes int64
 	currentMemory  int64
+	peakMemory     int64 // highest currentMemory ever observed
 	statementPool  *sync.Pool
 	builderPool    *sync.Pool
 	parseCache     *LRUCache[string, *types.Statement]
@@ -88,6 +89,7 @@ func (mm *MemoryManager) TrackMemoryUsage(size int64) bool {
 	}
 
 	mm.currentMemory += size
+	mm.recordPeak()
 
 	// Trigger GC if needed
 	if mm.currentMemory > mm.gcThreshold && time.Since(mm.lastGC) > 30*time.Second {
@@ -121,6 +123,14 @@ func (mm *MemoryManager) triggerGC() {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 	mm.currentMemory = int64(memStats.Alloc)
+	mm.recordPeak()
+}
+
+// recordPeak raises the peak to the current usage. Callers hold mm.mu.
+func (mm *MemoryManager) recordPeak() {
+	if mm.currentMemory > mm.peakMemory {
+		mm.peakMemory = mm.currentMemory
+	}
 }
 
 // GetMemoryStats returns current memory usage statistics
@@ -134,6 +144,7 @@ func (mm *MemoryManager) GetMemoryStats() MemoryStats {
 	return MemoryStats{
 		MaxMemoryBytes:     mm.maxMemoryBytes,
 		CurrentMemoryBytes: mm.currentMemory,
+		PeakMemoryBytes:    mm.peakMemory,
 		SystemMemoryBytes:  int64(memStats.Alloc),
 		CacheSize:          mm.parseCache.Size(),
 		CacheHitRate:       mm.parseCache.HitRate(),
@@ -144,6 +155,7 @@ func (mm *MemoryManager) GetMemoryStats() MemoryStats {
 type MemoryStats struct {
 	MaxMemoryBytes     int64   `json:"max_memory_bytes"`
 	CurrentMemoryBytes int64   `json:"current_memory_bytes"`
+	PeakMemoryBytes    int64   `json:"peak_memory_bytes"`
 	SystemMemoryBytes  int64   `json:"system_memory_bytes"`
 	CacheSize          int     `json:"cache_size"`
 	CacheHitRate       float64 `json:"cache_hit_rate"`

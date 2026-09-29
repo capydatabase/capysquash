@@ -17,6 +17,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/capydatabase/capysquash/internal/buildinfo"
 	"github.com/capydatabase/capysquash/internal/config"
 	engineapi "github.com/capydatabase/capysquash/internal/engine"
 	"github.com/capydatabase/capysquash/internal/errors"
@@ -60,6 +61,7 @@ var (
 	noValidate             bool
 	failOnDiff             bool
 	strictParse            bool
+	strictPreflight        bool
 	openReport             bool
 	customDockerImage      string
 	externalDSN            string
@@ -88,7 +90,7 @@ var (
 var rootCmd = &cobra.Command{
 	Use:     "capysquash",
 	Short:   "capysquash - Intelligent PostgreSQL migration consolidation",
-	Version: "1.0.0",
+	Version: buildinfo.Version(),
 	Long: `capysquash consolidates PostgreSQL migration files into clean,
 production-ready SQL while preserving data integrity, respecting dependencies,
 and validating safety at every step.`,
@@ -297,6 +299,8 @@ func init() {
 		"Exit non-zero when post-squash validation detects real schema differences (default true; pass --fail-on-diff=false to downgrade to a warning)")
 	squashCmd.Flags().BoolVar(&strictParse, "strict-parse", false,
 		"Fail if any migration file has partial parse errors")
+	squashCmd.Flags().BoolVar(&strictPreflight, "strict", false,
+		"Abort when pre-flight validation (the lint rules) reports any finding in the input migrations")
 	squashCmd.Flags().BoolVar(&openReport, "open-report", false,
 		"Open validation report in $EDITOR after validation")
 	squashCmd.Flags().StringVar(&customDockerImage, "docker-image", "",
@@ -395,7 +399,9 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 		).WithFile(configPath).WithInnerError(err).WithSuggestion("Run 'capysquash init-config' to generate a valid configuration file")
 	}
 
-	if !cmd.Flags().Changed("progress") {
+	// Config show_progress applies when --progress was not set, except under
+	// --quiet/--json, which keep stdout for the result alone.
+	if !cmd.Flags().Changed("progress") && !quietMode {
 		showProgress = cfg.Performance.ShowProgress
 	}
 
@@ -571,6 +577,9 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	if err := applySafetyOverride(cfg, safetyLevel); err != nil {
 		return err
 	}
+	if strictPreflight {
+		cfg.StaticValidation.Strict = true
+	}
 	if outputDir != "" {
 		cfg.Output.Directory = outputDir
 	} else if cfg.Output.Directory == "squashed" {
@@ -584,8 +593,9 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Config show_progress wins when --progress was not explicitly set.
-	if !cmd.Flags().Changed("progress") {
+	// Config show_progress wins when --progress was not explicitly set, except
+	// under --quiet/--json, which keep stdout for the result alone.
+	if !cmd.Flags().Changed("progress") && !quietMode && !squashJSON {
 		showProgress = cfg.Performance.ShowProgress
 	}
 

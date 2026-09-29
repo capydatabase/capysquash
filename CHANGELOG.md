@@ -17,14 +17,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `scripts/run-e2e.sh` runs the end-to-end suite (`go test ./tests/e2e/...`) from any directory
-  with a 30-minute timeout for the container-backed tests.
+- `scripts/run-e2e.sh` runs the end-to-end suite from any directory: it starts a throwaway
+  PostgreSQL in Docker, runs every test including the `integration`-tagged ones against it, then
+  squashes each fixture at the conservative, standard and aggressive levels and checks with
+  `validate-external` that the baseline builds the same catalog as the original history. Fixtures
+  whose original history PostgreSQL rejects are skipped with the failing statement named.
+- `squash --strict` (or `"static_validation": {"strict": true}`) aborts the squash when pre-flight
+  validation - the `lint` rules over the input migrations - reports any finding or cannot check a
+  migration. Without it the findings stay warnings.
+- `lint --fix` adds `NOT VALID` to `ADD CONSTRAINT ... CHECK/FOREIGN KEY` statements flagged by
+  `CSQ.SAFETY.CONSTRAINT_NOT_VALID` (validate the constraint later with `VALIDATE CONSTRAINT`).
+- `CSQ.HYGIENE.PREFER_BIGINT` also flags, and fixes, `ALTER TABLE ... ALTER COLUMN ... TYPE int`.
+- A `function_overloads` fixture.
+- The `paranoid` level checks the squashed baseline against production's catalog: it applies the
+  baseline to an empty validation database (`CAPYSQUASH_VALIDATION_DSN` or `validation_dsn`; never
+  production, which is only read, in a read-only transaction), loads both catalogs with the same
+  `pg_catalog` queries and fails on any difference in tables, columns (type, nullability, default,
+  generation, identity, collation, order), constraints, indexes, triggers, policies, views,
+  materialized views, function overloads, sequences, enums and other types of the schemas the
+  baseline creates. The validation database is claimed empty and reset afterwards. `paranoid`
+  without a validation database fails closed. It used to check only that tables, functions and
+  types of the same names existed.
 
 ### Changed
 
 - `github.com/charmbracelet/ultraviolet` (indirect) moved to the 2026-09-22 pseudo-version
   `v0.0.0-20260922123528-4e49372c11f9`.
 - CI lint job pins golangci-lint v2.14.0 (was v2.13.2); it runs clean on the `go 1.27.1` module.
+- CI's integration job runs the `integration`-tagged tests of every package, not only
+  `internal/validation`.
+- Consolidation-rule metadata and `--version` report the version the binary was built as. Rules
+  used to carry a hardcoded version; an unstamped build now reports the module version Go records
+  instead of `1.0.0`.
+- Statement line numbers (in parse errors and lint findings from the engine) point into the
+  original migration file; they used to count lines of a copy with the comments removed.
+- Database-backed validation replays the migrations in order inside a transaction that is always
+  rolled back, one savepoint per statement, and reports every statement PostgreSQL rejects.
+  Statements that cannot run in a transaction block (`CONCURRENTLY`, `VACUUM`, ...) are reported as
+  not validated. It used to `EXPLAIN` only `INSERT`/`UPDATE`/`DELETE`.
+- The production catalog is read from `pg_catalog` in one read-only, repeatable-read transaction
+  (definitions rendered with `format_type`, `pg_get_expr`, `pg_get_constraintdef`,
+  `pg_get_indexdef`, `pg_get_viewdef`, `pg_get_functiondef`, `pg_get_triggerdef`) instead of
+  `information_schema`, which hid objects the role could not access and dropped type modifiers.
+- The error-recovery rule wraps the consolidation rules of the safety level: a rule that fails no
+  longer drops straight to the engine's fallback; the object is recovered (conservatively below
+  aggressive) with the failure reported.
+
+### Removed
+
+- The internal index access-method rewriter (`optimizeIndexTypes`) and the placeholder
+  `FormatFunctionBody`, neither of which anything called: rewriting an access method or
+  reformatting a function body changes the schema a squash must reproduce.
+- The SQL transformer no longer renames `substr`, `length` and `position` calls (see Fixed).
+
+### Fixed
+
+- Overloaded functions are separate objects. Functions were tracked by name alone, so `f(integer)`
+  and `f(text)` collapsed into one: a later overload replaced an earlier one in the baseline,
+  `DROP FUNCTION f(text)` dropped every overload, and comments landed on the wrong one. Functions,
+  and `COMMENT ON`, `GRANT`/`REVOKE` and `DROP` of functions and procedures, are now keyed by the
+  normalized input-argument types (`int`, `int4` and `integer` agree; argument names, defaults,
+  `OUT`/`TABLE` columns and type modifiers are ignored, as in PostgreSQL).
+- `COMMENT ON FUNCTION f`, `GRANT ... ON FUNCTION f` and `DROP FUNCTION f` written without
+  arguments while `f` had one overload get that overload's argument types in the baseline, which
+  PostgreSQL would otherwise reject as ambiguous once a later migration adds an overload.
+- The SQL transformer reports each `COMMENT ON FUNCTION` in the output that PostgreSQL would reject
+  (a signature matching no created overload, or no arguments on an overloaded name); its check was
+  a placeholder. Transformation warnings now reach the squash warnings.
+- The SQL transformer rewrote `substr(`, `length(` and `position(` across the whole baseline,
+  including CHECK constraints, defaults and function bodies, so a squash failed its own catalog
+  comparison (`length` became `char_length`) and `position(a IN b)` became `strpos(a IN b)`, which
+  is not valid SQL.
+- The `capysquash:ignore` and `capysquash:no-merge` pragmas work on their own comment line.
+  Comment lines were stripped before statements were split, and statement *i* got the *i*-th
+  comment, so a pragma above a statement was never seen. Comments now attach by position: to the
+  statement they precede or sit inside, or to the statement ending on the same line
+  (`CREATE ...; -- capysquash:no-merge`).
+- An object whose history no rule merges - every table at the `paranoid` level - kept only its
+  final CREATE: `ALTER TABLE ... ADD COLUMN` and `SET DEFAULT` statements made after it were lost.
+  They are replayed as written.
+- The orphaned-function safety net removed a dropped overload's comment or grant together with the
+  section comment above it and left a stray `;`; it now removes exactly the statement.
+- `squash --json` printed "Processing N migrations..." ahead of the JSON document whenever the
+  config's `show_progress` was true (the default), so stdout did not parse; `--quiet` and `--json`
+  now win over the config.
+- A lint rule that errored hid the findings of every rule after it; all findings are returned with
+  the rule errors.
+- Validation levels were compared as strings, so `COMPREHENSIVE` skipped database validation and
+  `STANDARD` ran the comprehensive-only performance checks.
+- The memory statistics' peak usage was the current usage; the memory manager now keeps the
+  high-water mark.
+- The TUI goes back to the previous view: esc, `?` on the help screen and `v` on the validation
+  view used to return to the dashboard whatever view was open before. The status bar hint says
+  "ESC: Back".
+- While a TUI configuration field is being edited, `q`, `?` and `v` go to the field; `q` used to
+  quit the program mid-edit and `?`/`v` switched views. Ctrl+C still quits.
+- The TUI status bar is painted in its background colour across the full width; the gaps between
+  its segments had none.
+- Type-change analysis records the type a column changes from (from the earlier statements, or the
+  attached database) with data-loss and reversibility, instead of "unknown".
 
 ## [1.1.0] - 2026-09-26
 

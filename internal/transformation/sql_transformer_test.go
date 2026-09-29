@@ -1,6 +1,7 @@
 package transformation
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -32,18 +33,20 @@ func TestConvertDeleteToSelect(t *testing.T) {
 	}
 }
 
-func TestReplaceBareLengthFunction(t *testing.T) {
-	input := "SELECT length(name), char_length(name), character_length(name), my_length(name) FROM users"
-	got := replaceBareLengthFunction(input)
+// Modern-syntax transformation leaves function calls alone: renaming them
+// changes catalog definitions, and position(a IN b) -> strpos(a IN b) is not
+// even valid SQL.
+func TestTransformKeepsFunctionCallsVerbatim(t *testing.T) {
+	cfg := DefaultTransformationConfig()
+	tr := NewSQLTransformer(cfg)
+	sql := `CREATE TABLE users (name text CHECK (length(name) > 3), code text CHECK (position('x' IN code) = 0), tag text DEFAULT substr('abcdef', 1, 3));`
 
-	if !strings.Contains(got, "char_length(name)") {
-		t.Fatalf("expected length(name) rewrite, got: %s", got)
+	result, err := tr.Transform(context.Background(), sql)
+	if err != nil {
+		t.Fatalf("Transform: %v", err)
 	}
-	if strings.Contains(got, "char_char_length") {
-		t.Fatalf("unexpected double rewrite: %s", got)
-	}
-	if strings.Contains(got, "character_char_length") {
-		t.Fatalf("unexpected rewrite of character_length: %s", got)
+	if result.TransformedSQL != sql {
+		t.Fatalf("Transform changed function calls:\n%s", result.TransformedSQL)
 	}
 }
 
@@ -89,5 +92,31 @@ func TestWhereAndSelectHeuristics(t *testing.T) {
 	}
 	if isSelectStarFromSingleTable("SELECT * FROM users WHERE id = 1;") {
 		t.Fatal("expected select-star detector false with WHERE")
+	}
+}
+
+func TestFixCommentSyntaxReportsCommentsPostgreSQLWouldReject(t *testing.T) {
+	tr := NewSQLTransformer(nil)
+	sql := `CREATE FUNCTION public.f(a int) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
+CREATE FUNCTION f(a text) RETURNS int LANGUAGE sql AS $$ SELECT 2 $$;
+CREATE FUNCTION g() RETURNS int LANGUAGE sql AS $$ SELECT 3 $$;
+COMMENT ON FUNCTION f(integer) IS 'ok';
+COMMENT ON FUNCTION f(bigint) IS 'no such overload';
+COMMENT ON FUNCTION public.f IS 'ambiguous';
+COMMENT ON FUNCTION g IS 'unique, fine';
+COMMENT ON FUNCTION extensions.uuid_generate_v4() IS 'not created here, not checked';`
+
+	result := &TransformationResult{}
+	if got := tr.fixCommentSyntax(sql, result); got != sql {
+		t.Fatalf("fixCommentSyntax changed the SQL:\n%s", got)
+	}
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings = %q, want the bigint and the ambiguous comment", result.Warnings)
+	}
+	if !strings.Contains(result.Warnings[0], "public.f(bigint) matches no created overload ((integer), (text))") {
+		t.Errorf("first warning = %q", result.Warnings[0])
+	}
+	if !strings.Contains(result.Warnings[1], "public.f names no arguments but 2 overloads are created") {
+		t.Errorf("second warning = %q", result.Warnings[1])
 	}
 }

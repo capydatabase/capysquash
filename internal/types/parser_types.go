@@ -49,6 +49,13 @@ type Statement struct {
 	// Index specific fields
 	IndexHadExplicitAccessMethod bool // Whether CREATE INDEX had explicit USING clause
 
+	// FunctionSignature is the normalized input-argument signature of the
+	// function the statement creates, drops, comments on or grants on, such as
+	// "(integer,text)" or "()". It is "" when the statement does not name a
+	// function or names one without its arguments (DROP FUNCTION f); overloads
+	// are only told apart when it is set.
+	FunctionSignature string
+
 	// Statement metadata for transaction and lock analysis
 	Metadata StatementMetadata
 }

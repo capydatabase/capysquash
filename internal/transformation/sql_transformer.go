@@ -3,9 +3,11 @@ package transformation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/capydatabase/capysquash/internal/errors"
+	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/postprocessing"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
@@ -549,43 +551,6 @@ func hasLegacyJoinPredicate(sql string) bool {
 	return strings.Contains(leftToken, ".") && strings.Contains(rightToken, ".")
 }
 
-func hasLegacyFunctionNames(sql string) bool {
-	lower := strings.ToLower(sql)
-	return strings.Contains(lower, "substr(") || strings.Contains(lower, "length(") || strings.Contains(lower, "position(")
-}
-
-func replaceBareLengthFunction(sql string) string {
-	lower := strings.ToLower(sql)
-	needle := "length("
-
-	var builder strings.Builder
-	start := 0
-	for {
-		relIdx := strings.Index(lower[start:], needle)
-		if relIdx == -1 {
-			builder.WriteString(sql[start:])
-			break
-		}
-
-		idx := start + relIdx
-		builder.WriteString(sql[start:idx])
-
-		if idx > 0 {
-			prev := sql[idx-1]
-			if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
-				builder.WriteString(sql[idx : idx+len(needle)])
-				start = idx + len(needle)
-				continue
-			}
-		}
-
-		builder.WriteString("char_length(")
-		start = idx + len(needle)
-	}
-
-	return builder.String()
-}
-
 func hasSimpleWhereEquality(sql string) bool {
 	upper := strings.ToUpper(sql)
 	whereIdx := strings.Index(upper, "WHERE")
@@ -775,26 +740,10 @@ func (st *SQLTransformer) transformToModernSyntax(ctx context.Context, sql strin
 		result.Warnings = append(result.Warnings, "Consider converting old-style joins to ANSI join syntax")
 	}
 
-	// Convert old function names to modern equivalents
-	if hasLegacyFunctionNames(sql) {
-		modernSQL := strings.ReplaceAll(transformedSQL, "substr(", "substring(")
-
-		modernSQL = replaceBareLengthFunction(modernSQL)
-
-		modernSQL = strings.ReplaceAll(modernSQL, "position(", "strpos(")
-
-		if modernSQL != transformedSQL {
-			result.Transformations = append(result.Transformations, TransformationApplied{
-				Type:        ModernSyntax,
-				Description: "Updated function names to modern equivalents",
-				LineStart:   1,
-				LineEnd:     len(strings.Split(sql, "\n")),
-				Before:      "Old function names",
-				After:       "Modern function names",
-			})
-			transformedSQL = modernSQL
-		}
-	}
+	// Function calls are never renamed: substr/length/position are current
+	// PostgreSQL, a rename changes the definitions the squash must reproduce
+	// (CHECK constraints, defaults, view and function bodies), and position(a
+	// IN b) has no strpos spelling with the same arguments.
 
 	return transformedSQL, nil
 }
@@ -891,16 +840,75 @@ func (st *SQLTransformer) fixReturnNextWithOutParams(sql string, result *Transfo
 	})
 }
 
-// fixCommentSyntax fixes invalid COMMENT ON syntax
+// fixCommentSyntax checks every COMMENT ON FUNCTION/PROCEDURE against the
+// functions the same SQL creates and reports, as warnings, the comments
+// PostgreSQL would reject: a signature that matches none of the created
+// overloads ("function does not exist"), or a comment without arguments on a
+// name with several overloads ("function name is not unique"). Neither can
+// be repaired here - which overload was meant is only known from the
+// migration history, and the tracker already writes the arguments into
+// short-form comments while a name has one overload. Functions the SQL does
+// not create (extensions, other schemas) are not checked. The SQL is
+// returned unchanged.
 func (st *SQLTransformer) fixCommentSyntax(sql string, result *TransformationResult) string {
-	// Fix COMMENT ON FUNCTION with invalid signature
-	// Pattern: COMMENT ON FUNCTION func_name() IS '...';
-	// Sometimes the function signature might be incomplete or invalid
+	tree, err := pg_query.Parse(sql)
+	if err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("COMMENT ON FUNCTION check skipped: %v", err))
+		return sql
+	}
 
-	// For now, we'll just validate the syntax is correct
-	// More sophisticated fixes can be added as needed
+	overloads := make(map[string][]string) // qualified name -> signatures
+	for _, raw := range tree.GetStmts() {
+		create := raw.GetStmt().GetCreateFunctionStmt()
+		if create == nil {
+			continue
+		}
+		name := qualifiedRoutineName(create.GetFuncname())
+		overloads[name] = append(overloads[name], parser.FunctionSignatureFromParameters(create.GetParameters()))
+	}
+
+	for _, raw := range tree.GetStmts() {
+		comment := raw.GetStmt().GetCommentStmt()
+		if comment == nil {
+			continue
+		}
+		if comment.GetObjtype() != pg_query.ObjectType_OBJECT_FUNCTION && comment.GetObjtype() != pg_query.ObjectType_OBJECT_PROCEDURE {
+			continue
+		}
+		target := comment.GetObject().GetObjectWithArgs()
+		name := qualifiedRoutineName(target.GetObjname())
+		created, ok := overloads[name]
+		if !ok {
+			continue
+		}
+
+		signature := parser.FunctionSignatureFromArgs(target)
+		switch {
+		case signature == "" && len(created) > 1:
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"COMMENT ON FUNCTION %s names no arguments but %d overloads are created (%s); PostgreSQL will reject it as ambiguous",
+				name, len(created), strings.Join(created, ", ")))
+		case signature != "" && !slices.Contains(created, signature):
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"COMMENT ON FUNCTION %s%s matches no created overload (%s); PostgreSQL will reject it",
+				name, signature, strings.Join(created, ", ")))
+		}
+	}
 
 	return sql
+}
+
+// qualifiedRoutineName joins a parsed function name, defaulting the schema
+// to public, so "f" and "public.f" compare equal.
+func qualifiedRoutineName(parts []*pg_query.Node) string {
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		names = append(names, part.GetString_().GetSval())
+	}
+	if len(names) == 1 {
+		return "public." + names[0]
+	}
+	return strings.Join(names, ".")
 }
 
 // fixFunctionVolatilityMarkers checks for the presence of volatility markers in functions.

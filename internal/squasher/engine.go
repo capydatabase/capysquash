@@ -531,19 +531,21 @@ func NewSquasherRuleEngine(safetyLevel SafetyLevel, ruleOverrides map[string]boo
 	}
 
 	engine := consolidation.NewConsolidationRuleEngine()
-	for _, rule := range ladder {
-		engine.AddRule(rule)
-	}
 
-	// Add error recovery as the last rule to catch any failures from primary
-	// consolidation rules. Only Aggressive uses aggressive recovery; stricter
-	// levels (including Paranoid) always recover conservatively.
+	// Error recovery wraps the ladder: it runs the rules in order and recovers
+	// when one of them fails, instead of the failure aborting the object. Only
+	// Aggressive uses aggressive recovery; stricter levels (including
+	// Paranoid) always recover conservatively.
 	if includeErrorRecovery {
 		recoveryMode := "conservative"
 		if safetyLevel == Aggressive {
 			recoveryMode = "aggressive"
 		}
-		engine.AddRule(consolidation.NewErrorRecoveryRule(3, recoveryMode, true))
+		engine.AddRule(consolidation.NewErrorRecoveryRule(3, recoveryMode, true, ladder...))
+	} else {
+		for _, rule := range ladder {
+			engine.AddRule(rule)
+		}
 	}
 
 	return engine, nil
@@ -807,7 +809,14 @@ func (e *Engine) Squash(migrations map[int]string) (*SquashResult, error) {
 	if e.preFlightValidator != nil {
 		e.logger.Info("Running pre-flight validation on %d migrations...", len(migrations))
 		if err := e.runPreFlightValidation(ctx, migrations); err != nil {
-			// For now, we log warnings but don't abort unless strict mode is enabled (future)
+			if e.config.StaticValidation.Strict {
+				return nil, errors.NewError(
+					errors.ErrorCodeValidationFailed,
+					"pre-flight validation failed in strict mode",
+					errors.SeverityError,
+					errors.CategoryValidation,
+				).WithInnerError(err).WithSuggestion("Fix the reported migrations, suppress a finding with a -- capysquash-ignore: directive, or run without --strict")
+			}
 			e.logger.Warn("Pre-flight validation found issues: %v", err)
 			e.warnings = append(e.warnings, fmt.Sprintf("Pre-flight validation: %v", err))
 		}
@@ -972,6 +981,9 @@ func (e *Engine) Squash(migrations map[int]string) (*SquashResult, error) {
 			for _, tr := range transformResult.Transformations {
 				e.warnings = append(e.warnings, fmt.Sprintf("Transformation: %s", tr.Description))
 			}
+		}
+		for _, warning := range transformResult.Warnings {
+			e.warnings = append(e.warnings, fmt.Sprintf("Transformation warning: %s", warning))
 		}
 	}
 
@@ -2965,20 +2977,41 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 			continue
 		}
 
-		parts := strings.Split(key, "::")
-		if len(parts) == 0 {
-			continue
-		}
-
-		fullName := normalizeFunctionIdentifier(parts[0])
+		// The key is "<name><signature>::FUNCTION"; the signature is only
+		// missing for a function never created with one.
+		identity, _, _ := strings.Cut(key, "::")
+		name, signature, hasSignature := strings.Cut(identity, "(")
+		fullName := normalizeFunctionIdentifier(name)
 		if fullName == "" {
 			continue
 		}
 
 		aliveFunctions[fullName] = true
+		if hasSignature {
+			aliveFunctions[fullName+"("+signature] = true
+		}
 		if idx := strings.LastIndex(fullName, "."); idx >= 0 && idx+1 < len(fullName) {
 			aliveFunctions[fullName[idx+1:]] = true
 		}
+	}
+
+	// isAlive reports whether a COMMENT/GRANT target still exists: by exact
+	// overload when the statement names argument types, by name otherwise.
+	isAlive := func(obj *pg_query.Node) (string, bool) {
+		fn := normalizeFunctionIdentifier(extractFunctionNameFromObjectNode(obj))
+		if fn == "" {
+			return "", true
+		}
+		if signature := parser.FunctionSignatureFromArgs(obj.GetObjectWithArgs()); signature != "" {
+			return fn + signature, aliveFunctions[fn+signature]
+		}
+		if aliveFunctions[fn] {
+			return fn, true
+		}
+		if idx := strings.LastIndex(fn, "."); idx >= 0 && idx+1 < len(fn) && aliveFunctions[fn[idx+1:]] {
+			return fn, true
+		}
+		return fn, false
 	}
 
 	parseResult, err := pg_query.Parse(rawSQL)
@@ -2999,13 +3032,9 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 			continue
 		}
 
-		start := int(rawStmt.StmtLocation)
-		end := start + int(rawStmt.StmtLen)
-		if start < 0 || start >= len(rawSQL) {
+		start, end, ok := statementSpan(rawSQL, rawStmt)
+		if !ok {
 			continue
-		}
-		if end <= start || end > len(rawSQL) {
-			end = len(rawSQL)
 		}
 
 		node := rawStmt.Stmt.GetNode()
@@ -3016,11 +3045,7 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 		case *pg_query.Node_CommentStmt:
 			commentStmt := typed.CommentStmt
 			if commentStmt != nil && commentStmt.Objtype == pg_query.ObjectType_OBJECT_FUNCTION {
-				fn := normalizeFunctionIdentifier(extractFunctionNameFromObjectNode(commentStmt.Object))
-				if fn != "" && !aliveFunctions[fn] {
-					if idx := strings.LastIndex(fn, "."); idx >= 0 && idx+1 < len(fn) && aliveFunctions[fn[idx+1:]] {
-						break
-					}
+				if fn, alive := isAlive(commentStmt.Object); !alive {
 					shouldRemove = true
 					reason = fmt.Sprintf("orphaned COMMENT ON FUNCTION '%s'", fn)
 				}
@@ -3030,15 +3055,8 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 			grantStmt := typed.GrantStmt
 			if grantStmt != nil && grantStmt.Objtype == pg_query.ObjectType_OBJECT_FUNCTION {
 				for _, obj := range grantStmt.Objects {
-					fn := normalizeFunctionIdentifier(extractFunctionNameFromObjectNode(obj))
-					if fn == "" {
-						continue
-					}
-
-					if aliveFunctions[fn] {
-						continue
-					}
-					if idx := strings.LastIndex(fn, "."); idx >= 0 && idx+1 < len(fn) && aliveFunctions[fn[idx+1:]] {
+					fn, alive := isAlive(obj)
+					if alive {
 						continue
 					}
 
@@ -3098,6 +3116,41 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 	return rebuilt.String()
 }
 
+// statementSpan returns the byte range of rawStmt in sql from its first
+// token through its terminating semicolon. pg_query's statement location
+// starts right after the previous statement, so it would also cover the
+// comments in between (section headers), and its length excludes the ";".
+func statementSpan(sql string, rawStmt *pg_query.RawStmt) (start, end int, ok bool) {
+	start = int(rawStmt.StmtLocation)
+	end = start + int(rawStmt.StmtLen)
+	if start < 0 || start >= len(sql) {
+		return 0, 0, false
+	}
+	if end <= start || end > len(sql) {
+		end = len(sql)
+	}
+
+	scan, err := pg_query.Scan(sql[start:end])
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, tok := range scan.GetTokens() {
+		if tok.GetToken() != pg_query.Token_SQL_COMMENT && tok.GetToken() != pg_query.Token_C_COMMENT {
+			start += int(tok.GetStart())
+			break
+		}
+	}
+
+	rest := end
+	for rest < len(sql) && (sql[rest] == ' ' || sql[rest] == '\t' || sql[rest] == '\n' || sql[rest] == '\r') {
+		rest++
+	}
+	if rest < len(sql) && sql[rest] == ';' {
+		end = rest + 1
+	}
+	return start, end, true
+}
+
 func extractFunctionNameFromObjectNode(node *pg_query.Node) string {
 	if node == nil {
 		return ""
@@ -3138,181 +3191,6 @@ func normalizeFunctionIdentifier(name string) string {
 	}
 
 	return strings.Join(segments, ".")
-}
-
-// optimizeIndexTypes uses column type information from the tracker to set appropriate index types
-// This replaces the broken regex-based "safety net" with proper AST-based type checking
-func (e *Engine) optimizeIndexTypes(sql string) string {
-	if e.tracker == nil {
-		e.logger.Info("[INDEX-OPT] Tracker not available, skipping index type optimization")
-		return sql
-	}
-
-	// Parse the consolidated SQL to find index statements
-	parseResult, err := pg_query.Parse(sql)
-	if err != nil {
-		e.logger.Warn("[INDEX-OPT] Failed to parse SQL for index optimization: %v", err)
-		return sql // Return unmodified on parse error
-	}
-
-	modified := false
-	optimizationCount := 0
-
-	// Iterate through all statements looking for CREATE INDEX
-	for _, stmt := range parseResult.Stmts {
-		if stmt.Stmt == nil {
-			continue
-		}
-
-		// Check if this is an IndexStmt
-		indexStmt := stmt.Stmt.GetIndexStmt()
-		if indexStmt == nil {
-			continue
-		}
-
-		// Extract table name
-		if indexStmt.Relation == nil {
-			continue
-		}
-
-		tableName := indexStmt.Relation.Relname
-		schemaName := indexStmt.Relation.Schemaname
-		if schemaName == "" {
-			schemaName = "public"
-		}
-		fullTableName := schemaName + "." + tableName
-
-		// Extract column names from index parameters
-		if len(indexStmt.IndexParams) == 0 {
-			continue
-		}
-
-		// For now, focus on single-column indexes
-		// Multi-column indexes need more complex handling
-		if len(indexStmt.IndexParams) > 1 {
-			e.logger.Debug("[INDEX-OPT] Skipping multi-column index on %s", fullTableName)
-			continue
-		}
-
-		// Get the column name from the first index parameter
-		indexParam := indexStmt.IndexParams[0]
-		if indexParam == nil {
-			continue
-		}
-
-		// Extract column name and check for operator class
-		var columnName string
-		var hasOperatorClass bool
-		indexElem := indexParam.GetIndexElem()
-		if indexElem != nil {
-			columnName = indexElem.Name
-			// If the index has an explicit operator class, don't modify it
-			// Operator classes are access-method specific (e.g., gin_trgm_ops for GIN)
-			if len(indexElem.Opclass) > 0 {
-				hasOperatorClass = true
-			}
-		}
-
-		if columnName == "" {
-			e.logger.Debug("[INDEX-OPT] Could not extract column name from index parameter")
-			continue
-		}
-
-		// Skip indexes with explicit operator classes - they're already optimized for their access method
-		if hasOperatorClass {
-			e.logger.Debug("[INDEX-OPT] Skipping %s.%s: has explicit operator class (already optimized)", fullTableName, columnName)
-			continue
-		}
-
-		// Get actual column type from tracker
-		// Prefer unqualified table name first because migrations commonly define tables
-		// without schema qualification (e.g., "profiles"), while index statements are often
-		// schema-qualified (e.g., "public.profiles"). Using unqualified metadata first avoids
-		// stale/mismatched type lookups across duplicated CREATE TABLE IF NOT EXISTS variants.
-		colInfo := e.tracker.GetColumnType(tableName, columnName)
-		if colInfo == nil {
-			// Fallback to schema-qualified name
-			colInfo = e.tracker.GetColumnType(fullTableName, columnName)
-		}
-
-		if colInfo == nil {
-			e.logger.Debug("[INDEX-OPT] No type info for %s.%s, keeping original access method", fullTableName, columnName)
-			continue
-		}
-
-		// Get current access method
-		currentMethod := indexStmt.AccessMethod
-		if currentMethod == "" {
-			currentMethod = "btree" // PostgreSQL default
-		}
-
-		// Determine appropriate access method based on actual column type
-		var newAccessMethod string
-		var reason string
-
-		if colInfo.IsArray {
-			// Arrays can use GIN for array operations (containment, overlap)
-			// Arrays CANNOT use GiST without operator class
-			// Keep current access method if it's gin (likely correct for array operations)
-			// Change to btree only if it was incorrectly set to gist
-			if currentMethod == "gist" {
-				newAccessMethod = "btree"
-				reason = "array type (fixed from gist)"
-			} else {
-				// Keep existing gin or btree - both are valid for arrays
-				e.logger.Debug("[INDEX-OPT] %s.%s: keeping %s for array type", fullTableName, columnName, currentMethod)
-				continue
-			}
-		} else if strings.Contains(strings.ToLower(colInfo.DataType), "tsvector") {
-			// tsvector MUST use gin for full-text search
-			if currentMethod != "gin" {
-				newAccessMethod = "gin"
-				reason = "tsvector type"
-			} else {
-				e.logger.Debug("[INDEX-OPT] %s.%s: %s already correct for tsvector", fullTableName, columnName, currentMethod)
-				continue
-			}
-		} else if colInfo.IsSpatial {
-			// Do NOT force-rewrite spatial indexes from btree -> gist automatically.
-			// The source migration may intentionally use btree (or another method), and
-			// forcing gist can produce invalid SQL when table schemas drift across legacy
-			// CREATE TABLE IF NOT EXISTS variants.
-			e.logger.Debug("[INDEX-OPT] %s.%s: keeping %s for spatial type (no forced rewrite)", fullTableName, columnName, currentMethod)
-			continue
-		} else {
-			// Regular types: keep current access method
-			// Don't change unless there's a specific reason
-			e.logger.Debug("[INDEX-OPT] %s.%s: keeping %s for regular type", fullTableName, columnName, currentMethod)
-			continue
-		}
-
-		// Update the access method if it differs
-		if currentMethod != newAccessMethod {
-			indexStmt.AccessMethod = newAccessMethod
-			modified = true
-			optimizationCount++
-			e.logger.Info("[INDEX-OPT] %s.%s (%s %s): %s → %s",
-				fullTableName, columnName, reason, colInfo.DataType,
-				currentMethod, newAccessMethod)
-		} else {
-			e.logger.Debug("[INDEX-OPT] %s.%s: %s already optimal",
-				fullTableName, columnName, currentMethod)
-		}
-	}
-
-	// If we modified anything, deparse back to SQL
-	if modified {
-		deparsedSQL, err := pg_query.Deparse(parseResult)
-		if err != nil {
-			e.logger.Warn("[INDEX-OPT] Failed to deparse modified AST: %v", err)
-			return sql // Return original on deparse error
-		}
-		e.logger.Info("[INDEX-OPT] Successfully optimized %d index type(s)", optimizationCount)
-		return deparsedSQL
-	}
-
-	e.logger.Info("[INDEX-OPT] No index optimizations needed - all access methods appropriate")
-	return sql
 }
 
 // validateAgainstDatabase validates the generated SQL against the production database
@@ -3477,7 +3355,7 @@ func (e *Engine) streamParseAndTrack(ctx context.Context, dir string) error {
 	e.mu.Lock()
 	e.stats.MigrationsProcessed = streamStats.MigrationsProcessed
 	e.stats.ObjectsTracked = streamStats.ObjectsTracked
-	e.stats.PeakMemoryUsage = e.memManager.GetMemoryStats().CurrentMemoryBytes
+	e.stats.PeakMemoryUsage = e.memManager.GetMemoryStats().PeakMemoryBytes
 	e.mu.Unlock()
 
 	return nil
@@ -3588,8 +3466,8 @@ func (e *Engine) GetStats() SquashStats {
 	// Update peak memory from memory manager if streaming is enabled
 	if e.enableStreaming && e.memManager != nil {
 		memStats := e.memManager.GetMemoryStats()
-		if memStats.CurrentMemoryBytes > stats.PeakMemoryUsage {
-			stats.PeakMemoryUsage = memStats.CurrentMemoryBytes
+		if memStats.PeakMemoryBytes > stats.PeakMemoryUsage {
+			stats.PeakMemoryUsage = memStats.PeakMemoryBytes
 		}
 	}
 

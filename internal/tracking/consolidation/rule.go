@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/capydatabase/capysquash/internal/config"
 	"github.com/capydatabase/capysquash/internal/tracking"
@@ -49,11 +50,22 @@ func (cre *ConsolidationRuleEngine) AddRule(rule ConsolidationRule) {
 	cre.rules = append(cre.rules, rule)
 }
 
-// Rules returns the explicitly ordered rules registered on this engine.
-// The returned slice is a copy; mutating it does not affect the engine.
+// ruleWrapper is a rule that runs other rules itself (ErrorRecoveryRule).
+type ruleWrapper interface {
+	Delegates() []ConsolidationRule
+}
+
+// Rules returns the effective, ordered rules of this engine: a wrapping rule
+// is listed right after the rules it runs. The returned slice is a copy;
+// mutating it does not affect the engine.
 func (cre *ConsolidationRuleEngine) Rules() []ConsolidationRule {
-	rules := make([]ConsolidationRule, len(cre.rules))
-	copy(rules, cre.rules)
+	var rules []ConsolidationRule
+	for _, rule := range cre.rules {
+		if wrapper, ok := rule.(ruleWrapper); ok {
+			rules = append(rules, wrapper.Delegates()...)
+		}
+		rules = append(rules, rule)
+	}
 	return rules
 }
 
@@ -121,9 +133,30 @@ func createDefaultConsolidation(lifecycle *tracking.ObjectLifecycle) *tracking.C
 		return nil
 	}
 
+	// No rule merged the history, so the ALTERs made after the final CREATE
+	// are replayed as written; the final state alone would lose them (a
+	// column added later, a default changed later).
+	statements := []types.Statement{*finalState}
+	sql := strings.TrimRight(strings.TrimSpace(finalState.SQL), ";") + ";"
+	lastCreate := -1
+	for i, event := range lifecycle.History {
+		if event.Operation == types.OpCreate {
+			lastCreate = i
+		}
+	}
+	if lastCreate >= 0 {
+		for _, event := range lifecycle.History[lastCreate+1:] {
+			if event.Operation != types.OpAlter || strings.TrimSpace(event.Statement.SQL) == "" {
+				continue
+			}
+			statements = append(statements, event.Statement)
+			sql += "\n\n" + strings.TrimRight(strings.TrimSpace(event.Statement.SQL), ";") + ";"
+		}
+	}
+
 	return &tracking.ConsolidationResult{
-		OriginalStatements: []types.Statement{*finalState},
-		ConsolidatedSQL:    finalState.SQL,
+		OriginalStatements: statements,
+		ConsolidatedSQL:    sql,
 		Optimizations:      []string{"preserved_as_is"},
 		RiskLevel:          tracking.RiskLevelLow,
 		Warnings:           []string{},
@@ -134,7 +167,7 @@ func createDefaultConsolidation(lifecycle *tracking.ObjectLifecycle) *tracking.C
 func (cre *ConsolidationRuleEngine) GetApplicableRules(lifecycle *tracking.ObjectLifecycle) []ConsolidationRule {
 	if len(cre.rules) > 0 {
 		var applicable []ConsolidationRule
-		for _, rule := range cre.rules {
+		for _, rule := range cre.Rules() {
 			if rule.CanApply(lifecycle) {
 				applicable = append(applicable, rule)
 			}

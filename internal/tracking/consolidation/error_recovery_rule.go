@@ -2,6 +2,7 @@ package consolidation
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/capydatabase/capysquash/internal/utils"
@@ -12,9 +13,13 @@ import (
 	"sync"
 
 	"github.com/capydatabase/capysquash/internal/errors"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
-// ErrorRecoveryRule provides enhanced error recovery and validation for consolidation failures
+// ErrorRecoveryRule runs the consolidation rules it wraps and recovers when
+// one of them fails: the first delegate that applies and produces a result
+// wins, and an error from a delegate (or an invalid result) is handled by the
+// configured recovery mode instead of aborting the object.
 type ErrorRecoveryRule struct {
 	MaxRetries     int
 	RecoveryMode   string // "conservative", "aggressive", "fallback"
@@ -22,17 +27,27 @@ type ErrorRecoveryRule struct {
 	LogFailures    bool
 	FailureMetrics map[string]int
 	mutex          sync.RWMutex
+	delegates      []ConsolidationRule
 }
 
-// NewErrorRecoveryRule creates a new error recovery rule with specified configuration
-func NewErrorRecoveryRule(maxRetries int, recoveryMode string, validateSQL bool) *ErrorRecoveryRule {
+// NewErrorRecoveryRule creates an error recovery rule that wraps delegates,
+// tried in order. With no delegates it consolidates every object to its
+// default form (see createDefaultConsolidation).
+func NewErrorRecoveryRule(maxRetries int, recoveryMode string, validateSQL bool, delegates ...ConsolidationRule) *ErrorRecoveryRule {
 	return &ErrorRecoveryRule{
 		MaxRetries:     maxRetries,
 		RecoveryMode:   recoveryMode,
 		ValidateSQL:    validateSQL,
 		LogFailures:    true,
 		FailureMetrics: make(map[string]int),
+		delegates:      slices.Clone(delegates),
 	}
+}
+
+// Delegates returns the rules this rule runs, in order. The returned slice
+// is a copy.
+func (rule *ErrorRecoveryRule) Delegates() []ConsolidationRule {
+	return slices.Clone(rule.delegates)
 }
 
 // CanApply returns true for all objects to provide universal error recovery
@@ -95,60 +110,48 @@ func (rule *ErrorRecoveryRule) Risk() tracking.RiskLevel {
 	return tracking.RiskLevelLow // Error recovery is inherently low risk
 }
 
-// attemptConsolidation tries to apply normal consolidation rules
+// attemptConsolidation runs the delegate rules in order: the first one that
+// applies and returns a result wins, and a delegate error is returned so
+// Apply can recover. When no delegate produces a result the object gets its
+// default consolidation (the original SQL for a single-version object, the
+// final state otherwise); a dropped object yields no result.
 func (rule *ErrorRecoveryRule) attemptConsolidation(lifecycle *tracking.ObjectLifecycle, engine ConsolidationEngine) (*tracking.ConsolidationResult, error) {
-	// This would delegate to other consolidation rules
-	// For now, return a basic result to allow testing of error recovery
 	if len(lifecycle.History) == 0 {
 		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no operations to consolidate", map[string]any{"object": lifecycle.Name})
 	}
 
-	// Try to create a basic consolidated statement
-	finalState := lifecycle.GetFinalState()
-	if finalState == nil {
-		// If the object was dropped (last op is drop), this is valid and not an error
-		if len(lifecycle.History) > 0 && lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
+	for _, delegate := range rule.delegates {
+		if !delegate.CanApply(lifecycle) {
+			continue
+		}
+		result, err := delegate.Apply(lifecycle, engine)
+		if err != nil {
+			return nil, fmt.Errorf("%T: %w", delegate, err)
+		}
+		if result != nil {
+			return result, nil
+		}
+	}
+
+	if lifecycle.GetFinalState() == nil {
+		// Dropped as the last operation: nothing to emit, which is not an error.
+		if lifecycle.History[len(lifecycle.History)-1].Operation == types.OpDrop {
 			return nil, nil
 		}
 		return nil, errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "no final state available for consolidation", map[string]any{"object": lifecycle.Name})
 	}
 
-	// DEBUG: Log SQL for cleanup_expired_memory_cards and current_clerk_org_id
-	if strings.Contains(strings.ToLower(lifecycle.Name), "cleanup_expired") || strings.Contains(strings.ToLower(lifecycle.Name), "current_clerk_org_id") {
-		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("%s finalState.SQL length=%d", lifecycle.Name, len(finalState.SQL))
-		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("  SQL preview (first 300): %s", strings.ReplaceAll(finalState.SQL[:min(300, len(finalState.SQL))], "\n", "\\n"))
-		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("  History count: %d", len(lifecycle.History))
-		for i, event := range lifecycle.History {
-			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("    Event %d: Op=%s, SQL length=%d, SQL preview: %s",
-				i, event.Operation, len(event.Statement.SQL),
-				strings.ReplaceAll(event.Statement.SQL[:min(100, len(event.Statement.SQL))], "\n", "\\n"))
-		}
+	result := createDefaultConsolidation(lifecycle)
+
+	// An index written without an access method must not gain "USING btree"
+	// from an AST round trip: spatial columns would then fail to index.
+	if lifecycle.Type == types.TypeIndex && !lifecycle.GetFinalState().IndexHadExplicitAccessMethod &&
+		strings.Contains(strings.ToUpper(result.ConsolidatedSQL), " USING BTREE") {
+		result.ConsolidatedSQL = stripErrorRecoveryUsingBtreeClause(result.ConsolidatedSQL)
+		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("Removed implicit USING btree from index %s", lifecycle.Name)
 	}
 
-	// For indexes without explicit access method, remove "USING btree" from SQL
-	// to prevent spatial index errors. pg_query may have added it during parsing.
-	consolidatedSQL := finalState.SQL
-	if lifecycle.Type == types.TypeIndex && !finalState.IndexHadExplicitAccessMethod {
-		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("INDEX %s: IndexHadExplicitAccessMethod=%v, checking for USING btree",
-			lifecycle.Name, finalState.IndexHadExplicitAccessMethod)
-		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("INDEX %s: SQL = %s", lifecycle.Name, consolidatedSQL)
-		// Check if SQL contains "USING btree" (case-insensitive)
-		if strings.Contains(strings.ToUpper(consolidatedSQL), " USING BTREE") {
-			consolidatedSQL = stripErrorRecoveryUsingBtreeClause(consolidatedSQL)
-			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("Removed implicit USING btree from index %s", lifecycle.Name)
-		} else {
-			utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY").Info("Index %s has no USING btree in SQL (length=%d)",
-				lifecycle.Name, len(consolidatedSQL))
-		}
-		utils.GetDefaultLogger().WithPrefix("ERROR-RECOVERY-DEBUG").Info("INDEX %s: After check, consolidated SQL = %s", lifecycle.Name, consolidatedSQL)
-	}
-
-	return &tracking.ConsolidationResult{
-		ConsolidatedSQL:    consolidatedSQL,
-		OriginalStatements: rule.extractStatements(lifecycle.History),
-		Optimizations:      []string{"error_recovery_applied"},
-		Warnings:           []string{},
-	}, nil
+	return result, nil
 }
 
 // attemptErrorRecovery tries various recovery strategies when consolidation fails
@@ -249,15 +252,26 @@ func (rule *ErrorRecoveryRule) validateConsolidatedSQL(result *tracking.Consolid
 		result.Warnings = append(result.Warnings, "Added missing semicolon")
 	}
 
-	// Check for dangerous patterns that might indicate consolidation errors
-	dangerousPatterns := []string{
-		"DROP DATABASE",
-		"DROP SCHEMA",
-		"TRUNCATE",
+	// Statements a consolidation must never produce: they destroy data and
+	// no schema object's history consolidates into them. Only top-level
+	// statements count - a function body mentioning TRUNCATE is fine.
+	tree, err := pg_query.Parse(sql)
+	if err != nil {
+		return errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "consolidated SQL does not parse", map[string]any{"error": err.Error()})
 	}
-
-	for _, pattern := range dangerousPatterns {
-		if strings.Contains(strings.ToUpper(sql), pattern) {
+	for _, raw := range tree.GetStmts() {
+		var pattern string
+		switch n := raw.GetStmt().GetNode().(type) {
+		case *pg_query.Node_DropdbStmt:
+			pattern = "DROP DATABASE"
+		case *pg_query.Node_TruncateStmt:
+			pattern = "TRUNCATE"
+		case *pg_query.Node_DropStmt:
+			if n.DropStmt.GetRemoveType() == pg_query.ObjectType_OBJECT_SCHEMA {
+				pattern = "DROP SCHEMA"
+			}
+		}
+		if pattern != "" {
 			return errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "potentially dangerous SQL detected", map[string]any{"pattern": pattern})
 		}
 	}

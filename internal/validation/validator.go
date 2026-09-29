@@ -6,6 +6,7 @@ package validation
 import (
 	"context"
 	"database/sql"
+	stderrors "errors"
 	"fmt"
 	"maps"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // ValidationLevel represents the level of validation to perform
@@ -38,6 +40,19 @@ const (
 	ValidationLevelThorough      ValidationLevel = "THOROUGH"
 	ValidationLevelComprehensive ValidationLevel = "COMPREHENSIVE"
 )
+
+// validationLevelRank orders the levels; the names do not sort by strength.
+var validationLevelRank = map[ValidationLevel]int{
+	ValidationLevelBasic:         0,
+	ValidationLevelStandard:      1,
+	ValidationLevelThorough:      2,
+	ValidationLevelComprehensive: 3,
+}
+
+// AtLeast reports whether l includes everything level min does.
+func (l ValidationLevel) AtLeast(min ValidationLevel) bool {
+	return validationLevelRank[l] >= validationLevelRank[min]
+}
 
 // ValidationApproach defines Docker-based validation strategies
 type ValidationApproach string
@@ -330,7 +345,7 @@ func (sv *SchemaValidator) ValidateMigrations(ctx context.Context, migrations []
 	}
 
 	// Phase 3: Database validation (if database connection available)
-	if sv.db != nil && sv.config.Level >= ValidationLevelThorough {
+	if sv.db != nil && sv.config.Level.AtLeast(ValidationLevelThorough) {
 		if sv.reporter != nil {
 			sv.reporter.StartPhase(performance.PhaseAnalysis, len(migrations))
 		}
@@ -341,7 +356,7 @@ func (sv *SchemaValidator) ValidateMigrations(ctx context.Context, migrations []
 	}
 
 	// Phase 4: Performance analysis (optional)
-	if sv.config.ValidatePerformance && sv.config.Level >= ValidationLevelComprehensive {
+	if sv.config.ValidatePerformance && sv.config.Level.AtLeast(ValidationLevelComprehensive) {
 		perfWarnings := sv.validatePerformance(ctx, migrations)
 		result.Warnings = append(result.Warnings, perfWarnings...)
 	}
@@ -361,7 +376,7 @@ func (sv *SchemaValidator) validateMigrationStructure(ctx context.Context, migra
 		warnings = append(warnings, stmtWarnings...)
 
 		// Validate naming conventions
-		if sv.config.Level >= ValidationLevelStandard {
+		if sv.config.Level.AtLeast(ValidationLevelStandard) {
 			namingWarnings := sv.validateNamingConventions(&stmt, migration.Filename)
 			warnings = append(warnings, namingWarnings...)
 		}
@@ -386,7 +401,7 @@ func (sv *SchemaValidator) validateStatement(ctx context.Context, stmt *types.St
 	}
 
 	// Validate PostgreSQL-specific features
-	if sv.config.Level >= ValidationLevelThorough {
+	if sv.config.Level.AtLeast(ValidationLevelThorough) {
 		featureWarnings := sv.validatePostgreSQLFeatures(stmt, filename)
 		warnings = append(warnings, featureWarnings...)
 	}
@@ -456,82 +471,152 @@ func (sv *SchemaValidator) validateDependencies(ctx context.Context, migrations 
 	return errors, warnings
 }
 
-// validateWithDatabase validates against actual database
+// validateWithDatabase replays the migrations, in order, against sv.db inside
+// one transaction that is always rolled back, so every statement is checked by
+// PostgreSQL itself (names, types, dependencies on earlier migrations) and the
+// database is left unchanged. Each statement runs under a savepoint: a failing
+// statement is reported and rolled back, and replay continues with the next.
+//
+// sv.db must be a disposable database: the statements take their locks while
+// the transaction is open, and non-transactional effects (sequence advances)
+// are not undone. Statements PostgreSQL refuses inside a transaction block
+// (CREATE INDEX CONCURRENTLY, VACUUM, ...) are reported as not validated.
 func (sv *SchemaValidator) validateWithDatabase(ctx context.Context, migrations []*types.Migration) ([]ValidationError, []ValidationWarning) {
-	var errors []ValidationError
+	var errs []ValidationError
 	var warnings []ValidationWarning
 
-	// This would implement more sophisticated database-backed validation
-	// For now, we'll do basic connectivity and syntax checks
-
-	// Test database connectivity
 	if err := sv.db.PingContext(ctx); err != nil {
-		errors = append(errors, ValidationError{
+		return append(errs, ValidationError{
 			Code:       "DATABASE_CONNECTION_FAILED",
 			Message:    fmt.Sprintf("Failed to connect to database: %v", err),
 			Severity:   "ERROR",
 			Suggestion: "Check database connection parameters",
-		})
-		return errors, warnings
+		}), warnings
 	}
 
-	// Validate statements against database
+	tx, err := sv.db.BeginTx(ctx, nil)
+	if err != nil {
+		return append(errs, ValidationError{
+			Code:     "DATABASE_TRANSACTION_FAILED",
+			Message:  fmt.Sprintf("Failed to start the validation transaction: %v", err),
+			Severity: "ERROR",
+		}), warnings
+	}
+	defer func() {
+		// Rolling back is the point: the replay must leave nothing behind.
+		if rbErr := tx.Rollback(); rbErr != nil && !stderrors.Is(rbErr, sql.ErrTxDone) {
+			errs = append(errs, ValidationError{
+				Code:     "DATABASE_ROLLBACK_FAILED",
+				Message:  fmt.Sprintf("Failed to roll back the validation transaction: %v", rbErr),
+				Severity: "ERROR",
+			})
+		}
+	}()
+
 	for _, migration := range migrations {
 		for _, stmt := range migration.Statements {
-			// Use EXPLAIN to validate syntax without executing
-			if sv.canExplainStatement(&stmt) {
-				// Sanitize: Ensure no multiple statements could be injected if parser failed
-				if strings.Contains(stmt.SQL, ";") {
-					// Check if semicolon is not just at the end
-					trimmed := strings.TrimRight(strings.TrimSpace(stmt.SQL), ";")
-					if strings.Contains(trimmed, ";") {
-						errors = append(errors, ValidationError{
-							Code:     "UNSAFE_SQL",
-							Message:  "Statement contains embedded semicolons, effectively multiple statements. skipping EXPLAIN for safety.",
-							Severity: "ERROR",
-							File:     migration.Filename,
-							Line:     stmt.Line,
-						})
-						continue
-					}
-				}
+			objectID := ObjectID{Type: stmt.ObjectType, Schema: stmt.Schema, Name: stmt.ObjectName}
 
-				explainQuery := "EXPLAIN " + stmt.SQL
+			if stmt.ParseTree == nil || len(stmt.ParseTree.GetStmts()) != 1 {
+				errs = append(errs, ValidationError{
+					Code:     "UNSAFE_SQL",
+					Message:  "Statement is not exactly one parsed SQL statement; not replayed",
+					ObjectID: objectID,
+					Severity: "ERROR",
+					SQLQuery: stmt.SQL,
+					File:     migration.Filename,
+					Line:     stmt.Line,
+				})
+				continue
+			}
 
-				// Execute EXPLAIN
-				// Note: variable placeholders don't work for EXPLAIN statement text in lib/pq
-				// but since stmt.SQL comes from our parser, it's safer than raw user input.
-				rows, err := sv.db.QueryContext(ctx, explainQuery)
-				if err != nil {
-					errors = append(errors, ValidationError{
-						Code:    "INVALID_SQL_SYNTAX",
-						Message: fmt.Sprintf("SQL syntax error: %v", err),
-						ObjectID: ObjectID{
-							Type:   stmt.ObjectType,
-							Schema: stmt.Schema,
-							Name:   stmt.ObjectName,
-						},
-						Severity:   "ERROR",
-						SQLQuery:   stmt.SQL,
-						File:       migration.Filename,
-						Line:       stmt.Line,
-						Suggestion: "Check SQL syntax and fix errors",
-					})
-				} else {
-					if err := rows.Close(); err != nil {
-						// Return unsafe warning as valid validation error
-						errors = append(errors, ValidationError{
-							Code:     "RESOURCE_CLOSE_ERROR",
-							Message:  fmt.Sprintf("Failed to close rows: %v", err),
-							Severity: "WARNING",
-						})
-					}
+			if reason := nonTransactionalReason(stmt.ParseTree.GetStmts()[0].GetStmt()); reason != "" {
+				warnings = append(warnings, ValidationWarning{
+					Code:       "NOT_VALIDATED_OUTSIDE_TRANSACTION",
+					Message:    fmt.Sprintf("%s:%d not validated against the database: %s", migration.Filename, stmt.Line, reason),
+					ObjectID:   objectID,
+					Suggestion: "Validate this statement with Docker validation (squash, validate) instead",
+				})
+				continue
+			}
+
+			if _, err := tx.ExecContext(ctx, "SAVEPOINT capysquash_statement"); err != nil {
+				return append(errs, ValidationError{
+					Code:     "DATABASE_TRANSACTION_FAILED",
+					Message:  fmt.Sprintf("Failed to create a savepoint: %v", err),
+					Severity: "ERROR",
+				}), warnings
+			}
+
+			if _, execErr := tx.ExecContext(ctx, stmt.SQL); execErr != nil {
+				errs = append(errs, ValidationError{
+					Code:       "STATEMENT_FAILED",
+					Message:    fmt.Sprintf("PostgreSQL rejected the statement: %v", execErr),
+					ObjectID:   objectID,
+					Severity:   "ERROR",
+					SQLQuery:   stmt.SQL,
+					File:       migration.Filename,
+					Line:       stmt.Line,
+					Suggestion: "Fix the statement or the migrations it depends on",
+				})
+				if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT capysquash_statement"); err != nil {
+					return append(errs, ValidationError{
+						Code:     "DATABASE_TRANSACTION_FAILED",
+						Message:  fmt.Sprintf("Failed to roll back to the savepoint: %v", err),
+						Severity: "ERROR",
+					}), warnings
 				}
+				continue
+			}
+
+			if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT capysquash_statement"); err != nil {
+				return append(errs, ValidationError{
+					Code:     "DATABASE_TRANSACTION_FAILED",
+					Message:  fmt.Sprintf("Failed to release a savepoint: %v", err),
+					Severity: "ERROR",
+				}), warnings
 			}
 		}
 	}
 
-	return errors, warnings
+	return errs, warnings
+}
+
+// nonTransactionalReason names why PostgreSQL cannot run stmt inside a
+// transaction block (or why replaying it would end the validation
+// transaction), or returns "" when it can.
+func nonTransactionalReason(stmt *pg_query.Node) string {
+	switch n := stmt.GetNode().(type) {
+	case *pg_query.Node_IndexStmt:
+		if n.IndexStmt.GetConcurrent() {
+			return "CREATE INDEX CONCURRENTLY cannot run inside a transaction block"
+		}
+	case *pg_query.Node_DropStmt:
+		if n.DropStmt.GetConcurrent() {
+			return "DROP INDEX CONCURRENTLY cannot run inside a transaction block"
+		}
+	case *pg_query.Node_ReindexStmt:
+		for _, param := range n.ReindexStmt.GetParams() {
+			if strings.EqualFold(param.GetDefElem().GetDefname(), "concurrently") {
+				return "REINDEX CONCURRENTLY cannot run inside a transaction block"
+			}
+		}
+	case *pg_query.Node_VacuumStmt:
+		if n.VacuumStmt.GetIsVacuumcmd() {
+			return "VACUUM cannot run inside a transaction block"
+		}
+	case *pg_query.Node_CreatedbStmt, *pg_query.Node_DropdbStmt:
+		return "CREATE/DROP DATABASE cannot run inside a transaction block"
+	case *pg_query.Node_CreateTableSpaceStmt, *pg_query.Node_DropTableSpaceStmt:
+		return "CREATE/DROP TABLESPACE cannot run inside a transaction block"
+	case *pg_query.Node_AlterSystemStmt:
+		return "ALTER SYSTEM cannot run inside a transaction block"
+	case *pg_query.Node_CreateSubscriptionStmt, *pg_query.Node_DropSubscriptionStmt:
+		return "CREATE/DROP SUBSCRIPTION cannot run inside a transaction block"
+	case *pg_query.Node_TransactionStmt:
+		return "transaction control would end the validation transaction"
+	}
+	return ""
 }
 
 // validatePerformance validates performance-related aspects
@@ -779,17 +864,6 @@ func (sv *SchemaValidator) analyzeStatementPerformance(stmt *types.Statement, fi
 }
 
 // Helper functions
-
-// canExplainStatement checks if a statement can be validated with EXPLAIN
-func (sv *SchemaValidator) canExplainStatement(stmt *types.Statement) bool {
-	// Only certain statement types can be explained
-	switch stmt.Operation {
-	case types.OpInsert, types.OpUpdate, types.OpDelete:
-		return true
-	default:
-		return false
-	}
-}
 
 // SortValidationResults sorts validation results by severity and type
 func SortValidationResults(result *ValidationResult) {

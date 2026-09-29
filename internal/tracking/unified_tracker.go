@@ -12,11 +12,12 @@ import (
 
 	"github.com/capydatabase/capysquash/internal/errors"
 	"github.com/capydatabase/capysquash/internal/utils"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/capydatabase/capysquash/internal/metadata"
 	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/types"
-	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // UnifiedTracker provides comprehensive object lifecycle tracking with advanced metadata integration
@@ -48,8 +49,13 @@ type UnifiedTracker struct {
 	// Statement analysis
 	statementAnalyzer *parser.StatementAnalyzer
 
+	// routineOverloads maps a function's lower-cased qualified name to the
+	// name+signature identities of its tracked overloads; routineArgs holds
+	// each identity's input-argument type nodes from its CREATE.
+	routineOverloads map[string][]string
+	routineArgs      map[string][]*pg_query.Node
+
 	// Column type tracking for index optimization
-	columnTypes map[string]map[string]*ColumnTypeInfo // table -> column -> type info
 }
 
 // ObjectLifecycle tracks complete database object lifecycle with advanced metadata integration
@@ -166,15 +172,6 @@ type SourceRange struct {
 	EndCol    int    `json:"end_col"`
 	Text      string `json:"text"`
 	Context   string `json:"context,omitempty"`
-}
-
-// ColumnTypeInfo tracks column types for index optimization
-type ColumnTypeInfo struct {
-	TableName  string
-	ColumnName string
-	DataType   string // Full type name (e.g., "double precision[]", "point", "geometry")
-	IsArray    bool   // True if column is an array type
-	IsSpatial  bool   // True if column is an actual spatial type (point, geography, geometry, etc.)
 }
 
 // ObjectInfo represents information about a database object
@@ -656,7 +653,8 @@ func NewUnifiedTracker() *UnifiedTracker {
 		cycleDetector:     NewAdvancedDDLCycleDetector(cycleConfig),
 		detectedCycles:    make([]DDLCycle, 0),
 		statementAnalyzer: parser.NewStatementAnalyzer("17"), // Default to PostgreSQL 17
-		columnTypes:       make(map[string]map[string]*ColumnTypeInfo),
+		routineOverloads:  make(map[string][]string),
+		routineArgs:       make(map[string][]*pg_query.Node),
 	}
 }
 
@@ -690,171 +688,9 @@ func NewRiskAssessment() *RiskAssessment {
 	return assessment
 }
 
-// IsSpatialDataType determines if a PostgreSQL type is a spatial/geometric type
-func IsSpatialDataType(typeName string) bool {
-	typeName = strings.ToLower(strings.TrimSpace(typeName))
-
-	// PostGIS types
-	if strings.HasPrefix(typeName, "geometry") ||
-		strings.HasPrefix(typeName, "geography") {
-		return true
-	}
-
-	// PostgreSQL built-in geometric types
-	spatialTypes := map[string]bool{
-		"point":   true,
-		"line":    true,
-		"lseg":    true,
-		"box":     true,
-		"path":    true,
-		"polygon": true,
-		"circle":  true,
-	}
-
-	return spatialTypes[typeName]
-}
-
 // IsArrayDataType determines if a type is an array
 func IsArrayDataType(typeName string) bool {
 	return strings.HasSuffix(typeName, "[]")
-}
-
-// GetBaseTypeName extracts the base type from an array type
-// E.g., "double precision[]" -> "double precision"
-func GetBaseTypeName(typeName string) string {
-	return strings.TrimSuffix(typeName, "[]")
-}
-
-// extractTypeName converts a pg_query TypeName to a string representation
-func extractTypeName(typeName *pg_query.TypeName) string {
-	if typeName == nil {
-		return ""
-	}
-
-	// Get the type names array
-	var typeNames []string
-	for _, name := range typeName.Names {
-		if name.GetString_() != nil {
-			typeNames = append(typeNames, name.GetString_().Sval)
-		}
-	}
-
-	// Use the last element for simplicity (e.g., ["pg_catalog", "float8"] -> "float8")
-	var typStr string
-	if len(typeNames) > 0 {
-		typStr = typeNames[len(typeNames)-1]
-	}
-
-	// Handle common PostgreSQL type aliases
-	typeMap := map[string]string{
-		"float8":  "double precision",
-		"float4":  "real",
-		"int4":    "integer",
-		"int8":    "bigint",
-		"int2":    "smallint",
-		"varchar": "character varying",
-	}
-
-	if mapped, ok := typeMap[typStr]; ok {
-		typStr = mapped
-	}
-
-	// Add array suffix if necessary
-	if len(typeName.ArrayBounds) > 0 {
-		typStr += "[]"
-	}
-
-	return typStr
-}
-
-// ExtractColumnTypes extracts column type information from a CREATE TABLE statement
-func (ut *UnifiedTracker) ExtractColumnTypes(tableName string, stmt *types.Statement) {
-	// ParseTree is *pg_query.ParseResult (strongly typed)
-	if stmt.ParseTree == nil {
-		return
-	}
-
-	parseResult := stmt.ParseTree
-	if parseResult == nil || parseResult.Stmts == nil || len(parseResult.Stmts) == 0 {
-		return
-	}
-
-	// Get the first statement
-	stmtNode := parseResult.Stmts[0]
-	if stmtNode.Stmt == nil {
-		return
-	}
-
-	// Check if it's a CREATE TABLE statement
-	createStmt := stmtNode.Stmt.GetCreateStmt()
-	if createStmt == nil {
-		return
-	}
-
-	// Ensure the table entry exists in columnTypes
-	if ut.columnTypes[tableName] == nil {
-		ut.columnTypes[tableName] = make(map[string]*ColumnTypeInfo)
-	}
-
-	// Iterate through table elements to find column definitions
-	for _, element := range createStmt.TableElts {
-		colDef := element.GetColumnDef()
-		if colDef == nil {
-			continue
-		}
-
-		columnName := colDef.Colname
-		if columnName == "" {
-			continue
-		}
-
-		// Extract type name
-		if colDef.TypeName == nil {
-			continue
-		}
-
-		typeName := extractTypeName(colDef.TypeName)
-		isArray := len(colDef.TypeName.ArrayBounds) > 0
-
-		// Check if it's a spatial type (but not an array of spatial types)
-		baseTypeName := typeName
-		if isArray {
-			baseTypeName = GetBaseTypeName(typeName)
-		}
-		isSpatial := IsSpatialDataType(baseTypeName) && !isArray
-
-		// Preserve the first-seen column type for a table+column pair.
-		// This avoids incorrect rewrites when later migrations include duplicate
-		// CREATE TABLE IF NOT EXISTS definitions with divergent schemas.
-		if existing, exists := ut.columnTypes[tableName][columnName]; exists {
-			if existing.DataType != typeName || existing.IsArray != isArray || existing.IsSpatial != isSpatial {
-				utils.GetDefaultLogger().WithPrefix("UNIFIED-TRACKER").Debug(
-					"Preserving initial column type for %s.%s (%s); ignoring conflicting duplicate definition (%s)",
-					tableName,
-					columnName,
-					existing.DataType,
-					typeName,
-				)
-			}
-			continue
-		}
-
-		ut.columnTypes[tableName][columnName] = &ColumnTypeInfo{
-			TableName:  tableName,
-			ColumnName: columnName,
-			DataType:   typeName,
-			IsArray:    isArray,
-			IsSpatial:  isSpatial,
-		}
-	}
-}
-
-// GetColumnType retrieves column type information
-func (ut *UnifiedTracker) GetColumnType(tableName, columnName string) *ColumnTypeInfo {
-	if ut.columnTypes[tableName] == nil {
-		return nil
-	}
-	return ut.columnTypes[tableName][columnName]
 }
 
 // ProcessMigration processes a migration with comprehensive tracking
@@ -905,6 +741,10 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 		ut.statementAnalyzer.AnalyzeStatement(&stmt)
 		ut.statementAnalyzer.AnalyzePragmas(&stmt)
 
+		// A statement naming a function without its arguments gets the
+		// arguments of the overload it refers to, in its SQL too.
+		ut.resolveRoutineArguments(&stmt)
+
 		// Create enhanced lifecycle event
 		event := ut.createLifecycleEvent(stmt, m.Filename, sequence, stmtIndex)
 
@@ -916,7 +756,7 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 		// Handle statements with ObjectName (schema objects)
 		if stmt.ObjectName != "" {
 			normalizedObjectName := ut.normalizeObjectNameForTracking(stmt)
-			key := makeKey(normalizedObjectName, stmt.ObjectType)
+			key := makeKey(ut.routineIdentity(stmt, normalizedObjectName), stmt.ObjectType)
 			objectID := ObjectID{
 				Type:   stmt.ObjectType,
 				Schema: stmt.Schema,
@@ -925,17 +765,12 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 
 			lifecycle, exists := ut.objects[key]
 			if !exists {
-				lifecycle = ut.createObjectLifecycle(stmt, objectID)
+				lifecycle = ut.createObjectLifecycle(stmt, objectID, key)
 				ut.objects[key] = lifecycle
 			}
 
 			// Add event to object lifecycle
 			lifecycle.History = append(lifecycle.History, *event)
-
-			// Extract column types from CREATE TABLE statements for index optimization
-			if stmt.Operation == types.OpCreate && stmt.ObjectType == types.TypeTable {
-				ut.ExtractColumnTypes(stmt.ObjectName, &stmt)
-			}
 
 			// Debug: track profiles events
 			if strings.ToLower(stmt.ObjectName) == "profiles" {
@@ -951,7 +786,7 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 			}
 
 			// Track dependencies
-			ut.processDependencies(stmt, objectID, lifecycle)
+			ut.processDependencies(stmt, objectID, key)
 
 			// NOTE: We previously created separate CONSTRAINT objects for ALTER TABLE ADD CONSTRAINT,
 			// but this caused duplicate output (constraint in both CREATE TABLE and ALTER TABLE)
@@ -1005,9 +840,7 @@ func (ut *UnifiedTracker) createLifecycleEvent(stmt types.Statement, migrationFi
 }
 
 // createObjectLifecycle creates a new object lifecycle
-func (ut *UnifiedTracker) createObjectLifecycle(stmt types.Statement, objectID ObjectID) *ObjectLifecycle {
-	key := makeKey(objectID.Name, stmt.ObjectType)
-
+func (ut *UnifiedTracker) createObjectLifecycle(stmt types.Statement, objectID ObjectID, key string) *ObjectLifecycle {
 	lifecycle := &ObjectLifecycle{
 		Key:       key,
 		Name:      objectID.Name,
@@ -1111,7 +944,7 @@ func (ut *UnifiedTracker) processPermissionEvent(stmt types.Statement, lifecycle
 }
 
 // processDependencies processes object dependencies with enhanced tracking
-func (ut *UnifiedTracker) processDependencies(stmt types.Statement, objectID ObjectID, lifecycle *ObjectLifecycle) {
+func (ut *UnifiedTracker) processDependencies(stmt types.Statement, objectID ObjectID, key string) {
 	var dependencies []ObjectDependency
 
 	for _, depName := range stmt.Dependencies {
@@ -1129,8 +962,148 @@ func (ut *UnifiedTracker) processDependencies(stmt types.Statement, objectID Obj
 		ut.dependencyGraph.AddEdge(objectID, dep.DependsOn)
 	}
 
-	key := makeKey(objectID.Name, stmt.ObjectType)
 	ut.dependencies[key] = dependencies
+}
+
+// routineIdentity returns the name a statement is tracked under. For a
+// function (and a comment on one) that is the name plus its normalized
+// argument signature, so overloads such as f(integer) and f(text) are
+// separate objects. Without a signature (see resolveRoutineArguments) the
+// plain name is kept, which PostgreSQL only accepts for a unique name.
+func (ut *UnifiedTracker) routineIdentity(stmt types.Statement, name string) string {
+	if !targetsRoutine(stmt) || stmt.FunctionSignature == "" {
+		return name
+	}
+	identity := name + stmt.FunctionSignature
+	if stmt.ObjectType == types.TypeFunction {
+		plain := strings.ToLower(name)
+		switch stmt.Operation {
+		case types.OpCreate:
+			if !slices.Contains(ut.routineOverloads[plain], identity) {
+				ut.routineOverloads[plain] = append(ut.routineOverloads[plain], identity)
+			}
+			if args := createFunctionArgTypes(stmt); args != nil {
+				ut.routineArgs[identity] = args
+			}
+		case types.OpDrop:
+			// A dropped overload no longer counts: a later short form refers
+			// to the overloads that still exist.
+			ut.routineOverloads[plain] = slices.DeleteFunc(ut.routineOverloads[plain], func(o string) bool { return o == identity })
+			delete(ut.routineArgs, identity)
+		}
+	}
+	return identity
+}
+
+// resolveRoutineArguments completes DROP FUNCTION f, COMMENT ON FUNCTION f
+// and GRANT ... ON FUNCTION f, written without arguments, when exactly one
+// overload of f exists at that point: the statement is about that overload
+// (PostgreSQL rejects the short form otherwise). Its signature is recorded
+// and its SQL is rewritten with the argument types, so the squashed output
+// stays unambiguous when later migrations add overloads.
+func (ut *UnifiedTracker) resolveRoutineArguments(stmt *types.Statement) {
+	if !targetsRoutine(*stmt) || stmt.FunctionSignature != "" || stmt.ObjectName == "" {
+		return
+	}
+	overloads := ut.routineOverloads[strings.ToLower(stmt.ObjectName)]
+	if len(overloads) != 1 {
+		return
+	}
+	identity := overloads[0]
+	stmt.FunctionSignature = identity[len(stmt.ObjectName):]
+
+	args, ok := ut.routineArgs[identity]
+	if !ok || stmt.ParseTree == nil || len(stmt.ParseTree.GetStmts()) != 1 {
+		return
+	}
+	var target *pg_query.ObjectWithArgs
+	switch n := stmt.ParseTree.GetStmts()[0].GetStmt().GetNode().(type) {
+	case *pg_query.Node_DropStmt:
+		if objects := n.DropStmt.GetObjects(); len(objects) == 1 {
+			target = objects[0].GetObjectWithArgs()
+		}
+	case *pg_query.Node_CommentStmt:
+		target = n.CommentStmt.GetObject().GetObjectWithArgs()
+	case *pg_query.Node_GrantStmt:
+		if objects := n.GrantStmt.GetObjects(); len(objects) == 1 {
+			target = objects[0].GetObjectWithArgs()
+		}
+	}
+	if target == nil || !target.GetArgsUnspecified() {
+		return
+	}
+
+	rewritten := proto.Clone(stmt.ParseTree).(*pg_query.ParseResult)
+	switch n := rewritten.GetStmts()[0].GetStmt().GetNode().(type) {
+	case *pg_query.Node_DropStmt:
+		target = n.DropStmt.GetObjects()[0].GetObjectWithArgs()
+	case *pg_query.Node_CommentStmt:
+		target = n.CommentStmt.GetObject().GetObjectWithArgs()
+	case *pg_query.Node_GrantStmt:
+		target = n.GrantStmt.GetObjects()[0].GetObjectWithArgs()
+	}
+	target.ArgsUnspecified = false
+	target.Objargs = args
+	rewritten.GetStmts()[0].StmtLocation = 0
+	rewritten.GetStmts()[0].StmtLen = 0
+
+	sql, err := pg_query.Deparse(rewritten)
+	if err != nil {
+		utils.GetDefaultLogger().WithPrefix("UNIFIED-TRACKER").Warn("Could not add the arguments of %s to %q: %v", identity, stmt.SQL, err)
+		return
+	}
+	stmt.SQL = sql
+	stmt.ParseTree = rewritten
+}
+
+// createFunctionArgTypes returns copies of the input-argument type nodes of
+// a CREATE FUNCTION statement, in order (the nodes an ObjectWithArgs holds).
+func createFunctionArgTypes(stmt types.Statement) []*pg_query.Node {
+	if stmt.ParseTree == nil || len(stmt.ParseTree.GetStmts()) != 1 {
+		return nil
+	}
+	create := stmt.ParseTree.GetStmts()[0].GetStmt().GetCreateFunctionStmt()
+	if create == nil {
+		return nil
+	}
+	args := make([]*pg_query.Node, 0, len(create.GetParameters()))
+	for _, node := range create.GetParameters() {
+		param := node.GetFunctionParameter()
+		if param == nil {
+			continue
+		}
+		switch param.GetMode() {
+		case pg_query.FunctionParameterMode_FUNC_PARAM_OUT, pg_query.FunctionParameterMode_FUNC_PARAM_TABLE:
+			continue
+		}
+		typeName := proto.Clone(param.GetArgType()).(*pg_query.TypeName)
+		args = append(args, &pg_query.Node{Node: &pg_query.Node_TypeName{TypeName: typeName}})
+	}
+	return args
+}
+
+// targetsRoutine reports whether stmt is about a function or procedure:
+// the routine itself, or a comment on one.
+func targetsRoutine(stmt types.Statement) bool {
+	if stmt.ObjectType == types.TypeFunction {
+		return true
+	}
+	if stmt.ObjectType != types.TypeComment {
+		return false
+	}
+	for _, dep := range stmt.Dependencies {
+		if strings.HasPrefix(dep, string(types.TypeFunction)+":") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRoutineNamed reports whether any overload of the named function exists
+// (created and not dropped); references to a function (a trigger, a call)
+// carry no signature.
+func (ut *UnifiedTracker) hasRoutineNamed(name string) bool {
+	return len(ut.routineOverloads[strings.ToLower(name)]) > 0
 }
 
 func (ut *UnifiedTracker) normalizeObjectNameForTracking(stmt types.Statement) string {

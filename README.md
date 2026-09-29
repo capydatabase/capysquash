@@ -102,7 +102,7 @@ Production schemas the baseline creates nothing in are listed as a warning.
 Two comment pragmas are honoured inside migrations:
 
 ```sql
--- capysquash:ignore            keep the next statement verbatim
+-- capysquash:ignore            keep the next statement verbatim (also capysquash:no-merge)
 -- capysquash-ignore:CSQ.SAFETY.CONCURRENT_INDEX   suppress a lint rule on this statement
 ```
 
@@ -118,6 +118,11 @@ databases, and compares the catalogs (`--validation-mode TWO_DATABASES`;
 `TWO_CONTAINERS` and `SCHEMA_DIFF` are the slower and faster alternatives).
 Validation needs a reachable Docker daemon. `--no-validate` skips it, and
 `--fail-on-diff=false` downgrades a real difference to a warning.
+
+Before consolidating, `squash` also lints every input migration with the
+`lint` rules (pre-flight). Findings are reported as warnings; `--strict` (or
+`"static_validation": {"strict": true}` in the config) aborts the squash on any
+finding or on a migration the rules cannot check.
 
 ### `validate-external`
 

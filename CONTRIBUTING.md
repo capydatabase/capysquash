@@ -19,8 +19,15 @@ make check
 ```
 
 `go test -race ./...` runs offline; tests that need Docker skip when no daemon
-is reachable, and the `integration`-tagged tests under `internal/validation`
-need a `DATABASE_URL`.
+is reachable, and the `integration`-tagged tests need a `DATABASE_URL`.
+
+`scripts/run-e2e.sh` runs the end-to-end suite with Docker: it starts a
+throwaway PostgreSQL, runs every test including the `integration`-tagged ones
+against it, then squashes each fixture under `test-fixtures/` at the
+conservative, standard and aggressive levels and checks with
+`validate-external` that the baseline builds the same catalog as the original
+history. Fixtures whose original history PostgreSQL rejects are listed in the
+script with the reason and skipped.
 
 ## Layout
 
