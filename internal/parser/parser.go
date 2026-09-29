@@ -466,6 +466,16 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 			stmt.Comments = append(stmt.Comments, "-- Contains ON CONFLICT clause")
 		}
 
+	case *pg_query.Node_RefreshMatViewStmt:
+		// REFRESH MATERIALIZED VIEW fills the view with data. It runs with the
+		// data operations, in history order and after every index exists
+		// (CONCURRENTLY needs a unique one and an already populated view).
+		stmt.Operation = types.OpRefresh
+		stmt.ObjectType = types.TypeData
+		stmt.IsDataOp = true
+		stmt.ObjectName = getTableNameWithNormalization(node.RefreshMatViewStmt.Relation, normalizer)
+		stmt.Dependencies = []string{stmt.ObjectName}
+
 	case *pg_query.Node_UpdateStmt:
 		stmt.Operation = types.OpUpdate
 		stmt.ObjectType = types.TypeData

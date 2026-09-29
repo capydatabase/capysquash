@@ -180,6 +180,7 @@ const (
 	OpGrant   Operation = "GRANT"
 	OpRevoke  Operation = "REVOKE"
 	OpComment Operation = "COMMENT"
+	OpRefresh Operation = "REFRESH" // REFRESH MATERIALIZED VIEW: repopulates data, so it is a data operation
 )
 
 // Category represents the semantic category of a statement for organization
