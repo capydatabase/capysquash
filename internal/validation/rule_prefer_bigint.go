@@ -37,7 +37,7 @@ func (r *PreferBigInt) Check(sql string, tree *pg_query.ParseResult) ([]Violatio
 		createStmt := stmt.Stmt.CreateStmt
 		for _, item := range createStmt.TableElts {
 			if colDef := item.GetColumnDef(); colDef != nil {
-				vio := r.checkColumnDef(sql, colDef, createStmt.Relation.Relname, stmt.Start, stmt.End)
+				vio := r.checkColumnType(sql, colDef.TypeName, colDef.Colname, createStmt.Relation.Relname, stmt.Start, stmt.End)
 				if vio != nil {
 					violations = append(violations, *vio)
 				}
@@ -49,25 +49,31 @@ func (r *PreferBigInt) Check(sql string, tree *pg_query.ParseResult) ([]Violatio
 		alterStmt := stmt.Stmt.AlterTableStmt
 		for _, cmd := range alterStmt.Cmds {
 			alterCmd := cmd.GetAlterTableCmd()
-			if alterCmd.Subtype == pg_query.AlterTableType_AT_AddColumn {
-				if colDef := alterCmd.Def.GetColumnDef(); colDef != nil {
-					vio := r.checkColumnDef(sql, colDef, alterStmt.Relation.Relname, stmt.Start, stmt.End)
-					if vio != nil {
-						violations = append(violations, *vio)
-					}
-				}
+			if alterCmd == nil {
+				continue
 			}
-			// Also check ALTER COLUMN TYPE?
-			// The task only mentioned detecting the type usage.
-			// Let's stick to definitions for now.
+			colDef := alterCmd.Def.GetColumnDef()
+			if colDef == nil {
+				continue
+			}
+			var vio *Violation
+			switch alterCmd.Subtype {
+			case pg_query.AlterTableType_AT_AddColumn:
+				vio = r.checkColumnType(sql, colDef.TypeName, colDef.Colname, alterStmt.Relation.Relname, stmt.Start, stmt.End)
+			case pg_query.AlterTableType_AT_AlterColumnType:
+				// ALTER COLUMN ... TYPE int names the column on the command.
+				vio = r.checkColumnType(sql, colDef.TypeName, alterCmd.Name, alterStmt.Relation.Relname, stmt.Start, stmt.End)
+			}
+			if vio != nil {
+				violations = append(violations, *vio)
+			}
 		}
 	}
 
 	return violations, nil
 }
 
-func (r *PreferBigInt) checkColumnDef(sql string, colDef *pg_query.ColumnDef, tableName string, stmtStart, stmtEnd int32) *Violation {
-	typeName := colDef.TypeName
+func (r *PreferBigInt) checkColumnType(sql string, typeName *pg_query.TypeName, colName, tableName string, stmtStart, stmtEnd int32) *Violation {
 	if typeName == nil {
 		return nil
 	}
@@ -127,7 +133,7 @@ func (r *PreferBigInt) checkColumnDef(sql string, colDef *pg_query.ColumnDef, ta
 
 		return &Violation{
 			Code:       r.Code(),
-			Message:    fmt.Sprintf("Column '%s' in table '%s' uses %s. Prefer BIGINT to avoid integer overflow.", colDef.Colname, tableName, strings.ToUpper(typ)),
+			Message:    fmt.Sprintf("Column '%s' in table '%s' uses %s. Prefer BIGINT to avoid integer overflow.", colName, tableName, strings.ToUpper(typ)),
 			Category:   r.Category(),
 			StmtStart:  stmtStart,
 			StmtEnd:    stmtEnd,
