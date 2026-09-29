@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CSQ.SAFETY.CONSTRAINT_NOT_VALID` (validate the constraint later with `VALIDATE CONSTRAINT`).
 - `CSQ.HYGIENE.PREFER_BIGINT` also flags, and fixes, `ALTER TABLE ... ALTER COLUMN ... TYPE int`.
 - A `function_overloads` fixture.
+- The `paranoid` level checks the squashed baseline against production's catalog: it applies the
+  baseline to an empty validation database (`CAPYSQUASH_VALIDATION_DSN` or `validation_dsn`; never
+  production, which is only read, in a read-only transaction), loads both catalogs with the same
+  `pg_catalog` queries and fails on any difference in tables, columns (type, nullability, default,
+  generation, identity, collation, order), constraints, indexes, triggers, policies, views,
+  materialized views, function overloads, sequences, enums and other types of the schemas the
+  baseline creates. The validation database is claimed empty and reset afterwards. `paranoid`
+  without a validation database fails closed. It used to check only that tables, functions and
+  types of the same names existed.
 
 ### Changed
 
@@ -46,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rolled back, one savepoint per statement, and reports every statement PostgreSQL rejects.
   Statements that cannot run in a transaction block (`CONCURRENTLY`, `VACUUM`, ...) are reported as
   not validated. It used to `EXPLAIN` only `INSERT`/`UPDATE`/`DELETE`.
+- The production catalog is read from `pg_catalog` in one read-only, repeatable-read transaction
+  (definitions rendered with `format_type`, `pg_get_expr`, `pg_get_constraintdef`,
+  `pg_get_indexdef`, `pg_get_viewdef`, `pg_get_functiondef`, `pg_get_triggerdef`) instead of
+  `information_schema`, which hid objects the role could not access and dropped type modifiers.
 - The error-recovery rule wraps the consolidation rules of the safety level: a rule that fails no
   longer drops straight to the engine's fallback; the object is recovered (conservatively below
   aggressive) with the failure reported.
@@ -80,6 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comment, so a pragma above a statement was never seen. Comments now attach by position: to the
   statement they precede or sit inside, or to the statement ending on the same line
   (`CREATE ...; -- capysquash:no-merge`).
+- An object whose history no rule merges - every table at the `paranoid` level - kept only its
+  final CREATE: `ALTER TABLE ... ADD COLUMN` and `SET DEFAULT` statements made after it were lost.
+  They are replayed as written.
 - The orphaned-function safety net removed a dropped overload's comment or grant together with the
   section comment above it and left a stray `;`; it now removes exactly the statement.
 - `squash --json` printed "Processing N migrations..." ahead of the JSON document whenever the
