@@ -99,8 +99,14 @@ same `pg_catalog` queries (`format_type`, `pg_get_constraintdef`,
 column (type, nullability, default, generation, identity, collation, order),
 constraint, index, trigger, policy, view, function overload, sequence, enum or
 other type in the schemas the baseline creates differs from production, and
-when any owner, privilege or default privilege differs.
-Production schemas the baseline creates nothing in are listed as a warning.
+when any owner, privilege or default privilege differs - including those of
+objects that were in the validation database before the baseline ran (the
+`public` schema, extension objects), wherever production has them too, since
+a history grants and revokes on them. Privileges a platform granted on such
+objects in production (outside the history) therefore show up as
+differences. The validation database gets its owners and privileges back when
+it is reset. Production schemas the baseline creates nothing in are listed as
+a warning.
 
 ### Manual overrides
 
@@ -114,6 +120,43 @@ Two comment pragmas are honoured inside migrations:
 `capysquash-ignore-next:` and `capysquash-ignore-file:` scope a lint suppression to
 the next statement or the whole file. Rule codes are listed by
 `capysquash lint --help`.
+
+### Renames and schemas
+
+A baseline emits objects by kind (types, tables, indexes, policies, ...), so a
+rename cannot stay where it was in the history. Before consolidating,
+capysquash rewrites the history to the names objects end with:
+
+- Schemas, enums, composite and domain types, views, materialized views,
+  sequences and indexes are created under their final names, with their final
+  enum values and attributes; `ALTER ... RENAME`, `SET SCHEMA`,
+  `ALTER TYPE ... RENAME VALUE` and `RENAME ATTRIBUTE` disappear. Column types,
+  function signatures, casts, defaults and comparisons with a renamed enum
+  value, and grants follow. A domain's unnamed `CHECK` keeps the name
+  PostgreSQL derived from the domain's first name.
+- A table keeps its own statements (`CREATE TABLE`, its `ALTER TABLE`s and
+  its renames, including column renames and `SET SCHEMA`) as written and in
+  order, because PostgreSQL names a table's constraints, indexes and sequences
+  after the table and column names they had at creation. Every other
+  statement - indexes, foreign keys from other tables, views, policies,
+  triggers, comments, data - names the table and its columns as they end up
+  and runs after them. An index created without a name gets the name
+  PostgreSQL gave it; a view keeps its column names (`new AS old`, `*`
+  spelled out).
+- Schemas are objects: the baseline creates them in a `=== SCHEMAS ===`
+  section after the roles (with `IF NOT EXISTS` and `AUTHORIZATION` as
+  written). A schema the history creates and drops - `DROP SCHEMA ... CASCADE`,
+  or once empty - leaves nothing in the baseline, contents included; one
+  created again starts clean. Dropping or renaming a schema the history did
+  not create (`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) is
+  replayed at the start of that section.
+
+Text PostgreSQL does not rewrite either - `DO` blocks, function bodies written
+as strings - is left as it is; when it names an object by a name it later
+gave up, a `Renames and schemas:` warning says so, as it does for anything
+else the rewrite cannot carry (a `NATURAL` join or `USING` list over a renamed
+column, a field of a renamed composite attribute, a statement that stays but
+uses an object `DROP SCHEMA ... CASCADE` removes, a renamed range type).
 
 ### Privileges, ownership and roles
 
@@ -137,8 +180,19 @@ recreated one starts clean - and the baseline gets two sections:
   reach objects created after them, so the privileges each object received at
   creation are written out as explicit grants.
 
-The model assumes one role runs the whole history and the baseline (`SET ROLE`
-is not followed, and objects start from the built-in defaults).
+The model assumes one role runs the history and the baseline, in one session,
+and that objects start from the built-in defaults. Role switches in the
+history are followed: after `SET ROLE`, `SET SESSION AUTHORIZATION` or
+`SET LOCAL ROLE` (until the transaction block ends), created objects belong to
+that role, `ALTER DEFAULT PRIVILEGES` without `FOR ROLE` is that role's, and
+grants are made by it. The baseline creates everything as the role that runs
+it and spells the outcome out: `ALTER ... OWNER TO` for each owner, and a
+grant another role made with a grant option it holds (on an object it neither
+owns nor belongs to the owner of) between `SET ROLE` and `RESET ROLE`, because
+PostgreSQL records the current role as the grantor and `GRANTED BY` cannot name
+another. `SET ROLE` and `SET SESSION AUTHORIZATION` themselves are not
+repeated among the object definitions, and `BEGIN`/`COMMIT` of individual
+migrations are left out of the baseline.
 `ALTER DEFAULT PRIVILEGES FOR ROLE name` reaches history objects only when
 `name` is that role, which cannot be known when squashing: the privileges that
 depend on it go into a `DO` block that checks `current_user` when the baseline
@@ -153,7 +207,9 @@ baseline are usually applied by that role under different names (for example
 `neondb_owner` in production and `postgres` in a validation container).
 Validation does not create roles: the history's own `CREATE ROLE` statements
 do, and any other role a history grants to must already exist in the
-validation cluster under the same name.
+validation cluster under the same name. `SCHEMA_DIFF`, which applies the
+baseline and the original history one after the other in one cluster, drops
+the roles the baseline created before the original history runs.
 
 ## Validation
 

@@ -15,10 +15,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-29
+
+### Added
+
+- A `=== SCHEMAS ===` section after the roles: the schemas the history creates and keeps, created
+  as written (`IF NOT EXISTS`, `AUTHORIZATION`) under their final names, preceded by the renames
+  and drops of schemas the history did not create (`DROP SCHEMA public CASCADE`), in history
+  order. Elements of `CREATE SCHEMA ... CREATE TABLE ...` become statements of their own.
+- Fixtures `rename_schema`, `rename_types`, `rename_table_dependents`, `drop_schema_recreate`,
+  `privileges_preexisting` and `privileges_set_role` in the e2e suite; `privileges_drop_rename`
+  now also renames a schema, an enum and a domain with privileges and drops and recreates a
+  schema.
+- `Renames and schemas:` warnings for what the rewrite to final names cannot carry: text that
+  names an object by a name it gave up (`DO` blocks, function bodies written as strings), a
+  `NATURAL` join or `USING` list over a renamed column, a field of a renamed composite attribute,
+  a statement that uses an object `DROP SCHEMA ... CASCADE` removes, a renamed range type.
+
 ### Fixed
 
+- `SET ROLE`, `SET SESSION AUTHORIZATION` and `SET LOCAL ROLE` in a history are followed. The
+  privilege model assumed the migrating role ran every statement: objects created as another role
+  came out owned by the role running the baseline, default privileges set as that role were
+  attributed to the migrating role, and a grant made by a role other than the owner (with a grant
+  option it holds) came out with the owner as grantor. The model now tracks the role each
+  statement runs as - `CURRENT_USER`, object owners, `ALTER DEFAULT PRIVILEGES`, grantors, role
+  membership and superusers created by the history, `REVOKE ... CASCADE` of what a grant option
+  passed on - and the baseline writes the outcome out explicitly: `ALTER ... OWNER TO` for each
+  owner, `ALTER DEFAULT PRIVILEGES FOR ROLE`, and a delegated grant between `SET ROLE` and
+  `RESET ROLE`, because PostgreSQL records the current role as the grantor and `GRANTED BY`
+  cannot name another. The `SET ROLE` statements themselves used to land among the object
+  definitions of the baseline.
+- `BEGIN`, `COMMIT` and the other transaction statements of individual migrations are left out of
+  the baseline. They used to land among the regrouped statements, which could leave the rest of
+  the baseline in a transaction that never committed; a `ROLLBACK` is reported as a warning.
+- Validation runs every migration file, and the baseline, in one database session, so session
+  settings (`SET ROLE`, `BEGIN ... COMMIT`) reach the statements after them as they do with a
+  migration tool; statements used to go through a connection pool one by one.
+- `ALTER SCHEMA ... RENAME`, `ALTER TYPE ... RENAME` (enums and composite types),
+  `ALTER DOMAIN ... RENAME`, `ALTER TYPE ... RENAME VALUE` and `ALTER TYPE ... RENAME ATTRIBUTE`
+  reach the baseline. The history is rewritten to final names before consolidation: every object
+  is created under the name it ends with, and everything that names it - objects in a renamed
+  schema, column types, function signatures, casts, defaults and comparisons with a renamed enum
+  value, grants - uses that name. These statements used to be dropped with a "not carried into
+  the baseline" warning, leaving a baseline that did not apply.
+- `DROP SCHEMA` is carried: schemas are tracked as objects. A schema the history creates and
+  drops (with `CASCADE`, or once empty) leaves nothing in the baseline, what it held included,
+  and a schema created again under the same name starts from the defaults. `DROP SCHEMA` used to
+  be ignored while the schema's `CREATE SCHEMA` and contents stayed.
+- A table rename no longer breaks the baseline's order. An index, foreign key, view, policy,
+  trigger, comment or row created before the rename named the old table and was emitted after
+  the rename. A renamed table's own statements now stay together and in history order, so the
+  constraint, index and sequence names PostgreSQL derived from its old name stay, and every
+  dependent names the table and its columns as they end up: an index created without a name gets
+  the name PostgreSQL gave it, and a view keeps its column names. Column renames are carried the
+  same way, and a renamed table is no longer merged across the rename by the consolidation rules.
+- Grants on a function follow its signature when a type it takes, or that type's schema, is
+  renamed; they used to be reported as not in the baseline.
+- The `paranoid` level compares the owners and privileges of objects that existed before the
+  baseline ran - the `public` schema, extension objects - with production, wherever production has
+  the object too. It used to leave every pre-existing object out, so a history's
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC` or `GRANT USAGE ON SCHEMA public TO app` missing
+  from the baseline went unnoticed. Resetting the validation database now also gives such objects
+  their owners and privileges back, where they used to keep what the baseline changed. A failed
+  paranoid check lists the differences in its error; it used to point at warnings that were never
+  shown.
+- `SCHEMA_DIFF` validation no longer fails a history that creates roles. It applies the squashed
+  baseline and the original history one after the other in the same cluster, and roles belong to
+  the cluster: the original's `CREATE ROLE` found the role the baseline had created and failed,
+  which reported the equivalence as unproven. The roles the baseline created are now dropped with
+  its database, so the original history runs in the same empty cluster the baseline had. Making
+  the history's `CREATE ROLE` idempotent instead would validate a history other than the one
+  given.
 - `scripts/run-e2e.sh` skips a fixture directory without migrations (an empty `original/` left in
   a checkout) instead of failing on it.
+
+### Known issues
+
+- The order of a table whose column default calls `nextval('sequence')` against the
+  `CREATE SEQUENCE` it names is not derived from the default (the sequence can be emitted after
+  the table). This predates this release.
 
 ## [1.3.0] - 2026-09-29
 
@@ -908,7 +984,8 @@ Correctness overhaul across the safety ladder, validation, output pipeline, and 
 - Enables better code review, parallel migrations, and incremental deployment
 - CLI: `pgsquash squash --split category` or `--split hybrid`
 
-[Unreleased]: https://github.com/capydatabase/capysquash/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/capydatabase/capysquash/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/capydatabase/capysquash/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/capydatabase/capysquash/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/capydatabase/capysquash/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/capydatabase/capysquash/compare/v1.0.0...v1.1.0

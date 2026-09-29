@@ -106,15 +106,26 @@ Tests manual override pragmas (` -  capysquash:ignore`, ` -  capysquash:no-merge
 
 **Files:** 3 migrations demonstrating pragma usage
 
-### 7. Privileges: `privileges_tables_columns`, `privileges_routines`, `privileges_schemas_sequences_types`, `privileges_default_privileges`, `privileges_drop_rename`
+### 7. Privileges: `privileges_tables_columns`, `privileges_routines`, `privileges_schemas_sequences_types`, `privileges_default_privileges`, `privileges_drop_rename`, `privileges_preexisting`, `privileges_set_role`
 
 Test that the baseline ends with the owners, privileges and default privileges
 the history leaves: table, column, view, sequence, function-overload, procedure,
 schema and type privileges, `REVOKE` after `GRANT`, grant options, ownership
 changes, `ALTER DEFAULT PRIVILEGES` (including `FOR ROLE`), bulk
-`ON ALL ... IN SCHEMA` statements, drop and recreate, renames and `SET SCHEMA`.
+`ON ALL ... IN SCHEMA` statements, drop and recreate, renames and `SET SCHEMA`,
+statements run under `SET ROLE` or `SET SESSION AUTHORIZATION` (owners and
+grantors), and privileges on objects the history does not create.
 Each fixture's README lists what it covers. Role names carry a per-fixture
 prefix because roles are shared by every database of the e2e container.
+
+### 8. Renames and schemas: `rename_schema`, `rename_types`, `rename_table_dependents`, `drop_schema_recreate`
+
+Test that renamed schemas, types (enum values, composite attributes, domains)
+and tables, and dropped and recreated schemas, reach the baseline under their
+final names with everything that depends on them: objects in a renamed
+schema, columns and function signatures of a renamed type, indexes, foreign
+keys, views, policies, triggers, comments, grants and data of a renamed
+table, and nothing of a schema dropped with CASCADE.
 
 ## Running Tests
 

@@ -24,7 +24,7 @@ import (
 	"github.com/capydatabase/capysquash/internal/utils"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/fatih/color"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
@@ -1219,6 +1219,16 @@ func (sv *SchemaValidator) validateWithSchemaDiff(ctx context.Context, originalP
 		return collectSchemaSignature(ctx, db)
 	}
 
+	// Roles belong to the cluster, not to validation_diff: the ones the
+	// squashed baseline creates would still exist when the original history
+	// runs, and its plain CREATE ROLE would fail. Record the cluster's roles
+	// so the original history gets the same cluster the baseline had.
+	clusterRoles, err := listRoles(ctx, adminDB)
+	if err != nil {
+		result.Error = err.Error()
+		return result, err
+	}
+
 	// Step 1: apply squashed migrations first (fail fast on broken output).
 	if err := recreateDiffDatabase(); err != nil {
 		result.Error = err.Error()
@@ -1244,6 +1254,10 @@ func (sv *SchemaValidator) validateWithSchemaDiff(ctx context.Context, originalP
 		result.Error = err.Error()
 		return result, err
 	}
+	if err := dropRolesExcept(ctx, adminDB, clusterRoles); err != nil {
+		result.Error = err.Error()
+		return result, err
+	}
 	originalMigErr := sv.applyMigrationsToDatabase(ctx, diffDSN, originalPath)
 	if originalMigErr != nil && sv.config.Verbose {
 		color.Yellow("📊 Original migrations failed to apply - schema equivalence cannot be proven\n")
@@ -1262,6 +1276,47 @@ func (sv *SchemaValidator) validateWithSchemaDiff(ctx context.Context, originalP
 	sv.reportComparisonOutcome(result)
 
 	return result, nil
+}
+
+// listRoles returns the names of the cluster's roles, the predefined pg_*
+// roles excepted.
+func listRoles(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT rolname FROM pg_catalog.pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname")
+	if err != nil {
+		return nil, fmt.Errorf("list the cluster's roles: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var roles []string
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil, fmt.Errorf("list the cluster's roles: %w", err)
+		}
+		roles = append(roles, role)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the cluster's roles: %w", err)
+	}
+	return roles, nil
+}
+
+// dropRolesExcept drops every role not in keep (pg_* roles aside): the
+// roles a migration history created in a scratch cluster, once the
+// database it created objects in is gone.
+func dropRolesExcept(ctx context.Context, db *sql.DB, keep []string) error {
+	current, err := listRoles(ctx, db)
+	if err != nil {
+		return err
+	}
+	for _, role := range current {
+		if slices.Contains(keep, role) {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, "DROP ROLE "+pq.QuoteIdentifier(role)); err != nil {
+			return fmt.Errorf("drop role %s created by the squashed migrations: %w", role, err)
+		}
+	}
+	return nil
 }
 
 // =============================================================================
@@ -2386,6 +2441,9 @@ func (sv *SchemaValidator) applyMigrationsToDatabase(ctx context.Context, dsn, m
 	if err != nil {
 		return err
 	}
+	// Every file runs in the same session, as with a migration tool that
+	// keeps one connection: a SET ROLE in one file still holds in the next.
+	db.SetMaxOpenConns(1)
 	defer func() {
 		if err := db.Close(); err != nil {
 			utils.GetDefaultLogger().Warn("Failed to close database: %v", err)
@@ -2498,6 +2556,20 @@ func ExecuteSQLScript(ctx context.Context, db *sql.DB, sqlContent, filePath stri
 	// Split SQL into individual statements
 	statements := splitSQLStatements(sqlContent)
 
+	// One session runs the whole script, as psql or a migration tool would:
+	// SET ROLE, SET search_path and BEGIN ... COMMIT reach the statements
+	// after them.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return errors.NewError(
+			errors.ErrorCodeDatabaseNotAccessible,
+			fmt.Sprintf("open a session to apply %s", filePath),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+	defer func() { _ = conn.Close() }()
+
 	// Execute each statement
 	for i, stmt := range statements {
 		// Skip empty statements
@@ -2507,7 +2579,7 @@ func ExecuteSQLScript(ctx context.Context, db *sql.DB, sqlContent, filePath stri
 		}
 
 		// Execute the statement
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return errors.NewError(
 				errors.ErrorCodeInvalidSQL,
 				fmt.Sprintf("failed to execute statement %d in migration %s", i+1, filePath),

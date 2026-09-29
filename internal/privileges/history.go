@@ -67,12 +67,20 @@ func ownsAlterOwner(stmt *pg_query.AlterOwnerStmt) bool {
 }
 
 // Owns reports whether a statement belongs to the privilege model instead
-// of the consolidation pipeline.
+// of the consolidation pipeline. SET ROLE and SET SESSION AUTHORIZATION are
+// among them: the model follows the role each statement runs as, and the
+// baseline writes the owners and grantors that follow from it out
+// explicitly instead of switching roles between object definitions.
 func Owns(node *pg_query.Node) bool {
 	switch n := node.GetNode().(type) {
 	case *pg_query.Node_GrantStmt, *pg_query.Node_GrantRoleStmt, *pg_query.Node_AlterDefaultPrivilegesStmt,
 		*pg_query.Node_CreateRoleStmt:
 		return true
+	case *pg_query.Node_VariableSetStmt:
+		switch strings.ToLower(n.VariableSetStmt.GetName()) {
+		case "role", "session_authorization":
+			return true
+		}
 	case *pg_query.Node_AlterOwnerStmt:
 		return ownsAlterOwner(n.AlterOwnerStmt)
 	case *pg_query.Node_AlterTableStmt:

@@ -120,6 +120,36 @@ func GetAllFixtures() []FixtureTest {
 			Path:        "privileges_drop_rename",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
+		{
+			Name:        "privileges_set_role",
+			Path:        "privileges_set_role",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "privileges_preexisting",
+			Path:        "privileges_preexisting",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "rename_schema",
+			Path:        "rename_schema",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "rename_types",
+			Path:        "rename_types",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "rename_table_dependents",
+			Path:        "rename_table_dependents",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "drop_schema_recreate",
+			Path:        "drop_schema_recreate",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
 	}
 }
 

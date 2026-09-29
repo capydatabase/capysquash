@@ -105,10 +105,21 @@ func CompareCatalogSnapshots(original, candidate *CatalogSnapshot) (*SchemaDiff,
 type ClaimedDatabase struct {
 	db             *sql.DB
 	allowedSchemas []string
-	schemas        []string // every non-system schema present at claim time
-	extensions     []string // every extension installed at claim time
-	resetSchemas   []string // pre-existing schemas whose contents Reset drops (not allowed, not extension-owned)
-	defaultACLs    []string // pg_default_acl entries (OIDs) present at claim time
+	schemas        []string                    // every non-system schema present at claim time
+	extensions     []string                    // every extension installed at claim time
+	resetSchemas   []string                    // pre-existing schemas whose contents Reset drops (not allowed, not extension-owned)
+	defaultACLs    []string                    // pg_default_acl entries (OIDs) present at claim time
+	privileges     map[string]objectPrivileges // owner and ACL of every object present at claim time
+}
+
+// objectPrivileges is an object's owner and privileges, as Reset needs them
+// to put them back.
+type objectPrivileges struct {
+	alterKind string   // the keyword ALTER ... OWNER TO takes: SCHEMA, TABLE, VIEW, ROUTINE, TYPE, DOMAIN, ...
+	grantKind string   // the keyword GRANT takes: SCHEMA, TABLE, SEQUENCE, ROUTINE, TYPE
+	target    string   // the object's name, quoted and qualified
+	owner     string   // quoted
+	acl       []string // sorted entries: grantee=PRIVILEGE, with * when grantable; grantee quoted or PUBLIC
 }
 
 // ClaimEmptyDatabase refuses a database that is not empty, with the same check
@@ -136,6 +147,10 @@ func ClaimEmptyDatabase(ctx context.Context, db *sql.DB, allowedSchemas []string
 	if err != nil {
 		return nil, fmt.Errorf("list validation database default privileges: %w", err)
 	}
+	privileges, err := loadObjectPrivileges(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("list validation database privileges: %w", err)
+	}
 	return &ClaimedDatabase{
 		db:             db,
 		allowedSchemas: allowed,
@@ -143,6 +158,7 @@ func ClaimEmptyDatabase(ctx context.Context, db *sql.DB, allowedSchemas []string
 		extensions:     extensions,
 		resetSchemas:   resetSchemas,
 		defaultACLs:    defaultACLs,
+		privileges:     privileges,
 	}, nil
 }
 
@@ -150,12 +166,14 @@ func ClaimEmptyDatabase(ctx context.Context, db *sql.DB, allowedSchemas []string
 // schemas (CASCADE), then every relation, routine and type left in the
 // pre-existing schemas that were required to be empty (usually public), and
 // the default privileges (ALTER DEFAULT PRIVILEGES) set since the claim,
-// which would otherwise reach the objects the next run creates. Allowed
-// schemas are not touched, and objects that live outside schemas are kept:
+// which would otherwise reach the objects the next run creates. It then puts
+// back the owner and privileges every remaining object had at the claim (a
+// baseline revokes CREATE on schema public, or grants on an extension's
+// functions), so the next run starts where this one did. Allowed schemas
+// are otherwise not touched, and objects that live outside schemas are kept:
 // roles are cluster-wide, and publications and event triggers belong to the
-// database; privileges granted on the pre-existing schemas themselves stay
-// too. Reset finally re-runs the emptiness check, so a database it returns
-// without error can be claimed again.
+// database. Reset finally re-runs the emptiness check, so a database it
+// returns without error can be claimed again.
 func (c *ClaimedDatabase) Reset(ctx context.Context) error {
 	extensions, err := queryNames(ctx, c.db, "SELECT extname FROM pg_catalog.pg_extension ORDER BY extname")
 	if err != nil {
@@ -203,11 +221,177 @@ func (c *ClaimedDatabase) Reset(ctx context.Context) error {
 		}
 	}
 
+	if err := c.restorePrivileges(ctx); err != nil {
+		return err
+	}
+
 	if err := requireEmptyValidationDatabase(ctx, c.db, c.allowedSchemas); err != nil {
 		return fmt.Errorf("reset validation database: %w", err)
 	}
 	return nil
 }
+
+// restorePrivileges gives every object present at the claim its owner and
+// privileges back: owners first (changing the owner moves the owner's own
+// privileges), then the privileges of each object whose ACL changed, revoked
+// from every grantee and granted as recorded.
+func (c *ClaimedDatabase) restorePrivileges(ctx context.Context) error {
+	current, err := loadObjectPrivileges(ctx, c.db)
+	if err != nil {
+		return fmt.Errorf("reset validation database: list privileges: %w", err)
+	}
+	keys := make([]string, 0, len(c.privileges))
+	for key := range c.privileges {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	var statements []string
+	for _, key := range keys {
+		want, now := c.privileges[key], current[key]
+		if now.target != "" && now.owner != want.owner {
+			statements = append(statements, fmt.Sprintf("ALTER %s %s OWNER TO %s", want.alterKind, want.target, want.owner))
+		}
+	}
+	if err := c.exec(ctx, statements); err != nil {
+		return err
+	}
+
+	if current, err = loadObjectPrivileges(ctx, c.db); err != nil {
+		return fmt.Errorf("reset validation database: list privileges: %w", err)
+	}
+	statements = statements[:0]
+	for _, key := range keys {
+		want, now := c.privileges[key], current[key]
+		if now.target == "" || slices.Equal(now.acl, want.acl) {
+			continue
+		}
+		statements = append(statements, restoreACLStatements(want, now)...)
+	}
+	return c.exec(ctx, statements)
+}
+
+func (c *ClaimedDatabase) exec(ctx context.Context, statements []string) error {
+	for _, statement := range statements {
+		if _, err := c.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("reset validation database (%s): %w", statement, err)
+		}
+	}
+	return nil
+}
+
+// restoreACLStatements revokes everything an object's grantees hold now and
+// grants what they held at the claim.
+func restoreACLStatements(want, now objectPrivileges) []string {
+	grantees := []string{"PUBLIC"}
+	for _, entry := range now.acl {
+		grantee, _, _ := strings.Cut(entry, "=")
+		if !slices.Contains(grantees, grantee) {
+			grantees = append(grantees, grantee)
+		}
+	}
+	statements := []string{fmt.Sprintf("REVOKE ALL ON %s %s FROM %s", want.grantKind, want.target, strings.Join(grantees, ", "))}
+	type grant struct{ plain, grantable []string }
+	byGrantee := map[string]*grant{}
+	var order []string
+	for _, entry := range want.acl {
+		grantee, privilege, _ := strings.Cut(entry, "=")
+		g := byGrantee[grantee]
+		if g == nil {
+			g = &grant{}
+			byGrantee[grantee] = g
+			order = append(order, grantee)
+		}
+		if name, ok := strings.CutSuffix(privilege, "*"); ok {
+			g.grantable = append(g.grantable, name)
+		} else {
+			g.plain = append(g.plain, privilege)
+		}
+	}
+	for _, grantee := range order {
+		g := byGrantee[grantee]
+		if len(g.plain) > 0 {
+			statements = append(statements, fmt.Sprintf("GRANT %s ON %s %s TO %s", strings.Join(g.plain, ", "), want.grantKind, want.target, grantee))
+		}
+		if len(g.grantable) > 0 {
+			statements = append(statements, fmt.Sprintf("GRANT %s ON %s %s TO %s WITH GRANT OPTION", strings.Join(g.grantable, ", "), want.grantKind, want.target, grantee))
+		}
+	}
+	return statements
+}
+
+// loadObjectPrivileges runs objectPrivilegesQuery.
+func loadObjectPrivileges(ctx context.Context, db *sql.DB) (map[string]objectPrivileges, error) {
+	rows, err := db.QueryContext(ctx, objectPrivilegesQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]objectPrivileges{}
+	for rows.Next() {
+		var p objectPrivileges
+		var acl string
+		if err := rows.Scan(&p.alterKind, &p.grantKind, &p.target, &p.owner, &acl); err != nil {
+			return nil, err
+		}
+		if acl != "" {
+			p.acl = strings.Split(acl, ",")
+		}
+		out[p.alterKind+" "+p.target] = p
+	}
+	return out, rows.Err()
+}
+
+// objectPrivilegesQuery lists the owner and privileges of every schema,
+// relation, routine and type outside the system schemas. A NULL ACL is
+// listed as the acldefault() it stands for.
+const objectPrivilegesQuery = `
+WITH objects AS (
+  SELECT 'SCHEMA' AS alter_kind, 'SCHEMA' AS grant_kind, pg_catalog.quote_ident(n.nspname) AS target, n.nspowner AS owner,
+    COALESCE(n.nspacl, pg_catalog.acldefault('n'::"char", n.nspowner)) AS acl
+  FROM pg_catalog.pg_namespace n
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+  UNION ALL
+  SELECT CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE'
+      WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END,
+    CASE c.relkind WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+    pg_catalog.format('%I.%I', n.nspname, c.relname), c.relowner,
+    COALESCE(c.relacl, pg_catalog.acldefault((CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::"char", c.relowner))
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+  UNION ALL
+  SELECT 'ROUTINE', 'ROUTINE', p.oid::pg_catalog.regprocedure::text, p.proowner,
+    COALESCE(p.proacl, pg_catalog.acldefault('f'::"char", p.proowner))
+  FROM pg_catalog.pg_proc p
+  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_temp_%'
+  UNION ALL
+  SELECT CASE t.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END, 'TYPE',
+    pg_catalog.format('%I.%I', n.nspname, t.typname), t.typowner,
+    COALESCE(t.typacl, pg_catalog.acldefault('T'::"char", t.typowner))
+  FROM pg_catalog.pg_type t
+  JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND (t.typtype IN ('e', 'd', 'r', 'm') OR (t.typtype = 'c' AND EXISTS (
+      SELECT 1 FROM pg_catalog.pg_class tc WHERE tc.oid = t.typrelid AND tc.relkind = 'c')))
+)
+SELECT o.alter_kind, o.grant_kind, o.target, pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(o.owner)),
+  COALESCE((
+    SELECT pg_catalog.string_agg(entries.entry, ',' ORDER BY entries.entry)
+    FROM (
+      SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END
+        || '=' || a.privilege_type || CASE WHEN a.is_grantable THEN '*' ELSE '' END AS entry
+      FROM pg_catalog.aclexplode(o.acl) a
+    ) entries
+  ), '')
+FROM objects o`
 
 func queryNames(ctx context.Context, db *sql.DB, query string, args ...any) ([]string, error) {
 	rows, err := db.QueryContext(ctx, query, args...)

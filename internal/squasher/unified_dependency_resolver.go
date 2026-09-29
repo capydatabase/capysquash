@@ -1146,6 +1146,9 @@ func (udr *UnifiedDependencyResolver) extractTableProvisions(sql string) []strin
 					provides = append(provides, tableName)
 				}
 			}
+			// A renamed table's statements stay together: the block also
+			// provides the names the table gets.
+			provides = append(provides, renamedTableProvisions(stmt)...)
 		}
 
 		if len(provides) > 0 {
@@ -1903,4 +1906,25 @@ func (udr *UnifiedDependencyResolver) EnhanceExtensionSQL(sql string) string {
 	}
 
 	return strings.Join(enhanced, ";\n") + ";"
+}
+
+// renamedTableProvisions returns the name ALTER TABLE ... RENAME TO or
+// SET SCHEMA gives a table.
+func renamedTableProvisions(stmt types.Statement) []string {
+	if stmt.ParseTree == nil || len(stmt.ParseTree.GetStmts()) == 0 {
+		return nil
+	}
+	switch n := stmt.ParseTree.GetStmts()[0].GetStmt().GetNode().(type) {
+	case *pg_query.Node_RenameStmt:
+		if n.RenameStmt.GetRenameType() != pg_query.ObjectType_OBJECT_TABLE || n.RenameStmt.GetRelation() == nil {
+			return nil
+		}
+		return []string{parser.QualifiedTableName(n.RenameStmt.GetRelation().GetSchemaname(), n.RenameStmt.GetNewname())}
+	case *pg_query.Node_AlterObjectSchemaStmt:
+		if n.AlterObjectSchemaStmt.GetObjectType() != pg_query.ObjectType_OBJECT_TABLE || n.AlterObjectSchemaStmt.GetRelation() == nil {
+			return nil
+		}
+		return []string{parser.QualifiedTableName(n.AlterObjectSchemaStmt.GetNewschema(), n.AlterObjectSchemaStmt.GetRelation().GetRelname())}
+	}
+	return nil
 }

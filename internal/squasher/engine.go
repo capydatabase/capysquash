@@ -19,6 +19,7 @@ import (
 	"github.com/capydatabase/capysquash/internal/config"
 	"github.com/capydatabase/capysquash/internal/errors"
 	"github.com/capydatabase/capysquash/internal/metadata"
+	"github.com/capydatabase/capysquash/internal/normalize"
 	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/performance"
 	"github.com/capydatabase/capysquash/internal/plugins"
@@ -98,6 +99,11 @@ type Engine struct {
 	// changes and roles: the tracker never sees them, and the baseline gets
 	// them back as its ROLES and PRIVILEGES sections.
 	privilegeHistory *privileges.History
+
+	// normalizer rewrites the history to final names before the tracker
+	// sees it (renames, schemas, DROP SCHEMA); the baseline gets the
+	// schemas back as its SCHEMAS section.
+	normalizer *normalize.Normalizer
 
 	// Streaming components (optional)
 	streamingTracker *tracking.StreamingTracker
@@ -447,6 +453,7 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 		processedFiles:       make(map[string]bool),
 		consolidationResults: make(map[string]*tracking.ConsolidationResult),
 		privilegeHistory:     privileges.NewHistory(),
+		normalizer:           normalize.New(),
 
 		// Streaming components
 		streamingTracker:    streamingTracker,
@@ -1279,26 +1286,50 @@ func (e *Engine) SquashFromDirectory(dir string) (*SquashResult, error) {
 	extAnalysis := e.prepareMigrationEnvironment(ctx, migrationContents)
 
 	// The streaming tracker may see the files in any order, but privileges
-	// depend on it: record them from the loaded contents, in sequence order,
-	// and keep the statements the privilege history owns from the tracker.
-	sequences := make([]int, 0, len(migrationContents))
-	for sequence := range migrationContents {
-		sequences = append(sequences, sequence)
+	// and the rewrite to final names depend on it: record the privileges and
+	// rewrite each file from the loaded contents, in sequence order, and let
+	// the tracker see each file's rewritten statements.
+	files, err := migrationFilesInDir(dir)
+	if err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeValidationFailed,
+			fmt.Sprintf("failed to read migration files from directory %s", dir),
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
 	}
-	sort.Ints(sequences)
-	for _, sequence := range sequences {
-		migration, err := parser.ParseMigration(migrationContents[sequence], fmt.Sprintf("migration_%05d", sequence))
+	parsed := make([]*types.Migration, len(files))
+	for i, path := range files {
+		migration, err := parser.ParseMigration(migrationContents[i], path)
 		if err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeSyntaxError,
-				fmt.Sprintf("parse migration %d", sequence),
+				fmt.Sprintf("parse migration %s", path),
 				errors.SeverityError,
 				errors.CategoryParsing,
 			).WithInnerError(err)
 		}
-		e.withoutPrivilegeStatements(migration)
+		parsed[i] = migration
+		e.normalizer.Observe(privileges.Filter(migration.Statements))
 	}
-	e.streamingTracker.SetStatementFilter(privileges.Filter)
+	e.normalizer.Finish()
+	trackedByFile := make(map[string][]types.Statement, len(files))
+	for i, path := range files {
+		tracked, err := e.trackedStatements(parsed[i])
+		if err != nil {
+			return nil, err
+		}
+		trackedByFile[path] = tracked.Statements
+	}
+	e.recordNormalizerWarnings()
+	e.streamingTracker.SetStatementFilter(func(statements []types.Statement) []types.Statement {
+		if len(statements) > 0 {
+			if tracked, ok := trackedByFile[statements[0].Filename]; ok {
+				return tracked
+			}
+		}
+		return privileges.Filter(statements)
+	})
 
 	// Phase 1: Stream parse and track migrations
 	e.updatePhase("Parsing and Tracking")
@@ -1375,6 +1406,26 @@ func (e *Engine) SquashFromDirectory(dir string) (*SquashResult, error) {
 // directory (sorted by filename) keyed by their sequence position. It is used
 // by directory streaming to run plugin detection and extension analysis.
 func loadMigrationContentsFromDir(dir string) (map[int]string, error) {
+	files, err := migrationFilesInDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	contents := make(map[int]string, len(files))
+	for i, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		contents[i] = string(data)
+	}
+
+	return contents, nil
+}
+
+// migrationFilesInDir lists the .sql files of a directory in name order, as
+// paths joined to dir the way the streaming processor spells them.
+func migrationFilesInDir(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -1388,17 +1439,10 @@ func loadMigrationContentsFromDir(dir string) (map[int]string, error) {
 		files = append(files, entry.Name())
 	}
 	sort.Strings(files)
-
-	contents := make(map[int]string, len(files))
 	for i, name := range files {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", name, err)
-		}
-		contents[i] = string(data)
+		files[i] = filepath.Join(dir, name)
 	}
-
-	return contents, nil
+	return files, nil
 }
 
 // prepareMigrationEnvironment initializes plugins and analyzes required
@@ -1483,9 +1527,9 @@ func (e *Engine) parseAndTrackMigrations(ctx context.Context, migrations map[int
 	}
 	sort.Ints(sequences)
 
+	parsed := make([]*types.Migration, 0, len(sequences))
 	for _, sequence := range sequences {
-		migrationContent := migrations[sequence]
-		migration, err := parser.ParseMigration(migrationContent, fmt.Sprintf("migration_%05d", sequence))
+		migration, err := parser.ParseMigration(migrations[sequence], fmt.Sprintf("migration_%05d", sequence))
 		if err != nil {
 			return errors.NewError(
 				errors.ErrorCodeSyntaxError,
@@ -1494,13 +1538,24 @@ func (e *Engine) parseAndTrackMigrations(ctx context.Context, migrations map[int
 				errors.CategoryParsing,
 			).WithInnerError(err)
 		}
+		parsed = append(parsed, migration)
+		// First pass of the normalizer: learn the names objects end with.
+		e.normalizer.Observe(privileges.Filter(migration.Statements))
+	}
+	e.normalizer.Finish()
 
-		// Process with enhanced tracker; the privilege statements go to the
-		// privilege history instead.
-		e.tracker.ProcessMigration(e.withoutPrivilegeStatements(migration), sequence)
+	for i, sequence := range sequences {
+		migration := parsed[i]
+		// The privilege statements go to the privilege history; the rest is
+		// rewritten to final names before the tracker sees it.
+		tracked, err := e.trackedStatements(migration)
+		if err != nil {
+			return err
+		}
+		e.tracker.ProcessMigration(tracked, sequence)
 
 		// Collect data operations separately (INSERT/UPDATE/DELETE)
-		for stmtIndex, stmt := range migration.Statements {
+		for stmtIndex, stmt := range tracked.Statements {
 			if stmt.IsDataOp || stmt.ObjectType == types.TypeDoBlock {
 				trackedStmt := stmt
 				if !trackedStmt.IsDataOp {
@@ -1523,6 +1578,7 @@ func (e *Engine) parseAndTrackMigrations(ctx context.Context, migrations map[int
 		// Mark as processed
 		e.processedFiles[migration.Filename] = true
 	}
+	e.recordNormalizerWarnings()
 
 	// Get object lifecycles from tracker
 	lifecycles := e.tracker.GetObjectsByCategory()
@@ -1536,13 +1592,23 @@ func (e *Engine) parseAndTrackMigrations(ctx context.Context, migrations map[int
 	return nil
 }
 
-// withoutPrivilegeStatements records a migration in the privilege history
-// and returns a copy without the statements the history owns.
-func (e *Engine) withoutPrivilegeStatements(migration *types.Migration) *types.Migration {
+// trackedStatements records a migration in the privilege history and
+// returns a copy holding the statements the tracker handles, rewritten by
+// the normalizer (second pass) to the names objects end with.
+func (e *Engine) trackedStatements(migration *types.Migration) (*types.Migration, error) {
 	tracked := *migration
-	tracked.Statements = e.privilegeHistory.Record(migration.Statements)
+	rewritten, err := e.normalizer.Rewrite(e.privilegeHistory.Record(migration.Statements))
+	if err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeAnalysisError,
+			fmt.Sprintf("rewrite %s to final object names", migration.Filename),
+			errors.SeverityError,
+			errors.CategoryParsing,
+		).WithInnerError(err)
+	}
+	tracked.Statements = rewritten
 	// The tracker skips a schema statement it cannot name; say so instead of
-	// letting it vanish (ALTER SCHEMA/TYPE ... RENAME are the known cases).
+	// letting it vanish.
 	for _, stmt := range tracked.Statements {
 		if stmt.ObjectName == "" && !stmt.IsDataOp {
 			statement, _, _ := strings.Cut(strings.TrimSpace(stmt.SQL), "\n")
@@ -1551,7 +1617,16 @@ func (e *Engine) withoutPrivilegeStatements(migration *types.Migration) *types.M
 			e.logger.Warn("%s", warning)
 		}
 	}
-	return &tracked
+	return &tracked, nil
+}
+
+// recordNormalizerWarnings adds what the normalizer could not rewrite to the
+// squash warnings.
+func (e *Engine) recordNormalizerWarnings() {
+	for _, warning := range e.normalizer.Warnings() {
+		e.warnings = append(e.warnings, "Renames and schemas: "+warning)
+		e.logger.Warn("Renames and schemas: %s", warning)
+	}
 }
 
 // analyzeDependenciesAndRisks analyzes object dependencies and assesses risks
@@ -1737,6 +1812,16 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 			continue
 		}
 
+		// A renamed table keeps its statements as written, in order: the
+		// rules would merge them across the rename and change the names
+		// PostgreSQL derives from the table and column names.
+		if result := renamedTableResult(lifecycle); result != nil {
+			consolidatedObjects[key] = result
+			e.consolidationResults[key] = result
+			e.logger.Info("Kept the statements of renamed table %s in history order", key)
+			continue
+		}
+
 		// Apply consolidation rules
 		result, err := e.ruleEngine.ApplyRules(lifecycle, e)
 		if err != nil {
@@ -1845,6 +1930,49 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 
 	e.logger.Info("Successfully consolidated %d objects", len(consolidatedObjects))
 	return consolidatedObjects, nil
+}
+
+// renamedTableResult returns the statements of a table that is renamed,
+// moved to another schema or has a column renamed, from its last CREATE on,
+// in history order; nil for any other lifecycle.
+func renamedTableResult(lifecycle *tracking.ObjectLifecycle) *tracking.ConsolidationResult {
+	if lifecycle.Type != types.TypeTable {
+		return nil
+	}
+	renamed := false
+	start := -1
+	for i, event := range lifecycle.History {
+		if event.Operation == types.OpCreate {
+			start = i
+		}
+		if tree := event.Statement.ParseTree; tree != nil && len(tree.GetStmts()) > 0 {
+			switch tree.GetStmts()[0].GetStmt().GetNode().(type) {
+			case *pg_query.Node_RenameStmt, *pg_query.Node_AlterObjectSchemaStmt:
+				renamed = true
+			}
+		}
+	}
+	if !renamed || start < 0 {
+		return nil
+	}
+	var sql strings.Builder
+	var statements []types.Statement
+	for _, event := range lifecycle.History[start:] {
+		if event.Operation == types.OpGrant || event.Operation == types.OpRevoke {
+			continue
+		}
+		if sql.Len() > 0 {
+			sql.WriteString("\n\n")
+		}
+		sql.WriteString(terminateSQLStatement(event.Statement.SQL))
+		statements = append(statements, event.Statement)
+	}
+	return &tracking.ConsolidationResult{
+		OriginalStatements: statements,
+		ConsolidatedSQL:    sql.String(),
+		Optimizations:      []string{"renamed_table_in_history_order"},
+		RiskLevel:          tracking.RiskLevelLow,
+	}
 }
 
 func lifecycleDependsOnDroppedTables(lifecycle *tracking.ObjectLifecycle, droppedTables map[string]struct{}) bool {
@@ -2041,6 +2169,14 @@ func (e *Engine) generateOptimizedSQL(ctx context.Context, consolidatedObjects m
 		e.sqlBuilder.Comment("Roles belong to the whole cluster: each is created only when it does not exist yet")
 		e.sqlBuilder.NL()
 		e.sqlBuilder.Statement(rolesSQL)
+		e.sqlBuilder.NL().NL()
+	}
+
+	// Schemas come next: extensions, types and tables are created in them.
+	if schemasSQL := e.normalizer.SchemasSQL(); schemasSQL != "" {
+		e.sqlBuilder.NL().Comment("=== SCHEMAS ===")
+		e.sqlBuilder.NL()
+		e.sqlBuilder.Statement(schemasSQL)
 		e.sqlBuilder.NL().NL()
 	}
 
@@ -3303,28 +3439,33 @@ func (e *Engine) validateAgainstDatabase(ctx context.Context, sql string) error 
 		).WithInnerError(err)
 	}
 
+	var differences []string
 	for _, ext := range result.MissingExtensions {
-		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: the baseline creates extension %s, which production does not have", ext))
+		differences = append(differences, fmt.Sprintf("the baseline creates extension %s, which production does not have", ext))
 	}
 	for _, mismatch := range result.TypeMismatches {
-		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: column %s.%s: production type %s, baseline type %s",
+		differences = append(differences, fmt.Sprintf("column %s.%s: production type %s, baseline type %s",
 			mismatch.Object, mismatch.Column, mismatch.ExpectedType, mismatch.ActualType))
 	}
 	for _, conflict := range result.ConstraintConflicts {
-		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: constraint %s on %s (%s): production %q, baseline %q",
+		differences = append(differences, fmt.Sprintf("constraint %s on %s (%s): production %q, baseline %q",
 			conflict.ConstraintName, conflict.Table, conflict.ConflictType, conflict.ExpectedDef, conflict.ActualDef))
 	}
 	for _, drift := range result.SchemaDrift {
-		e.warnings = append(e.warnings, fmt.Sprintf("ERROR: schema drift (%s): %s", drift.DriftType, drift.Description))
+		differences = append(differences, fmt.Sprintf("schema drift (%s) %s %s: %s", drift.DriftType, drift.ObjectType, drift.Object, drift.Description))
+	}
+	for _, difference := range differences {
+		e.warnings = append(e.warnings, "ERROR: "+difference)
 	}
 	e.warnings = append(e.warnings, result.Warnings...)
 
-	differences := len(result.MissingExtensions) + len(result.TypeMismatches) + len(result.ConstraintConflicts) + len(result.SchemaDrift)
 	if !result.IsValid {
-		e.logger.Info("☒ Database validation failed: %d differences from production", differences)
+		e.logger.Info("☒ Database validation failed: %d differences from production", len(differences))
+		// The warnings are not shown when the squash fails, so the error
+		// carries the differences.
 		return errors.NewError(
 			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("the squashed baseline does not reproduce production: %d differences (listed in the warnings)", differences),
+			fmt.Sprintf("the squashed baseline does not reproduce production: %d differences:\n  %s", len(differences), strings.Join(differences, "\n  ")),
 			errors.SeverityError,
 			errors.CategoryValidation,
 		)
@@ -3469,6 +3610,22 @@ func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int
 		migrationFiles = append(migrationFiles, migrationFile)
 	}
 
+	// First pass of the normalizer: learn the names objects end with. Each
+	// file is parsed again below, so only one is held at a time.
+	for _, migrationFile := range migrationFiles {
+		migration, err := parser.ParseMigration(string(migrationFile.Content), migrationFile.Path)
+		if err != nil {
+			return errors.NewError(
+				errors.ErrorCodeSyntaxError,
+				fmt.Sprintf("parse migration %s", migrationFile.Path),
+				errors.SeverityError,
+				errors.CategoryParsing,
+			).WithInnerError(err)
+		}
+		e.normalizer.Observe(privileges.Filter(migration.Statements))
+	}
+	e.normalizer.Finish()
+
 	// Process in batches to manage memory
 	processedCount := 0
 	for _, migrationFile := range migrationFiles {
@@ -3500,7 +3657,12 @@ func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int
 
 		// Process through tracker; the privilege statements go to the
 		// privilege history instead.
-		e.streamingTracker.GetTracker().ProcessMigration(e.withoutPrivilegeStatements(migration), migrationFile.Sequence)
+		tracked, err := e.trackedStatements(migration)
+		if err != nil {
+			e.memManager.ReleaseMemory(migrationFile.Size)
+			return err
+		}
+		e.streamingTracker.GetTracker().ProcessMigration(tracked, migrationFile.Sequence)
 
 		// Release memory
 		e.memManager.ReleaseMemory(migrationFile.Size)
@@ -3522,6 +3684,7 @@ func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int
 		default:
 		}
 	}
+	e.recordNormalizerWarnings()
 
 	return nil
 }

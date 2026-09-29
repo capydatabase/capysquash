@@ -358,6 +358,13 @@ func TestOwnsOnlyPrivilegeStatements(t *testing.T) {
 		"ALTER LARGE OBJECT 12 OWNER TO r":                                false,
 		"ALTER FOREIGN DATA WRAPPER w OWNER TO r":                         false,
 		"ALTER DEFAULT PRIVILEGES FOR ROLE a GRANT USAGE ON SCHEMAS TO r": true,
+		"SET ROLE r":                  true,
+		"RESET ROLE":                  true,
+		"SET LOCAL ROLE r":            true,
+		"SET SESSION AUTHORIZATION r": true,
+		"RESET SESSION AUTHORIZATION": true,
+		"SET search_path TO app":      false,
+		"RESET ALL":                   false,
 	}
 	for sql, want := range cases {
 		parsed, err := pg_query.Parse(sql)
@@ -385,17 +392,142 @@ func TestQuoteIdent(t *testing.T) {
 	}
 }
 
-func TestChooseRelationNameFollowsPostgreSQL(t *testing.T) {
-	never := func(string) bool { return false }
-	if got := chooseRelationName("orders", "id", "seq", never); got != "orders_id_seq" {
-		t.Errorf("got %s", got)
+func TestRoutineGrantsFollowRenamedArgumentTypes(t *testing.T) {
+	history := `
+CREATE SCHEMA staging;
+CREATE TYPE public.mood AS ENUM ('a');
+CREATE TYPE staging.kind AS ENUM ('b');
+CREATE FUNCTION public.describe(m mood, k staging.kind, ms mood[]) RETURNS text LANGUAGE sql RETURN 'x';
+GRANT EXECUTE ON FUNCTION public.describe(mood, staging.kind, mood[]) TO reader;
+ALTER TYPE public.mood RENAME TO feeling;
+ALTER SCHEMA staging RENAME TO ingest;`
+	baseline := `
+CREATE SCHEMA ingest;
+CREATE TYPE public.feeling AS ENUM ('a');
+CREATE TYPE ingest.kind AS ENUM ('b');
+CREATE FUNCTION public.describe(m feeling, k ingest.kind, ms feeling[]) RETURNS text LANGUAGE sql RETURN 'x';`
+	sql, warnings := section(t, history, baseline)
+	assertStatements(t, sql, "GRANT ALL ON FUNCTION public.describe(feeling,ingest.kind,feeling[]) TO reader")
+	if len(warnings) > 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
 	}
-	long := strings.Repeat("t", 60)
-	if got := chooseRelationName(long, "id", "seq", never); got != strings.Repeat("t", 56)+"_id_seq" || len(got) != 63 {
-		t.Errorf("truncation: got %s (%d)", got, len(got))
+}
+
+func TestObjectsCreatedUnderSetRoleBelongToThatRole(t *testing.T) {
+	history := `
+CREATE SCHEMA app AUTHORIZATION app_owner;
+SET ROLE app_owner;
+CREATE TABLE app.accounts (id bigserial PRIMARY KEY);
+CREATE FUNCTION app.answer() RETURNS int LANGUAGE sql AS 'select 42';
+CREATE SCHEMA owned_by_current AUTHORIZATION CURRENT_USER;
+GRANT SELECT ON app.accounts TO reader;
+RESET ROLE;
+CREATE TABLE app.audit (id int);`
+	baseline := `
+CREATE SCHEMA app AUTHORIZATION app_owner;
+CREATE SCHEMA owned_by_current;
+CREATE TABLE app.accounts (id bigserial PRIMARY KEY);
+CREATE FUNCTION app.answer() RETURNS int LANGUAGE sql AS 'select 42';
+CREATE TABLE app.audit (id int);`
+	got, warnings := section(t, history, baseline)
+	assertStatements(t, got,
+		"ALTER TABLE app.accounts OWNER TO app_owner",
+		"ALTER FUNCTION app.answer() OWNER TO app_owner",
+		"ALTER SCHEMA owned_by_current OWNER TO app_owner",
+		// The owner granted it: no role switch needed.
+		"GRANT SELECT ON TABLE app.accounts TO reader")
+	assertNoStatements(t, got, "app.audit OWNER", "accounts_id_seq OWNER", "SET ROLE")
+	if len(warnings) > 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
 	}
-	taken := func(name string) bool { return name == "orders_id_seq" }
-	if got := chooseRelationName("orders", "id", "seq", taken); got != "orders_id_seq1" {
-		t.Errorf("collision: got %s", got)
+}
+
+func TestDefaultPrivilegesUnderSetRoleAreThatRolesAndReachItsObjects(t *testing.T) {
+	history := `
+SET ROLE app_owner;
+ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO reader;
+CREATE TABLE t (id int);
+RESET ROLE;
+CREATE TABLE mine (id int);`
+	got, _ := section(t, history, "CREATE TABLE t (id int); CREATE TABLE mine (id int);")
+	assertStatements(t, got,
+		"ALTER TABLE public.t OWNER TO app_owner",
+		"GRANT SELECT ON TABLE public.t TO reader",
+		"ALTER DEFAULT PRIVILEGES FOR ROLE app_owner GRANT SELECT ON TABLES TO reader")
+	assertNoStatements(t, got, "public.mine TO reader")
+}
+
+func TestAGrantByAnotherRoleIsMadeAsThatRole(t *testing.T) {
+	history := `
+CREATE TABLE t (id int);
+GRANT SELECT, UPDATE ON t TO delegate WITH GRANT OPTION;
+SET ROLE delegate;
+GRANT SELECT ON t TO reader;
+GRANT INSERT ON t TO nobody;
+RESET ROLE;`
+	got, warnings := section(t, history, "CREATE TABLE t (id int);")
+	want := "SET ROLE delegate;\nGRANT SELECT ON TABLE public.t TO reader;\nRESET ROLE;"
+	if !strings.Contains(got, want) {
+		t.Errorf("missing the delegated grant %q in:\n%s", want, got)
+	}
+	assertStatements(t, got, "GRANT SELECT, UPDATE ON TABLE public.t TO delegate WITH GRANT OPTION")
+	assertNoStatements(t, got, "nobody")
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "without holding a grant option") {
+		t.Errorf("want one warning about the grant without a grant option, got %v", warnings)
+	}
+}
+
+func TestRevokingAGrantOptionTakesBackWhatWasGrantedWithIt(t *testing.T) {
+	history := `
+CREATE TABLE t (id int);
+GRANT SELECT ON t TO delegate WITH GRANT OPTION;
+SET ROLE delegate;
+GRANT SELECT ON t TO reader;
+RESET ROLE;
+REVOKE GRANT OPTION FOR SELECT ON t FROM delegate CASCADE;`
+	got, _ := section(t, history, "CREATE TABLE t (id int);")
+	assertStatements(t, got, "GRANT SELECT ON TABLE public.t TO delegate")
+	assertNoStatements(t, got, "reader", "SET ROLE", "WITH GRANT OPTION")
+}
+
+func TestAMemberOfTheOwnerGrantsAsTheOwner(t *testing.T) {
+	history := `
+CREATE ROLE app_owner;
+CREATE ROLE deployer;
+GRANT app_owner TO deployer;
+CREATE TABLE t (id int);
+ALTER TABLE t OWNER TO app_owner;
+SET ROLE deployer;
+GRANT SELECT ON t TO reader;
+RESET ROLE;`
+	got, _ := section(t, history, "CREATE TABLE t (id int);")
+	assertStatements(t, got, "ALTER TABLE public.t OWNER TO app_owner", "GRANT SELECT ON TABLE public.t TO reader")
+	assertNoStatements(t, got, "SET ROLE")
+}
+
+func TestSessionAuthorizationAndLocalRole(t *testing.T) {
+	history := `
+SET SESSION AUTHORIZATION app_owner;
+CREATE TABLE by_session (id int);
+SET ROLE NONE;
+CREATE TABLE still_session (id int);
+RESET SESSION AUTHORIZATION;
+BEGIN;
+SET LOCAL ROLE local_owner;
+CREATE TABLE by_local (id int);
+COMMIT;
+CREATE TABLE after_commit (id int);
+SET LOCAL ROLE ignored_owner;
+CREATE TABLE outside_transaction (id int);`
+	baseline := `CREATE TABLE by_session (id int); CREATE TABLE still_session (id int); CREATE TABLE by_local (id int);
+CREATE TABLE after_commit (id int); CREATE TABLE outside_transaction (id int);`
+	got, warnings := section(t, history, baseline)
+	assertStatements(t, got,
+		"ALTER TABLE public.by_session OWNER TO app_owner",
+		"ALTER TABLE public.still_session OWNER TO app_owner",
+		"ALTER TABLE public.by_local OWNER TO local_owner")
+	assertNoStatements(t, got, "after_commit OWNER", "outside_transaction OWNER", "ignored_owner")
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "SET LOCAL ROLE outside") {
+		t.Errorf("want one warning about SET LOCAL outside a transaction, got %v", warnings)
 	}
 }
