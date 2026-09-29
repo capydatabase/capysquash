@@ -399,7 +399,9 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 		).WithFile(configPath).WithInnerError(err).WithSuggestion("Run 'capysquash init-config' to generate a valid configuration file")
 	}
 
-	if !cmd.Flags().Changed("progress") {
+	// Config show_progress applies when --progress was not set, except under
+	// --quiet/--json, which keep stdout for the result alone.
+	if !cmd.Flags().Changed("progress") && !quietMode {
 		showProgress = cfg.Performance.ShowProgress
 	}
 
@@ -591,8 +593,9 @@ func runSquash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Config show_progress wins when --progress was not explicitly set.
-	if !cmd.Flags().Changed("progress") {
+	// Config show_progress wins when --progress was not explicitly set, except
+	// under --quiet/--json, which keep stdout for the result alone.
+	if !cmd.Flags().Changed("progress") && !quietMode && !squashJSON {
 		showProgress = cfg.Performance.ShowProgress
 	}
 
