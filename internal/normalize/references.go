@@ -679,8 +679,11 @@ func (r *rewriter) selectStmt(sel *pg_query.SelectStmt, parent *scope) []string 
 		return nil
 	}
 	if sel.GetOp() != pg_query.SetOperation_SETOP_NONE {
-		names := r.selectStmt(sel.GetLarg(), parent)
-		r.selectStmt(sel.GetRarg(), parent)
+		// A WITH on a UNION is visible to both of its queries.
+		shared := &scope{parent: parent, ctes: map[string][]string{}}
+		r.withClause(sel.GetWithClause(), shared)
+		names := r.selectStmt(sel.GetLarg(), shared)
+		r.selectStmt(sel.GetRarg(), shared)
 		for _, node := range sel.GetSortClause() {
 			r.walk(node, nil)
 		}
@@ -1010,6 +1013,30 @@ func naturalName(node *pg_query.Node) string {
 		names := stringList(n.FuncCall.GetFuncname())
 		if len(names) > 0 {
 			return names[len(names)-1]
+		}
+	case *pg_query.Node_CaseExpr:
+		return "case"
+	case *pg_query.Node_CoalesceExpr:
+		return "coalesce"
+	case *pg_query.Node_AArrayExpr:
+		return "array"
+	case *pg_query.Node_RowExpr:
+		return "row"
+	case *pg_query.Node_MinMaxExpr:
+		if n.MinMaxExpr.GetOp() == pg_query.MinMaxOp_IS_GREATEST {
+			return "greatest"
+		}
+		return "least"
+	case *pg_query.Node_AExpr:
+		if n.AExpr.GetKind() == pg_query.A_Expr_Kind_AEXPR_NULLIF {
+			return "nullif"
+		}
+	case *pg_query.Node_SubLink:
+		switch n.SubLink.GetSubLinkType() {
+		case pg_query.SubLinkType_EXISTS_SUBLINK:
+			return "exists"
+		case pg_query.SubLinkType_ARRAY_SUBLINK:
+			return "array"
 		}
 	}
 	return ""

@@ -279,3 +279,20 @@ ROLLBACK;`)
 		t.Errorf("want one warning about ROLLBACK, got %v", n.warnings)
 	}
 }
+
+func TestCommonTableExpressionsOfAUnionAreRewritten(t *testing.T) {
+	n := run(t, `
+CREATE TABLE public.a (id int, label text);
+CREATE VIEW public.v AS WITH x AS (SELECT id, label FROM public.a) SELECT id FROM x UNION SELECT id FROM x;
+ALTER TABLE public.a RENAME COLUMN label TO title;`)
+	assertContains(t, n.sql(), "WITH x AS (SELECT id, title AS label FROM public.a)")
+}
+
+func TestUnnamedExpressionIndexesKeepPostgreSQLsName(t *testing.T) {
+	n := run(t, `
+CREATE TABLE public.t (a int, b int);
+CREATE INDEX ON public.t ((CASE WHEN a > 0 THEN b END));
+CREATE INDEX ON public.t ((coalesce(a, b)));
+ALTER TABLE public.t RENAME TO u;`)
+	assertContains(t, n.sql(), "CREATE INDEX t_case_idx ON public.u", "CREATE INDEX t_coalesce_idx ON public.u")
+}
