@@ -384,3 +384,24 @@ func TestQuoteIdent(t *testing.T) {
 		}
 	}
 }
+
+func TestRoutineGrantsFollowRenamedArgumentTypes(t *testing.T) {
+	history := `
+CREATE SCHEMA staging;
+CREATE TYPE public.mood AS ENUM ('a');
+CREATE TYPE staging.kind AS ENUM ('b');
+CREATE FUNCTION public.describe(m mood, k staging.kind, ms mood[]) RETURNS text LANGUAGE sql RETURN 'x';
+GRANT EXECUTE ON FUNCTION public.describe(mood, staging.kind, mood[]) TO reader;
+ALTER TYPE public.mood RENAME TO feeling;
+ALTER SCHEMA staging RENAME TO ingest;`
+	baseline := `
+CREATE SCHEMA ingest;
+CREATE TYPE public.feeling AS ENUM ('a');
+CREATE TYPE ingest.kind AS ENUM ('b');
+CREATE FUNCTION public.describe(m feeling, k ingest.kind, ms feeling[]) RETURNS text LANGUAGE sql RETURN 'x';`
+	sql, warnings := section(t, history, baseline)
+	assertStatements(t, sql, "GRANT ALL ON FUNCTION public.describe(feeling,ingest.kind,feeling[]) TO reader")
+	if len(warnings) > 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}

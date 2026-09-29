@@ -653,16 +653,74 @@ func (m *model) rename(stmt *pg_query.RenameStmt) {
 		}
 	case pg_query.ObjectType_OBJECT_TYPE, pg_query.ObjectType_OBJECT_DOMAIN:
 		if obj := m.findType(stmt.GetObject()); obj != nil {
+			oldSchema, oldName := obj.schema, obj.name
 			m.rekey(obj, obj.schema, stmt.GetNewname())
+			m.retypeSignatures(func(arg string) string {
+				return renameTypeInArgument(arg, oldSchema, oldName, obj.schema, obj.name)
+			})
 		}
 	case pg_query.ObjectType_OBJECT_SCHEMA:
 		m.renameSchema(stmt.GetSubname(), stmt.GetNewname())
 	}
 }
 
+// retypeSignatures rewrites the argument types of every routine signature,
+// so a routine stays findable by its signature once a type it takes is
+// renamed or moved.
+func (m *model) retypeSignatures(rename func(arg string) string) {
+	for _, obj := range m.all {
+		if obj.dropped || obj.kind != kindRoutine || len(obj.args) < 2 {
+			continue
+		}
+		args := strings.Split(obj.args[1:len(obj.args)-1], ",")
+		for i, arg := range args {
+			args[i] = rename(arg)
+		}
+		if next := "(" + strings.Join(args, ",") + ")"; next != obj.args {
+			delete(m.objects, obj.key())
+			obj.args = next
+			m.objects[obj.key()] = obj
+		}
+	}
+}
+
+// renameTypeInArgument renames one argument type of a signature, spelled as
+// parser.FunctionSignatureFromArgs spells it: "public." left out, arrays as
+// "[]".
+func renameTypeInArgument(arg, oldSchema, oldName, newSchema, newName string) string {
+	base := strings.TrimRight(arg, "[]")
+	suffix := arg[len(base):]
+	if base == signatureName(oldSchema, oldName) || oldSchema == "public" && base == signatureName("", oldName) {
+		return signatureName(newSchema, newName) + suffix
+	}
+	return arg
+}
+
+// signatureName spells a type the way a signature does.
+func signatureName(schema, name string) string {
+	quote := func(part string) string {
+		if part != strings.ToLower(part) {
+			return `"` + strings.ReplaceAll(part, `"`, `""`) + `"`
+		}
+		return part
+	}
+	if schema == "" || schema == "public" {
+		return quote(name)
+	}
+	return quote(schema) + "." + quote(name)
+}
+
 func (m *model) renameSchema(oldName, newName string) {
 	if schema := m.findSchema(oldName); schema != nil {
 		m.rekey(schema, "", newName)
+	}
+	for _, obj := range slices.Clone(m.all) {
+		if !obj.dropped && obj.kind == kindType && obj.schema == oldName {
+			typeName := obj.name
+			m.retypeSignatures(func(arg string) string {
+				return renameTypeInArgument(arg, oldName, typeName, newName, typeName)
+			})
+		}
 	}
 	for _, obj := range slices.Clone(m.all) {
 		if !obj.dropped && obj.kind != kindSchema && obj.schema == oldName {
@@ -702,7 +760,13 @@ func (m *model) setSchema(stmt *pg_query.AlterObjectSchemaStmt) {
 		obj = m.findType(stmt.GetObject())
 	}
 	if obj != nil {
+		oldSchema := obj.schema
 		m.rekey(obj, stmt.GetNewschema(), obj.name)
+		if obj.kind == kindType {
+			m.retypeSignatures(func(arg string) string {
+				return renameTypeInArgument(arg, oldSchema, obj.name, obj.schema, obj.name)
+			})
+		}
 	}
 }
 
