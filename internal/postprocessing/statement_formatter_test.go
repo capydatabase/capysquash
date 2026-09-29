@@ -18,14 +18,3 @@ func TestEnsureStatementSpacing(t *testing.T) {
 	assert.Contains(t, got, "; ALTER TABLE")
 	assert.False(t, strings.Contains(got, "\n\n\n\n"))
 }
-
-func TestFormatFunctionBody(t *testing.T) {
-	t.Parallel()
-
-	formatter := NewStatementFormatter()
-	input := "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS   $$ SELECT 'x'; $$   LANGUAGE sql;"
-
-	got := formatter.FormatFunctionBody(input)
-	assert.Contains(t, got, "AS $$\n")
-	assert.Contains(t, got, "$$\nLANGUAGE")
-}

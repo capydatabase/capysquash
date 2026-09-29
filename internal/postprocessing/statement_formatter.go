@@ -44,21 +44,6 @@ func (f *StatementFormatter) formatWithRegex(sql string) string {
 	return sql
 }
 
-// FormatFunctionBody formats the body of a CREATE FUNCTION statement
-// ensuring proper indentation and line breaks
-func (f *StatementFormatter) FormatFunctionBody(functionSQL string) string {
-	// This is a placeholder for future enhancement
-	// For now, just ensure the function has proper line breaks
-
-	// Add line break after AS $$
-	functionSQL = normalizeAsDollarSpacing(functionSQL)
-
-	// Add line break before $$ LANGUAGE
-	functionSQL = moveLanguageToNextLineAfterDollar(functionSQL)
-
-	return functionSQL
-}
-
 // EnsureStatementSpacing is the main entry point for formatting
 // It ensures proper spacing between all types of SQL statements
 func EnsureStatementSpacing(sql string) string {
@@ -161,57 +146,6 @@ func collapseRunsOfNewlines(sql string, maxRun int) string {
 		}
 
 		newlineRun = 0
-		out.WriteByte(sql[i])
-	}
-
-	return out.String()
-}
-
-func normalizeAsDollarSpacing(sql string) string {
-	if sql == "" {
-		return sql
-	}
-
-	var out strings.Builder
-	out.Grow(len(sql) + 8)
-
-	for i := 0; i < len(sql); i++ {
-		if hasKeywordAt(sql, i, "AS") {
-			j := skipFormattingWhitespace(sql, i+2)
-			if j+1 < len(sql) && sql[j] == '$' && sql[j+1] == '$' {
-				out.WriteString("AS $$\n")
-				i = j + 1
-				continue
-			}
-		}
-
-		out.WriteByte(sql[i])
-	}
-
-	return out.String()
-}
-
-func moveLanguageToNextLineAfterDollar(sql string) string {
-	if sql == "" {
-		return sql
-	}
-
-	var out strings.Builder
-	out.Grow(len(sql) + 8)
-
-	for i := 0; i < len(sql); i++ {
-		if i+1 < len(sql) && sql[i] == '$' && sql[i+1] == '$' {
-			out.WriteString("$$")
-			i += 1
-
-			j := skipFormattingWhitespace(sql, i+1)
-			if hasKeywordAt(sql, j, "LANGUAGE") {
-				out.WriteString("\nLANGUAGE")
-				i = j + len("LANGUAGE") - 1
-			}
-			continue
-		}
-
 		out.WriteByte(sql[i])
 	}
 
