@@ -75,9 +75,10 @@ func (c *ConfigView) Update(msg tea.Msg) (viewtypes.View, tea.Cmd) {
 	return c, nil
 }
 
-// CapturesEsc reports whether a field is being edited, in which case esc
-// cancels the edit instead of leaving the view.
-func (c *ConfigView) CapturesEsc() bool {
+// CapturesKeys reports whether a field is being edited, in which case every
+// key but ctrl+c goes to the edit: esc cancels it instead of leaving the
+// view, and q, ? and v do not quit or switch views.
+func (c *ConfigView) CapturesKeys() bool {
 	return c.editingIdx >= 0
 }
 

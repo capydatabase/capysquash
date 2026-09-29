@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -11,7 +12,10 @@ import (
 
 // Model is the main TUI application model
 type Model struct {
-	currentView  View
+	currentView View
+	// stack holds the views to return to, most recent last. It never holds
+	// the current view or a view twice, and is empty on the dashboard.
+	stack        []ViewType
 	views        map[ViewType]View
 	width        int
 	height       int
@@ -78,35 +82,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		// A view taking key input (the config wizard while editing) gets
+		// every other key before the global bindings.
+		if c, ok := m.currentView.(KeyCapturer); ok && c.CapturesKeys() {
+			break
+		}
+
 		// Global key bindings
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "q":
 			return m, tea.Quit
 
 		case "?":
 			// Toggle help view
 			if m.currentView.Type() == ViewHelp {
-				// Return to previous view (dashboard for now)
-				return m.navigateTo(ViewDashboard)
-			} else {
-				return m.navigateTo(ViewHelp)
+				return m.back()
 			}
+			return m.navigateTo(ViewHelp)
 
 		case "v":
 			// Toggle the validation view
 			if m.currentView.Type() == ViewValidation {
-				return m.navigateTo(ViewDashboard)
+				return m.back()
 			}
 			return m.navigateTo(ViewValidation)
 
 		case "esc":
-			// A view using esc itself (the config wizard while editing)
-			// gets it; otherwise return to the dashboard.
-			if c, ok := m.currentView.(EscCapturer); ok && c.CapturesEsc() {
-				break
-			}
 			if m.currentView.Type() != ViewDashboard {
-				return m.navigateTo(ViewDashboard)
+				return m.back()
 			}
 		}
 
@@ -158,8 +164,44 @@ func (m *Model) View() tea.View {
 	return v
 }
 
-// navigateTo switches to a different view
+// navigateTo switches to viewType and remembers the current view so back
+// can return to it. Navigating to the view already showing does nothing.
+// The dashboard is the root: navigating to it forgets every view. A view
+// that is already on the stack is returned to rather than pushed again, so
+// toggling between help and validation cannot grow the stack.
 func (m *Model) navigateTo(viewType ViewType) (tea.Model, tea.Cmd) {
+	if _, exists := m.views[viewType]; !exists {
+		m.err = fmt.Errorf("view not found: %v", viewType)
+		return m, nil
+	}
+	if viewType == m.currentView.Type() {
+		return m, nil
+	}
+
+	switch i := slices.Index(m.stack, viewType); {
+	case viewType == ViewDashboard:
+		m.stack = m.stack[:0]
+	case i >= 0:
+		m.stack = m.stack[:i]
+	default:
+		m.stack = append(m.stack, m.currentView.Type())
+	}
+	return m.switchTo(viewType)
+}
+
+// back returns to the previous view, or to the dashboard when there is none
+// (the program started on another view).
+func (m *Model) back() (tea.Model, tea.Cmd) {
+	target := ViewDashboard
+	if n := len(m.stack); n > 0 {
+		target = m.stack[n-1]
+		m.stack = m.stack[:n-1]
+	}
+	return m.switchTo(target)
+}
+
+// switchTo exits the current view and enters viewType.
+func (m *Model) switchTo(viewType ViewType) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	// Exit current view
@@ -167,14 +209,7 @@ func (m *Model) navigateTo(viewType ViewType) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, exitCmd)
 	}
 
-	// Switch view
-	newView, exists := m.views[viewType]
-	if !exists {
-		m.err = fmt.Errorf("view not found: %v", viewType)
-		return m, nil
-	}
-
-	m.currentView = newView
+	m.currentView = m.views[viewType]
 
 	// Enter new view
 	if enterCmd := m.currentView.OnEnter(); enterCmd != nil {
@@ -186,23 +221,27 @@ func (m *Model) navigateTo(viewType ViewType) (tea.Model, tea.Cmd) {
 
 // renderStatusBar renders the bottom status bar
 func (m *Model) renderStatusBar() string {
+	// Every segment carries the bar's background itself: each one ends in a
+	// reset, which would otherwise leave the rest of the bar unpainted.
+	bar := lipgloss.NewStyle().Background(styles.Background)
+
 	// Current view name
 	viewName := m.getViewName(m.currentView.Type())
 	viewBadge := styles.PrimaryBadge(viewName)
 
 	// Navigation hints
-	hints := styles.MutedStyle.Render("ESC: Dashboard  ►  v: Validation  ►  ?: Help  ►  q: Quit")
+	hints := styles.MutedStyle.Background(styles.Background).Render("ESC: Back  ►  v: Validation  ►  ?: Help  ►  q: Quit")
 
 	// Status message
 	status := ""
 	if m.statusMsg != "" {
-		status = m.statusStyle.Render(m.statusMsg)
+		status = m.statusStyle.Background(styles.Background).Render(m.statusMsg)
 	}
 
 	leftSection := lipgloss.JoinHorizontal(
 		lipgloss.Left,
 		viewBadge,
-		"  ",
+		bar.Render("  "),
 		status,
 	)
 
@@ -216,7 +255,7 @@ func (m *Model) renderStatusBar() string {
 	statusContent := lipgloss.JoinHorizontal(
 		lipgloss.Left,
 		leftSection,
-		lipgloss.NewStyle().Width(padding).Render(""),
+		bar.Width(padding).Render(""),
 		rightSection,
 	)
 
