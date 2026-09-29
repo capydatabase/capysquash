@@ -24,6 +24,10 @@ type StreamingTracker struct {
 	// Processing statistics
 	stats            *StreamingStats
 	progressCallback func(processed, total int64, throughput float64)
+
+	// statementFilter, when set, chooses which statements of each migration
+	// reach the tracker.
+	statementFilter func([]types.Statement) []types.Statement
 }
 
 // TrackingResult represents the result of processing a migration through streaming tracking
@@ -67,6 +71,11 @@ func NewStreamingTracker(batchSize, workerCount int, memManager *performance.Mem
 // SetProgressCallback sets a callback function for progress updates
 func (st *StreamingTracker) SetProgressCallback(callback func(processed, total int64, throughput float64)) {
 	st.progressCallback = callback
+}
+
+// SetStatementFilter makes the tracker see only the statements filter keeps.
+func (st *StreamingTracker) SetStatementFilter(filter func([]types.Statement) []types.Statement) {
+	st.statementFilter = filter
 }
 
 // ProcessDirectory processes all migrations in a directory using streaming
@@ -150,7 +159,13 @@ func (st *StreamingTracker) processTracking(processedFile *performance.Processed
 
 	// Process through tracker (using sequential counter for simplicity)
 	sequence := int(atomic.LoadInt64(&st.stats.MigrationsProcessed))
-	st.tracker.ProcessMigration(processedFile.Migration, sequence)
+	migration := processedFile.Migration
+	if st.statementFilter != nil {
+		filtered := *migration
+		filtered.Statements = st.statementFilter(migration.Statements)
+		migration = &filtered
+	}
+	st.tracker.ProcessMigration(migration, sequence)
 
 	// Count objects after processing
 	objectsAfter := len(st.tracker.GetObjects())
