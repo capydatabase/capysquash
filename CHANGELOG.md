@@ -22,8 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and drops of schemas the history did not create (`DROP SCHEMA public CASCADE`), in history
   order. Elements of `CREATE SCHEMA ... CREATE TABLE ...` become statements of their own.
 - Fixtures `rename_schema`, `rename_types`, `rename_table_dependents`, `drop_schema_recreate`,
-  `privileges_preexisting` and `privileges_set_role` in the e2e suite; `privileges_drop_rename` now also renames a schema, an enum and a domain with
-  privileges and drops and recreates a schema.
+  `privileges_preexisting` and `privileges_set_role` in the e2e suite; `privileges_drop_rename`
+  now also renames a schema, an enum and a domain with privileges and drops and recreates a
+  schema.
+- `Renames and schemas:` warnings for what the rewrite to final names cannot carry: text that
+  names an object by a name it gave up (`DO` blocks, function bodies written as strings), a
+  `NATURAL` join or `USING` list over a renamed column, a field of a renamed composite attribute,
+  a statement that uses an object `DROP SCHEMA ... CASCADE` removes, a renamed range type.
 
 ### Fixed
 
