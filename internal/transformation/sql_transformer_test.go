@@ -91,3 +91,29 @@ func TestWhereAndSelectHeuristics(t *testing.T) {
 		t.Fatal("expected select-star detector false with WHERE")
 	}
 }
+
+func TestFixCommentSyntaxReportsCommentsPostgreSQLWouldReject(t *testing.T) {
+	tr := NewSQLTransformer(nil)
+	sql := `CREATE FUNCTION public.f(a int) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
+CREATE FUNCTION f(a text) RETURNS int LANGUAGE sql AS $$ SELECT 2 $$;
+CREATE FUNCTION g() RETURNS int LANGUAGE sql AS $$ SELECT 3 $$;
+COMMENT ON FUNCTION f(integer) IS 'ok';
+COMMENT ON FUNCTION f(bigint) IS 'no such overload';
+COMMENT ON FUNCTION public.f IS 'ambiguous';
+COMMENT ON FUNCTION g IS 'unique, fine';
+COMMENT ON FUNCTION extensions.uuid_generate_v4() IS 'not created here, not checked';`
+
+	result := &TransformationResult{}
+	if got := tr.fixCommentSyntax(sql, result); got != sql {
+		t.Fatalf("fixCommentSyntax changed the SQL:\n%s", got)
+	}
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings = %q, want the bigint and the ambiguous comment", result.Warnings)
+	}
+	if !strings.Contains(result.Warnings[0], "public.f(bigint) matches no created overload ((integer), (text))") {
+		t.Errorf("first warning = %q", result.Warnings[0])
+	}
+	if !strings.Contains(result.Warnings[1], "public.f names no arguments but 2 overloads are created") {
+		t.Errorf("second warning = %q", result.Warnings[1])
+	}
+}

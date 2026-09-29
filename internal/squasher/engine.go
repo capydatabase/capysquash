@@ -932,6 +932,9 @@ func (e *Engine) Squash(migrations map[int]string) (*SquashResult, error) {
 				e.warnings = append(e.warnings, fmt.Sprintf("Transformation: %s", tr.Description))
 			}
 		}
+		for _, warning := range transformResult.Warnings {
+			e.warnings = append(e.warnings, fmt.Sprintf("Transformation warning: %s", warning))
+		}
 	}
 
 	// Phase 4.6: Post-Flight Validation
