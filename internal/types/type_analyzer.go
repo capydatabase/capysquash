@@ -6,6 +6,7 @@ package types
 import (
 	"context"
 	"database/sql"
+	stderrors "errors"
 	"fmt"
 	"strings"
 
@@ -625,6 +626,10 @@ func (ta *TypeAnalyzer) AnalyzeMigrationTypes(ctx context.Context, statements []
 		Warnings:     make([]string, 0),
 	}
 
+	// Column types as the statements leave them, so an ALTER COLUMN TYPE
+	// knows the type it changes from.
+	columns := make(map[string]string)
+
 	for _, stmt := range statements {
 		stmtTypes, err := ta.AnalyzeStatement(ctx, stmt.SQL)
 		if err != nil {
@@ -643,11 +648,9 @@ func (ta *TypeAnalyzer) AnalyzeMigrationTypes(ctx context.Context, statements []
 			}
 		}
 
-		// Detect type changes
-		if stmt.Operation == OpAlter && stmt.ObjectType == TypeTable {
-			changes := ta.detectTypeChanges(stmt)
-			analysis.TypeChanges = append(analysis.TypeChanges, changes...)
-		}
+		changes, warnings := ta.trackColumnTypes(ctx, stmt, columns)
+		analysis.TypeChanges = append(analysis.TypeChanges, changes...)
+		analysis.Warnings = append(analysis.Warnings, warnings...)
 	}
 
 	return analysis, nil
@@ -671,68 +674,177 @@ type TypeChange struct {
 	DataLoss   bool   `json:"data_loss"`
 }
 
-// detectTypeChanges detects type changes in ALTER TABLE statements
-func (ta *TypeAnalyzer) detectTypeChanges(stmt Statement) []*TypeChange {
-	changes := make([]*TypeChange, 0)
-
-	// Parse the statement to get AST
+// trackColumnTypes applies stmt to columns (schema.table.column -> type) and
+// returns the ALTER COLUMN ... TYPE changes it makes. The type a column
+// changes from comes from the earlier statements; for a column the migrations
+// never defined it is read from ta.db when there is one. Only when neither
+// knows it is FromType "unknown" (and the change is then treated as
+// irreversible, with a warning).
+func (ta *TypeAnalyzer) trackColumnTypes(ctx context.Context, stmt Statement, columns map[string]string) ([]*TypeChange, []string) {
+	var changes []*TypeChange
+	var warnings []string
 	if stmt.ParseTree == nil {
-		return changes
+		return nil, nil
 	}
 
-	// Access ParseResult directly
-	parseResult := stmt.ParseTree
-	if parseResult == nil || len(parseResult.Stmts) == 0 {
-		return changes
-	}
+	for _, raw := range stmt.ParseTree.GetStmts() {
+		switch n := raw.GetStmt().GetNode().(type) {
+		case *pg_query.Node_CreateStmt:
+			table := qualifiedRelation(n.CreateStmt.GetRelation())
+			for _, elt := range n.CreateStmt.GetTableElts() {
+				if col := elt.GetColumnDef(); col != nil && col.GetTypeName() != nil {
+					columns[table+"."+col.GetColname()] = ta.canonicalTypeName(col.GetTypeName())
+				}
+			}
 
-	// Get ALTER TABLE statement
-	node := parseResult.Stmts[0].Stmt
-	alterStmt := node.GetAlterTableStmt()
-	if alterStmt == nil || alterStmt.Relation == nil {
-		return changes
-	}
-
-	tableName := alterStmt.Relation.Relname
-
-	// Process ALTER TABLE commands
-	for _, cmd := range alterStmt.Cmds {
-		alterCmd := cmd.GetAlterTableCmd()
-		if alterCmd == nil {
-			continue
-		}
-
-		// Check for ALTER COLUMN TYPE operations
-		if alterCmd.Subtype == pg_query.AlterTableType_AT_AlterColumnType {
-			columnName := alterCmd.Name
-			if columnName == "" {
+		case *pg_query.Node_DropStmt:
+			if n.DropStmt.GetRemoveType() != pg_query.ObjectType_OBJECT_TABLE {
 				continue
 			}
-
-			// Extract new type
-			var newType string
-			if colDef := alterCmd.Def.GetColumnDef(); colDef != nil && colDef.TypeName != nil {
-				newType = ta.extractTypeNameFromNode(colDef.TypeName)
+			for _, obj := range n.DropStmt.GetObjects() {
+				table := qualifiedNameList(obj.GetList().GetItems())
+				for key := range columns {
+					if strings.HasPrefix(key, table+".") {
+						delete(columns, key)
+					}
+				}
 			}
 
-			if newType != "" {
-				// We don't have the old type readily available in the ALTER statement
-				// Mark it as "unknown" and let the caller track it from previous CREATE/ALTER
-				change := &TypeChange{
-					Table:      tableName,
-					Column:     columnName,
-					FromType:   "unknown", // Would need to be tracked from migration history
-					ToType:     newType,
-					Reversible: false, // Conservative: assume not reversible without more info
-					DataLoss:   false, // Can't determine without knowing old type
-				}
+		case *pg_query.Node_RenameStmt:
+			rename := n.RenameStmt
+			if rename.GetRenameType() != pg_query.ObjectType_OBJECT_COLUMN || rename.GetRelation() == nil {
+				continue
+			}
+			table := qualifiedRelation(rename.GetRelation())
+			if typ, ok := columns[table+"."+rename.GetSubname()]; ok {
+				delete(columns, table+"."+rename.GetSubname())
+				columns[table+"."+rename.GetNewname()] = typ
+			}
 
-				// If we have database access, we could query the current type
-				// For now, add the change with limited information
-				changes = append(changes, change)
+		case *pg_query.Node_AlterTableStmt:
+			table := qualifiedRelation(n.AlterTableStmt.GetRelation())
+			for _, cmd := range n.AlterTableStmt.GetCmds() {
+				alterCmd := cmd.GetAlterTableCmd()
+				if alterCmd == nil {
+					continue
+				}
+				switch alterCmd.GetSubtype() {
+				case pg_query.AlterTableType_AT_AddColumn:
+					if col := alterCmd.GetDef().GetColumnDef(); col != nil && col.GetTypeName() != nil {
+						columns[table+"."+col.GetColname()] = ta.canonicalTypeName(col.GetTypeName())
+					}
+				case pg_query.AlterTableType_AT_DropColumn:
+					delete(columns, table+"."+alterCmd.GetName())
+				case pg_query.AlterTableType_AT_AlterColumnType:
+					col := alterCmd.GetDef().GetColumnDef()
+					if col == nil || col.GetTypeName() == nil || alterCmd.GetName() == "" {
+						continue
+					}
+					key := table + "." + alterCmd.GetName()
+					toType := ta.canonicalTypeName(col.GetTypeName())
+
+					fromType, known := columns[key]
+					if !known {
+						var err error
+						fromType, known, err = ta.currentColumnType(ctx, n.AlterTableStmt.GetRelation(), alterCmd.GetName())
+						if err != nil {
+							warnings = append(warnings, fmt.Sprintf("Could not read the current type of %s: %v", key, err))
+						}
+					}
+
+					change := &TypeChange{Table: table, Column: alterCmd.GetName(), FromType: "unknown", ToType: toType}
+					if known {
+						change.FromType = fromType
+						change.DataLoss = ta.conversionLosesData(fromType, toType)
+						// Reversible: converting back cannot lose what this change kept.
+						change.Reversible = !change.DataLoss && !ta.conversionLosesData(toType, fromType) &&
+							ta.typeSystem.CheckTypeCompatibility(toType, fromType).Compatible
+					} else {
+						warnings = append(warnings, fmt.Sprintf("Type change of %s to %s: the previous type is unknown (not defined by these migrations), so data loss and reversibility cannot be assessed", key, toType))
+					}
+					changes = append(changes, change)
+					columns[key] = toType
+				}
 			}
 		}
 	}
 
-	return changes
+	return changes, warnings
+}
+
+// conversionLosesData reports whether converting from -> to can lose or
+// reject existing values: a narrowing conversion, or a shorter length/precision
+// of the same base type (varchar(50) -> varchar(20)).
+func (ta *TypeAnalyzer) conversionLosesData(from, to string) bool {
+	// normalizeTypeName strips a size first and resolves an alias second, so
+	// "varchar(20)" needs both passes to become "character varying".
+	fromNorm := ta.typeSystem.normalizeTypeName(ta.typeSystem.normalizeTypeName(from))
+	toNorm := ta.typeSystem.normalizeTypeName(ta.typeSystem.normalizeTypeName(to))
+	if ta.typeSystem.isPotentiallyLossyConversion(fromNorm, toNorm) {
+		return true
+	}
+	if fromNorm != toNorm {
+		return false
+	}
+	fromSize, fromSized := extractFirstSizeFromTypeSpec(from)
+	toSize, toSized := extractFirstSizeFromTypeSpec(to)
+	// No size means unbounded: bounding it, or shrinking a bound, can reject rows.
+	return (toSized && !fromSized) || (fromSized && toSized && toSize < fromSize)
+}
+
+// currentColumnType reads a column's type from ta.db (format_type, the same
+// spelling PostgreSQL prints). known is false when there is no database or
+// the column does not exist there.
+func (ta *TypeAnalyzer) currentColumnType(ctx context.Context, rel *pg_query.RangeVar, column string) (typ string, known bool, err error) {
+	if ta.db == nil || rel == nil {
+		return "", false, nil
+	}
+	schema := rel.GetSchemaname()
+	if schema == "" {
+		schema = "public"
+	}
+	err = ta.db.QueryRowContext(ctx, `
+		SELECT format_type(a.atttypid, a.atttypmod)
+		FROM pg_attribute a
+		JOIN pg_class c ON c.oid = a.attrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3
+		  AND a.attnum > 0 AND NOT a.attisdropped`,
+		schema, rel.GetRelname(), column).Scan(&typ)
+	if stderrors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return typ, true, nil
+}
+
+// canonicalTypeName is extractTypeNameFromNode without the pg_catalog
+// qualifier the parser adds to built-in types ("int" parses as
+// pg_catalog.int4).
+func (ta *TypeAnalyzer) canonicalTypeName(tn *pg_query.TypeName) string {
+	return strings.TrimPrefix(ta.extractTypeNameFromNode(tn), "pg_catalog.")
+}
+
+// qualifiedRelation returns schema.table, defaulting the schema to public.
+func qualifiedRelation(rel *pg_query.RangeVar) string {
+	schema := rel.GetSchemaname()
+	if schema == "" {
+		schema = "public"
+	}
+	return schema + "." + rel.GetRelname()
+}
+
+// qualifiedNameList turns a parsed name list ([schema,] table) into
+// schema.table, defaulting the schema to public.
+func qualifiedNameList(items []*pg_query.Node) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, item.GetString_().GetSval())
+	}
+	if len(parts) == 1 {
+		return "public." + parts[0]
+	}
+	return strings.Join(parts, ".")
 }
