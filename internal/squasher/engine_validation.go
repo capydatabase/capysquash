@@ -9,6 +9,10 @@ import (
 	"github.com/capydatabase/capysquash/internal/validation"
 )
 
+// runPreFlightValidation lints every input migration with the static rules.
+// It returns an error listing every finding, including migrations the
+// validator could not check; the caller decides whether that aborts the
+// squash (static_validation.strict / squash --strict) or becomes a warning.
 func (e *Engine) runPreFlightValidation(ctx context.Context, migrations map[int]string) error {
 	var validationErrors []string
 
@@ -24,8 +28,9 @@ func (e *Engine) runPreFlightValidation(ctx context.Context, migrations map[int]
 
 		violations, err := e.preFlightValidator.Check(sqlContent)
 		if err != nil {
-			// If check failed (e.g. parse error), log it but don't crash
-			e.logger.Warn("Migration %d validation failed to run: %v", id, err)
+			msg := fmt.Sprintf("Migration %d could not be validated: %v", id, err)
+			validationErrors = append(validationErrors, msg)
+			e.logger.Warn("%s", msg)
 			continue
 		}
 

@@ -14,6 +14,11 @@ type StaticValidatorConfig struct {
 
 	// TreatWarningsAsErrors causes all violations to be reported as errors
 	TreatWarningsAsErrors bool `json:"treat_warnings_as_errors" yaml:"treat_warnings_as_errors" toml:"treat_warnings_as_errors"`
+
+	// Strict makes a squash abort when pre-flight validation of the input
+	// migrations reports any violation or cannot run (squash --strict).
+	// Without it, pre-flight findings are reported as warnings.
+	Strict bool `json:"strict" yaml:"strict" toml:"strict"`
 }
 
 // DefaultStaticValidatorConfig returns a default configuration

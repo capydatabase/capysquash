@@ -757,7 +757,14 @@ func (e *Engine) Squash(migrations map[int]string) (*SquashResult, error) {
 	if e.preFlightValidator != nil {
 		e.logger.Info("Running pre-flight validation on %d migrations...", len(migrations))
 		if err := e.runPreFlightValidation(ctx, migrations); err != nil {
-			// For now, we log warnings but don't abort unless strict mode is enabled (future)
+			if e.config.StaticValidation.Strict {
+				return nil, errors.NewError(
+					errors.ErrorCodeValidationFailed,
+					"pre-flight validation failed in strict mode",
+					errors.SeverityError,
+					errors.CategoryValidation,
+				).WithInnerError(err).WithSuggestion("Fix the reported migrations, suppress a finding with a -- capysquash-ignore: directive, or run without --strict")
+			}
 			e.logger.Warn("Pre-flight validation found issues: %v", err)
 			e.warnings = append(e.warnings, fmt.Sprintf("Pre-flight validation: %v", err))
 		}

@@ -61,6 +61,7 @@ var (
 	noValidate             bool
 	failOnDiff             bool
 	strictParse            bool
+	strictPreflight        bool
 	openReport             bool
 	customDockerImage      string
 	externalDSN            string
@@ -298,6 +299,8 @@ func init() {
 		"Exit non-zero when post-squash validation detects real schema differences (default true; pass --fail-on-diff=false to downgrade to a warning)")
 	squashCmd.Flags().BoolVar(&strictParse, "strict-parse", false,
 		"Fail if any migration file has partial parse errors")
+	squashCmd.Flags().BoolVar(&strictPreflight, "strict", false,
+		"Abort when pre-flight validation (the lint rules) reports any finding in the input migrations")
 	squashCmd.Flags().BoolVar(&openReport, "open-report", false,
 		"Open validation report in $EDITOR after validation")
 	squashCmd.Flags().StringVar(&customDockerImage, "docker-image", "",
@@ -571,6 +574,9 @@ func runSquash(cmd *cobra.Command, args []string) error {
 	// never silently accepted (which used to disable all consolidation rules).
 	if err := applySafetyOverride(cfg, safetyLevel); err != nil {
 		return err
+	}
+	if strictPreflight {
+		cfg.StaticValidation.Strict = true
 	}
 	if outputDir != "" {
 		cfg.Output.Directory = outputDir
