@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/run-e2e.sh` skips a fixture directory without migrations (an empty `original/` left in
+  a checkout) instead of failing on it.
+
 ## [1.3.0] - 2026-09-29
 
 ### Added

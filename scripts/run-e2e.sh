@@ -70,6 +70,12 @@ validate() {
 failures=0
 for dir in test-fixtures/*/original; do
   fixture="$(basename "$(dirname "$dir")")"
+  # Git does not track empty directories, but a checkout can still hold one
+  # left behind by an older fixture; there is nothing to squash in it.
+  if ! compgen -G "$dir/*.sql" >/dev/null; then
+    echo "SKIP $fixture: no migrations in $dir"
+    continue
+  fi
 
   fresh_database
   if ! validate "$dir" --snapshot-output "$work/original.json" | grep -q '"success":true'; then
