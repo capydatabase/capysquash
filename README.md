@@ -190,7 +190,9 @@ baseline are usually applied by that role under different names (for example
 `neondb_owner` in production and `postgres` in a validation container).
 Validation does not create roles: the history's own `CREATE ROLE` statements
 do, and any other role a history grants to must already exist in the
-validation cluster under the same name.
+validation cluster under the same name. `SCHEMA_DIFF`, which applies the
+baseline and the original history one after the other in one cluster, drops
+the roles the baseline created before the original history runs.
 
 ## Validation
 

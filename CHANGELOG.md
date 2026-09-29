@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way, and a renamed table is no longer merged across the rename by the consolidation rules.
 - Grants on a function follow its signature when a type it takes, or that type's schema, is
   renamed; they used to be reported as not in the baseline.
+- `SCHEMA_DIFF` validation no longer fails a history that creates roles. It applies the squashed
+  baseline and the original history one after the other in the same cluster, and roles belong to
+  the cluster: the original's `CREATE ROLE` found the role the baseline had created and failed,
+  which reported the equivalence as unproven. The roles the baseline created are now dropped with
+  its database, so the original history runs in the same empty cluster the baseline had. Making
+  the history's `CREATE ROLE` idempotent instead would validate a history other than the one
+  given.
 - `scripts/run-e2e.sh` skips a fixture directory without migrations (an empty `original/` left in
   a checkout) instead of failing on it.
 
