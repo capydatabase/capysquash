@@ -592,9 +592,12 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		if len(node.AlterEnumStmt.TypeName) > 0 {
 			stmt.ObjectName = normalizer.NormalizeIdentifier(node.AlterEnumStmt.TypeName[len(node.AlterEnumStmt.TypeName)-1].GetString_().Sval)
 		}
-		// Store the new value being added for consolidation
+		// Store the value being added (and where) or renamed for consolidation
 		if node.AlterEnumStmt.NewVal != "" {
 			stmt.AlterTypeNewValue = node.AlterEnumStmt.NewVal
+			stmt.AlterTypeOldValue = node.AlterEnumStmt.OldVal
+			stmt.AlterTypeNeighbor = node.AlterEnumStmt.NewValNeighbor
+			stmt.AlterTypeAfter = node.AlterEnumStmt.NewValIsAfter
 		}
 
 	case *pg_query.Node_CompositeTypeStmt:

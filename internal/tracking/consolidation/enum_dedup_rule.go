@@ -204,22 +204,9 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 			existingValues := extractEnumValuesFromSQL(firstEnum.SQL)
 			if len(existingValues) > 0 {
 				// Verify all ALTER TYPE statements are appends (no reorders)
-				allAppends := true
-				newValues := make([]string, len(existingValues))
-				copy(newValues, existingValues)
+				newValues, allAppends, merged := applyEnumAlterations(existingValues, alterTypeStmts)
 
-				for _, alterStmt := range alterTypeStmts {
-					if alterStmt.AlterTypeNewValue != "" {
-						// Check if it's truly an append (not already in list)
-						if contains(existingValues, alterStmt.AlterTypeNewValue) {
-							allAppends = false
-							break
-						}
-						newValues = append(newValues, alterStmt.AlterTypeNewValue)
-					}
-				}
-
-				if allAppends {
+				if merged && allAppends {
 					// Safe to merge - all are appends
 					if mergedSQL, ok := replaceCreateEnumValues(firstEnum.SQL, newValues); ok {
 						consolidatedSQL = mergedSQL
@@ -242,15 +229,12 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 		// STANDARD/AGGRESSIVE: Merge ALTER TYPE statements into CREATE TYPE
 		if len(alterTypeStmts) > 0 {
 			existingValues := extractEnumValuesFromSQL(firstEnum.SQL)
-			if len(existingValues) > 0 {
-				// Add new values from ALTER TYPE statements
-				for _, alterStmt := range alterTypeStmts {
-					if alterStmt.AlterTypeNewValue != "" && !contains(existingValues, alterStmt.AlterTypeNewValue) {
-						existingValues = append(existingValues, alterStmt.AlterTypeNewValue)
-					}
-				}
-
-				if mergedSQL, ok := replaceCreateEnumValues(firstEnum.SQL, existingValues); ok {
+			finalValues, _, merged := applyEnumAlterations(existingValues, alterTypeStmts)
+			if len(existingValues) > 0 && !merged {
+				consolidatedSQL = joinEnumSequence(firstEnum.SQL, alterTypeStmts)
+				warnings = append(warnings, "Preserved ALTER TYPE sequence (a value is placed relative to a label the merge cannot find)")
+			} else if len(existingValues) > 0 {
+				if mergedSQL, ok := replaceCreateEnumValues(firstEnum.SQL, finalValues); ok {
 					consolidatedSQL = mergedSQL
 
 					mode := "Standard"
@@ -266,14 +250,12 @@ func (r *EnumDeduplicationRule) Apply(lifecycle *tracking.ObjectLifecycle, engin
 		// Fallback to standard behavior
 		if len(alterTypeStmts) > 0 {
 			existingValues := extractEnumValuesFromSQL(firstEnum.SQL)
-			if len(existingValues) > 0 {
-				for _, alterStmt := range alterTypeStmts {
-					if alterStmt.AlterTypeNewValue != "" && !contains(existingValues, alterStmt.AlterTypeNewValue) {
-						existingValues = append(existingValues, alterStmt.AlterTypeNewValue)
-					}
-				}
-
-				if mergedSQL, ok := replaceCreateEnumValues(firstEnum.SQL, existingValues); ok {
+			finalValues, _, merged := applyEnumAlterations(existingValues, alterTypeStmts)
+			if len(existingValues) > 0 && !merged {
+				consolidatedSQL = joinEnumSequence(firstEnum.SQL, alterTypeStmts)
+				warnings = append(warnings, "Preserved ALTER TYPE sequence (a value is placed relative to a label the merge cannot find)")
+			} else if len(existingValues) > 0 {
+				if mergedSQL, ok := replaceCreateEnumValues(firstEnum.SQL, finalValues); ok {
 					consolidatedSQL = mergedSQL
 					warnings = append(warnings, fmt.Sprintf("Merged %d ALTER TYPE ADD VALUE statement(s) into CREATE TYPE", len(alterTypeStmts)))
 				}
@@ -399,13 +381,68 @@ func parseEnumValues(valuesStr string) []string {
 	return values
 }
 
+// applyEnumAlterations applies ALTER TYPE ... ADD VALUE and RENAME VALUE
+// statements to an enum's labels in history order, the way PostgreSQL does:
+// an added value goes BEFORE or AFTER the label it names, at the end when it
+// names none; adding a label that already exists changes nothing (IF NOT
+// EXISTS; without it the history itself fails). appendOnly reports whether
+// every statement only added a label at the end. ok is false when a
+// statement names a label that is not there, so the labels cannot be merged.
+func applyEnumAlterations(values []string, alters []types.Statement) (result []string, appendOnly, ok bool) {
+	result = slices.Clone(values)
+	appendOnly = true
+	for _, alter := range alters {
+		newValue := alter.AlterTypeNewValue
+		if newValue == "" {
+			continue
+		}
+		if alter.AlterTypeOldValue != "" {
+			index := slices.Index(result, alter.AlterTypeOldValue)
+			if index < 0 {
+				return nil, false, false
+			}
+			result[index] = newValue
+			appendOnly = false
+			continue
+		}
+		if slices.Contains(result, newValue) {
+			continue
+		}
+		position := len(result)
+		if alter.AlterTypeNeighbor != "" {
+			neighbor := slices.Index(result, alter.AlterTypeNeighbor)
+			if neighbor < 0 {
+				return nil, false, false
+			}
+			position = neighbor
+			if alter.AlterTypeAfter {
+				position++
+			}
+		}
+		if position != len(result) {
+			appendOnly = false
+		}
+		result = slices.Insert(result, position, newValue)
+	}
+	return result, appendOnly, true
+}
+
+// joinEnumSequence keeps CREATE TYPE and its ALTER TYPE statements as written.
+func joinEnumSequence(createSQL string, alters []types.Statement) string {
+	parts := []string{strings.TrimRight(strings.TrimSpace(createSQL), ";")}
+	for _, alter := range alters {
+		parts = append(parts, strings.TrimRight(strings.TrimSpace(alter.SQL), ";"))
+	}
+	return strings.Join(parts, ";\n") + ";"
+}
+
 // quoteEnumValues wraps each value in single quotes for SQL
 // Input: ["active", "inactive"]
 // Output: ["'active'", "'inactive'"]
 func quoteEnumValues(values []string) []string {
 	quoted := make([]string, len(values))
 	for i, v := range values {
-		quoted[i] = fmt.Sprintf("'%s'", v)
+		quoted[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
 	}
 	return quoted
 }

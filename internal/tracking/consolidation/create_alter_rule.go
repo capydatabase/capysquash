@@ -2,7 +2,6 @@ package consolidation
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/capydatabase/capysquash/internal/utils"
@@ -496,83 +495,20 @@ func integrateColumnsAndConstraintsIntoCreate(createSQL string, columns []string
 	return result
 }
 
-// integrateAlterTypeIntoCreate merges ALTER TYPE ADD VALUE statements into CREATE TYPE
+// integrateAlterTypeIntoCreate merges ALTER TYPE ADD VALUE / RENAME VALUE
+// statements into CREATE TYPE, placing each value where PostgreSQL would. When
+// the labels cannot be merged the statements are kept as written.
 func integrateAlterTypeIntoCreate(createSQL string, alterStmts []types.Statement) string {
-	// Extract new values from ALTER TYPE ADD VALUE statements
-	var newValues []string
-	for _, alterStmt := range alterStmts {
-		if alterStmt.AlterTypeNewValue != "" {
-			newValues = append(newValues, alterStmt.AlterTypeNewValue)
-		}
-	}
-
-	if len(newValues) == 0 {
-		return createSQL // No ALTER TYPE ADD VALUE statements to merge
-	}
-
-	// Parse existing CREATE TYPE to extract current values
-	// Match: CREATE TYPE name AS ENUM ('value1', 'value2')
-	upperSQL := strings.ToUpper(createSQL)
-	enumStart := strings.Index(upperSQL, "AS ENUM")
-	if enumStart == -1 {
+	existingValues := extractEnumValuesFromSQL(createSQL)
+	if len(existingValues) == 0 {
 		return createSQL // Not an ENUM type, can't merge
 	}
-
-	// Find the parentheses containing enum values
-	parenStart := strings.Index(createSQL[enumStart:], "(")
-	if parenStart == -1 {
-		return createSQL
+	allValues, _, ok := applyEnumAlterations(existingValues, alterStmts)
+	if !ok {
+		return joinEnumSequence(createSQL, alterStmts)
 	}
-	parenStart += enumStart
-
-	parenEnd := strings.Index(createSQL[parenStart:], ")")
-	if parenEnd == -1 {
-		return createSQL
+	if merged, replaced := replaceCreateEnumValues(createSQL, allValues); replaced {
+		return merged
 	}
-	parenEnd += parenStart
-
-	// Extract existing values
-	valuesStr := createSQL[parenStart+1 : parenEnd]
-	existingValues := parseEnumValuesFromSQL(valuesStr)
-
-	// Merge new values (avoid duplicates)
-	allValues := existingValues
-	for _, newVal := range newValues {
-		if !containsValue(existingValues, newVal) {
-			allValues = append(allValues, newVal)
-		}
-	}
-
-	// Reconstruct the CREATE TYPE statement with all values
-	quotedValues := make([]string, len(allValues))
-	for i, val := range allValues {
-		quotedValues[i] = fmt.Sprintf("'%s'", val)
-	}
-
-	beforeValues := createSQL[:parenStart+1]
-	afterValues := createSQL[parenEnd:]
-	return beforeValues + strings.Join(quotedValues, ", ") + afterValues
-}
-
-// parseEnumValuesFromSQL extracts enum values from the values string
-// Input: "'active', 'inactive', 'suspended'"
-// Output: ["active", "inactive", "suspended"]
-func parseEnumValuesFromSQL(valuesStr string) []string {
-	var values []string
-	// Remove whitespace and split by comma
-	parts := strings.SplitSeq(valuesStr, ",")
-	for part := range parts {
-		trimmed := strings.TrimSpace(part)
-		// Remove surrounding quotes
-		if len(trimmed) >= 2 && trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'' {
-			value := trimmed[1 : len(trimmed)-1]
-			values = append(values, value)
-		}
-	}
-	return values
-}
-
-// containsValue checks if a string slice contains a specific value
-func containsValue(slice []string, value string) bool {
-	return slices.Contains(slice, value)
+	return createSQL
 }
