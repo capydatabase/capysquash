@@ -122,3 +122,23 @@ func TestRulesListsWrappedDelegatesBeforeTheWrapper(t *testing.T) {
 		t.Fatalf("Rules() = %v, want [a b recovery]", rules)
 	}
 }
+
+// Only top-level destructive statements fail validation; a function body
+// that mentions TRUNCATE is an ordinary consolidation result.
+func TestValidateConsolidatedSQLLooksAtStatementsNotText(t *testing.T) {
+	rule := NewErrorRecoveryRule(3, "conservative", true)
+
+	for sql, wantErr := range map[string]bool{
+		"CREATE FUNCTION reset() RETURNS void LANGUAGE sql AS $$ TRUNCATE logs $$;": false,
+		"COMMENT ON TABLE logs IS 'never DROP SCHEMA here';":                        false,
+		"TRUNCATE logs;":                            true,
+		"DROP SCHEMA app CASCADE;":                  true,
+		"CREATE TABLE t (id int); DROP DATABASE x;": true,
+		"CREATE TABLE (;":                           true,
+	} {
+		err := rule.validateConsolidatedSQL(&tracking.ConsolidationResult{ConsolidatedSQL: sql})
+		if (err != nil) != wantErr {
+			t.Errorf("validateConsolidatedSQL(%q) error = %v, want error %v", sql, err, wantErr)
+		}
+	}
+}

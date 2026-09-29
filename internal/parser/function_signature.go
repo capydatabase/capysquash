@@ -74,9 +74,17 @@ func signatureTypeName(tn *pg_query.TypeName) string {
 	if tn == nil {
 		return ""
 	}
+	// Svals are already case-folded by the parser unless quoted, and a quoted
+	// "Mood" is a different type from mood, so such a name stays quoted (as
+	// format_type prints it) and cannot merge with mood when keys are
+	// lower-cased.
 	names := make([]string, 0, len(tn.GetNames()))
 	for _, n := range tn.GetNames() {
-		names = append(names, strings.ToLower(n.GetString_().GetSval()))
+		name := n.GetString_().GetSval()
+		if name != strings.ToLower(name) {
+			name = `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+		}
+		names = append(names, name)
 	}
 	if len(names) == 2 && (names[0] == "pg_catalog" || names[0] == "public") {
 		names = names[1:]

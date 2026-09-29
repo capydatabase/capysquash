@@ -975,13 +975,21 @@ func (ut *UnifiedTracker) routineIdentity(stmt types.Statement, name string) str
 		return name
 	}
 	identity := name + stmt.FunctionSignature
-	if stmt.ObjectType == types.TypeFunction && stmt.Operation == types.OpCreate {
+	if stmt.ObjectType == types.TypeFunction {
 		plain := strings.ToLower(name)
-		if !slices.Contains(ut.routineOverloads[plain], identity) {
-			ut.routineOverloads[plain] = append(ut.routineOverloads[plain], identity)
-		}
-		if args := createFunctionArgTypes(stmt); args != nil {
-			ut.routineArgs[identity] = args
+		switch stmt.Operation {
+		case types.OpCreate:
+			if !slices.Contains(ut.routineOverloads[plain], identity) {
+				ut.routineOverloads[plain] = append(ut.routineOverloads[plain], identity)
+			}
+			if args := createFunctionArgTypes(stmt); args != nil {
+				ut.routineArgs[identity] = args
+			}
+		case types.OpDrop:
+			// A dropped overload no longer counts: a later short form refers
+			// to the overloads that still exist.
+			ut.routineOverloads[plain] = slices.DeleteFunc(ut.routineOverloads[plain], func(o string) bool { return o == identity })
+			delete(ut.routineArgs, identity)
 		}
 	}
 	return identity
@@ -1091,8 +1099,9 @@ func targetsRoutine(stmt types.Statement) bool {
 	return false
 }
 
-// hasRoutineNamed reports whether any overload of the named function is
-// tracked; references to a function (a trigger, a call) carry no signature.
+// hasRoutineNamed reports whether any overload of the named function exists
+// (created and not dropped); references to a function (a trigger, a call)
+// carry no signature.
 func (ut *UnifiedTracker) hasRoutineNamed(name string) bool {
 	return len(ut.routineOverloads[strings.ToLower(name)]) > 0
 }

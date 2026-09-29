@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/capydatabase/capysquash/internal/errors"
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 // ErrorRecoveryRule runs the consolidation rules it wraps and recovers when
@@ -251,15 +252,26 @@ func (rule *ErrorRecoveryRule) validateConsolidatedSQL(result *tracking.Consolid
 		result.Warnings = append(result.Warnings, "Added missing semicolon")
 	}
 
-	// Check for dangerous patterns that might indicate consolidation errors
-	dangerousPatterns := []string{
-		"DROP DATABASE",
-		"DROP SCHEMA",
-		"TRUNCATE",
+	// Statements a consolidation must never produce: they destroy data and
+	// no schema object's history consolidates into them. Only top-level
+	// statements count - a function body mentioning TRUNCATE is fine.
+	tree, err := pg_query.Parse(sql)
+	if err != nil {
+		return errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "consolidated SQL does not parse", map[string]any{"error": err.Error()})
 	}
-
-	for _, pattern := range dangerousPatterns {
-		if strings.Contains(strings.ToUpper(sql), pattern) {
+	for _, raw := range tree.GetStmts() {
+		var pattern string
+		switch n := raw.GetStmt().GetNode().(type) {
+		case *pg_query.Node_DropdbStmt:
+			pattern = "DROP DATABASE"
+		case *pg_query.Node_TruncateStmt:
+			pattern = "TRUNCATE"
+		case *pg_query.Node_DropStmt:
+			if n.DropStmt.GetRemoveType() == pg_query.ObjectType_OBJECT_SCHEMA {
+				pattern = "DROP SCHEMA"
+			}
+		}
+		if pattern != "" {
 			return errors.New(errors.ErrorCodeConsolidationFailed, errors.CategoryConsolidation, "potentially dangerous SQL detected", map[string]any{"pattern": pattern})
 		}
 	}

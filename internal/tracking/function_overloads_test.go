@@ -84,3 +84,54 @@ func TestShortFormStatementsGetTheArgumentsOfTheOnlyOverload(t *testing.T) {
 	require.Len(t, fn.History, 2)
 	assert.Equal(t, "GRANT execute ON FUNCTION h(varchar(20), int[]) TO public", fn.History[1].Statement.SQL, "pg_query deparse spelling")
 }
+
+// After one of two overloads is dropped, a short-form statement refers to the
+// overload that is left, as it does in PostgreSQL.
+func TestShortFormAfterADropRefersToTheRemainingOverload(t *testing.T) {
+	tracker := trackSQL(t,
+		"CREATE FUNCTION k(a int) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\nCREATE FUNCTION k(a text) RETURNS int LANGUAGE sql AS $$ SELECT 2 $$;",
+		"DROP FUNCTION k(text);\nDROP FUNCTION k;",
+	)
+
+	intFn := tracker.GetObjects()["public.k(integer)::FUNCTION"]
+	require.NotNil(t, intFn)
+	require.Len(t, intFn.History, 2, "create + the short-form drop")
+	assert.Nil(t, intFn.GetFinalState())
+	assert.NotContains(t, tracker.GetObjects(), "public.k::FUNCTION")
+}
+
+// A trigger on a function that was dropped still warns.
+func TestReferenceToADroppedFunctionWarns(t *testing.T) {
+	tracker := trackSQL(t, `
+CREATE TABLE t (id int);
+CREATE FUNCTION gone() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+DROP FUNCTION gone();
+CREATE TRIGGER t_gone BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION gone();
+`)
+
+	found := false
+	for _, warning := range tracker.ValidateConsistency() {
+		if strings.Contains(warning, "gone") {
+			found = true
+		}
+	}
+	assert.True(t, found, "a trigger on a dropped function must warn")
+}
+
+// Quoted type names keep their case: "Mood" and mood are different types.
+func TestQuotedTypeNamesKeepTheirCase(t *testing.T) {
+	tracker := trackSQL(t,
+		`CREATE TYPE mood AS ENUM ('a'); CREATE TYPE "Mood" AS ENUM ('b');
+CREATE FUNCTION m(a mood) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
+CREATE FUNCTION m(a "Mood") RETURNS int LANGUAGE sql AS $$ SELECT 2 $$;`,
+	)
+	assert.Contains(t, tracker.GetObjects(), "public.m(mood)::FUNCTION")
+	assert.Contains(t, tracker.GetObjects(), `public.m("mood")::FUNCTION`, "keys are lower-cased; the quotes keep it apart")
+	count := 0
+	for key := range tracker.GetObjects() {
+		if strings.HasPrefix(key, "public.m(") {
+			count++
+		}
+	}
+	assert.Equal(t, 2, count)
+}
