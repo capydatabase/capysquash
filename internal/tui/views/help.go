@@ -58,7 +58,7 @@ func (h *HelpView) View() string {
 	// Global shortcuts
 	sections = append(sections, h.renderSection("Global", []KeyBinding{
 		{"q, Ctrl+C", "Quit the application", ""},
-		{"ESC", "Return to dashboard", ""},
+		{"ESC", "Go back to the previous screen", ""},
 		{"?", "Toggle this help screen", ""},
 		{"v", "Toggle migration validation (static lint)", ""},
 	}))

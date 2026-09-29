@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -114,6 +115,123 @@ func TestKeysSwitchViews(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatal("q did not quit")
+	}
+}
+
+func wantView(t *testing.T, m *Model, want ViewType, step string) {
+	t.Helper()
+	if got := m.currentView.Type(); got != want {
+		t.Fatalf("after %s: view = %s, want %s", step, m.getViewName(got), m.getViewName(want))
+	}
+}
+
+// Back (esc, ? on help, v on validation) returns to the view that was
+// showing before, not to the dashboard.
+func TestBackReturnsToPreviousView(t *testing.T) {
+	m := newTestModel(t)
+
+	press(t, m, keySpace)
+	wantView(t, m, ViewAnalysis, "space")
+	press(t, m, keyHelp)
+	wantView(t, m, ViewHelp, "?")
+	press(t, m, keyHelp)
+	wantView(t, m, ViewAnalysis, "second ?")
+
+	press(t, m, keyValid)
+	wantView(t, m, ViewValidation, "v")
+	press(t, m, keyHelp)
+	wantView(t, m, ViewHelp, "? on validation")
+	press(t, m, keyEsc)
+	wantView(t, m, ViewValidation, "esc on help")
+	press(t, m, keyValid)
+	wantView(t, m, ViewAnalysis, "second v")
+
+	press(t, m, keyEsc)
+	wantView(t, m, ViewDashboard, "esc on analysis")
+	if len(m.stack) != 0 {
+		t.Fatalf("stack not empty on the dashboard: %v", m.stack)
+	}
+	press(t, m, keyEsc)
+	wantView(t, m, ViewDashboard, "esc on dashboard")
+}
+
+// A view the program starts on has nothing to go back to but the dashboard.
+func TestBackWithEmptyStackGoesToDashboard(t *testing.T) {
+	dir, err := filepath.Abs("../../test-fixtures/fk_cycles/original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+
+	m := NewModel(dir, "capysquash.config.json")
+	m.startAt(ViewAnalysis)
+	drive(t, m, m.Init())
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	press(t, m, keyEsc)
+	wantView(t, m, ViewDashboard, "esc")
+}
+
+// Navigating to the showing view or to one already on the stack does not
+// push it again; navigating to the dashboard forgets every view.
+func TestNavigateKeepsStackFree(t *testing.T) {
+	m := newTestModel(t)
+
+	press(t, m, keySpace)
+	_, cmd := m.Update(NavigateMsg{View: ViewAnalysis})
+	drive(t, m, cmd)
+	wantView(t, m, ViewAnalysis, "navigate to analysis on analysis")
+
+	// Help and validation toggled over each other return to the one
+	// already open instead of stacking up.
+	for range 3 {
+		press(t, m, keyValid)
+		press(t, m, keyHelp)
+	}
+	press(t, m, keyValid)
+	wantView(t, m, ViewValidation, "v")
+	if want := []ViewType{ViewDashboard, ViewAnalysis}; !slices.Equal(m.stack, want) {
+		t.Fatalf("stack = %v, want %v", m.stack, want)
+	}
+	press(t, m, keyEsc)
+	wantView(t, m, ViewAnalysis, "esc on validation")
+
+	press(t, m, keyHelp)
+	_, cmd = m.Update(NavigateMsg{View: ViewDashboard})
+	drive(t, m, cmd)
+	wantView(t, m, ViewDashboard, "navigate to dashboard")
+	if len(m.stack) != 0 {
+		t.Fatalf("navigating to the dashboard left a stack: %v", m.stack)
+	}
+}
+
+// Going back to the squash view enters it again, which starts a new squash
+// (OnEnter runs on every entry). Enter on the finished squash goes to the
+// dashboard.
+func TestBackToProgressReentersIt(t *testing.T) {
+	m := newTestModel(t)
+	_, cmd := m.navigateTo(ViewProgress)
+	drive(t, m, cmd)
+	if !strings.Contains(content(m), "Press Enter to return to dashboard") {
+		t.Fatalf("squash did not finish:\n%s", content(m))
+	}
+
+	// The working directory is the test's temp dir; squashed/ is the
+	// squash output, so its reappearance shows the squash ran again.
+	if err := os.RemoveAll("squashed"); err != nil {
+		t.Fatal(err)
+	}
+	press(t, m, keyHelp)
+	press(t, m, keyHelp)
+	wantView(t, m, ViewProgress, "? ?")
+	if _, err := os.Stat(filepath.Join("squashed", "squashed.sql")); err != nil {
+		t.Fatalf("going back to the squash view did not squash again: %v", err)
+	}
+
+	press(t, m, keyEnter)
+	wantView(t, m, ViewDashboard, "enter on finished squash")
+	if len(m.stack) != 0 {
+		t.Fatalf("stack not empty on the dashboard: %v", m.stack)
 	}
 }
 
