@@ -116,6 +116,15 @@ changes, `ALTER DEFAULT PRIVILEGES` (including `FOR ROLE`), bulk
 Each fixture's README lists what it covers. Role names carry a per-fixture
 prefix because roles are shared by every database of the e2e container.
 
+### 8. Renames and schemas: `rename_schema`, `rename_types`, `rename_table_dependents`, `drop_schema_recreate`
+
+Test that renamed schemas, types (enum values, composite attributes, domains)
+and tables, and dropped and recreated schemas, reach the baseline under their
+final names with everything that depends on them: objects in a renamed
+schema, columns and function signatures of a renamed type, indexes, foreign
+keys, views, policies, triggers, comments, grants and data of a renamed
+table, and nothing of a schema dropped with CASCADE.
+
 ## Running Tests
 
 ### Unit Tests
