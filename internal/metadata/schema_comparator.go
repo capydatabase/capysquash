@@ -21,7 +21,9 @@ import (
 // differs, a different column order, a different row-level-security flag,
 // and any constraint, index, trigger, policy, view, materialized view,
 // function (per identity signature), sequence, enum (labels in order) or other
-// type whose definition differs. An extension the baseline creates but
+// type whose definition differs, and any object whose owner or privileges
+// differ or default privileges that differ (roles compared as
+// DatabaseOwnerRole describes). An extension the baseline creates but
 // production does not have also invalidates the result, because the baseline
 // could not be applied there.
 //
@@ -88,6 +90,7 @@ const (
 	kindFunction         = "FUNCTION"
 	kindSequence         = "SEQUENCE"
 	kindType             = "TYPE"
+	kindPrivileges       = "PRIVILEGES"
 )
 
 // catalogObject is one comparable object with its properties in a fixed order.
@@ -137,7 +140,8 @@ func CompareDatabaseMetadata(expected, actual *DatabaseMetadata, opts CompareOpt
 		if _, preexisting := environment[o.key()]; preexisting {
 			return false
 		}
-		return len(opts.Schemas) == 0 || slices.Contains(opts.Schemas, o.schema)
+		// Database-wide default privileges belong to no schema.
+		return len(opts.Schemas) == 0 || o.schema == "" || slices.Contains(opts.Schemas, o.schema)
 	}
 	expectedObjects = filterObjects(expectedObjects, inScope)
 	actualObjects = filterObjects(actualObjects, inScope)
@@ -441,7 +445,27 @@ func flattenMetadata(meta *DatabaseMetadata) map[string]catalogObject {
 			)
 		}
 	}
+
+	// Owners, privileges and default privileges, one object each.
+	for _, p := range meta.Privileges {
+		parent := objectKey(kindSchema, p.Schema)
+		if p.Schema == "" {
+			parent = ""
+		}
+		add(catalogObject{
+			kind: kindPrivileges, schema: p.Schema, name: p.Kind + " " + privilegeObjectName(p), parent: parent,
+			props: []objectProperty{{"owner", p.Owner}, {"privileges", p.ACL}},
+		})
+	}
 	return objects
+}
+
+// privilegeObjectName qualifies a privilege row's object with its schema.
+func privilegeObjectName(p PrivilegeMetadata) string {
+	if p.Schema == "" || p.Kind == "schema" {
+		return p.Name
+	}
+	return p.Schema + "." + p.Name
 }
 
 func displayValue(value string) string {

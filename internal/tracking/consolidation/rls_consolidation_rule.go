@@ -96,21 +96,8 @@ func (r *RLSConsolidationRule) Apply(lifecycle *tracking.ObjectLifecycle, engine
 		}
 	}
 
-	// Ensure RLS is enforced if we generated a CREATE statement
-	// integrateAlterIntoCreate intentionally skips RLS statements, so we must append the final state manually
-	if createStmt != nil {
-		finalRLSState := r.determineFinalRLSState(lifecycle)
-		if finalRLSState != "" && finalRLSState != "DISABLE ROW LEVEL SECURITY" {
-			tableName := lifecycle.Name
-			if consolidatedSQL != "" {
-				if !strings.HasSuffix(consolidatedSQL, ";") {
-					consolidatedSQL += ";"
-				}
-				consolidatedSQL += "\n"
-			}
-			consolidatedSQL += fmt.Sprintf("ALTER TABLE %s %s;", tableName, finalRLSState)
-		}
-	}
+	// integrateAlterIntoCreate replays the RLS statements after the CREATE in
+	// history order, so ENABLE, FORCE and DISABLE keep their combined effect.
 
 	// Build optimizations list
 	optimizations := []string{}

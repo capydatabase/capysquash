@@ -7,7 +7,11 @@
 #      original history was applied to (its own catalog comparison), and at
 #      the conservative, standard and aggressive levels, proving with
 #      `validate-external` (the contract the CapyDB CLI uses) that the
-#      squashed baseline builds the same catalog as the original history.
+#      squashed baseline builds the same catalog as the original history,
+#      owners, privileges and default privileges included.
+#
+# Roles are shared by every database of the container: a fixture that
+# creates roles gives them names no other fixture uses.
 #
 # CAPYSQUASH_E2E_POSTGRES_IMAGE picks the server (default postgres:18).
 set -euo pipefail
@@ -51,18 +55,6 @@ go test -race -timeout 30m -tags=integration ./...
 echo "Building capysquash..."
 go build -o "$work/capysquash" ./cmd/capysquash
 
-# Fixtures whose original history PostgreSQL itself rejects cannot be
-# compared; each is listed with the statement that fails. (A function, not an
-# associative array: macOS still ships bash 3.2.)
-excluded_reason() {
-  case "$1" in
-    enums_append_reorder) echo '001_create.sql uses type "user_status" before creating it' ;;
-    generated_columns_identity) echo '002_generated.sql uses a generated column in another generation expression' ;;
-    matviews) echo '004_manual_refresh.sql refreshes CONCURRENTLY a materialized view created WITH NO DATA' ;;
-    rls_policies) echo '003_setup_rls.sql calls current_user_id(), which no migration creates' ;;
-  esac
-}
-
 export CAPYSQUASH_E2E_DSN="postgres://postgres:postgres@127.0.0.1:${port}/capysquash_e2e?sslmode=disable"
 
 fresh_database() {
@@ -78,11 +70,6 @@ validate() {
 failures=0
 for dir in test-fixtures/*/original; do
   fixture="$(basename "$(dirname "$dir")")"
-  reason="$(excluded_reason "$fixture")"
-  if [[ -n "$reason" ]]; then
-    echo "SKIP $fixture: $reason"
-    continue
-  fi
 
   fresh_database
   if ! validate "$dir" --snapshot-output "$work/original.json" | grep -q '"success":true'; then

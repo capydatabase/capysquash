@@ -161,3 +161,20 @@ func TestDefaultConsolidationReplaysAltersAfterTheFinalCreate(t *testing.T) {
 		t.Fatalf("OriginalStatements = %d, want 3", len(result.OriginalStatements))
 	}
 }
+
+// For a function the final state is its last ALTER; the replay still starts
+// from the CREATE, or the baseline would rename a function it never created.
+func TestDefaultConsolidationKeepsTheCreateOfARenamedFunction(t *testing.T) {
+	create := types.Statement{SQL: "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'select 1'", Operation: types.OpCreate, ObjectType: types.TypeFunction}
+	rename := types.Statement{SQL: "ALTER FUNCTION f() RENAME TO g", Operation: types.OpAlter, ObjectType: types.TypeFunction}
+	lifecycle := &tracking.ObjectLifecycle{Name: "public.f", Type: types.TypeFunction, History: []tracking.LifecycleEvent{
+		{Operation: types.OpCreate, Statement: create},
+		{Operation: types.OpAlter, Statement: rename},
+	}}
+
+	result := createDefaultConsolidation(lifecycle)
+	want := "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'select 1';\n\nALTER FUNCTION f() RENAME TO g;"
+	if result.ConsolidatedSQL != want {
+		t.Fatalf("ConsolidatedSQL = %q, want %q", result.ConsolidatedSQL, want)
+	}
+}

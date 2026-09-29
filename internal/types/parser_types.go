@@ -44,7 +44,10 @@ type Statement struct {
 	Privileges []string // Privileges being granted/revoked
 
 	// ALTER TYPE specific fields
-	AlterTypeNewValue string // New ENUM value being added via ALTER TYPE ADD VALUE
+	AlterTypeNewValue string // New ENUM value being added via ALTER TYPE ADD VALUE (or the new name of RENAME VALUE)
+	AlterTypeOldValue string // ENUM value renamed by ALTER TYPE RENAME VALUE; "" for ADD VALUE
+	AlterTypeNeighbor string // ENUM value named by ADD VALUE ... BEFORE/AFTER; "" when the value is appended
+	AlterTypeAfter    bool   // ADD VALUE ... AFTER AlterTypeNeighbor (BEFORE when false)
 
 	// Index specific fields
 	IndexHadExplicitAccessMethod bool // Whether CREATE INDEX had explicit USING clause
@@ -177,6 +180,7 @@ const (
 	OpGrant   Operation = "GRANT"
 	OpRevoke  Operation = "REVOKE"
 	OpComment Operation = "COMMENT"
+	OpRefresh Operation = "REFRESH" // REFRESH MATERIALIZED VIEW: repopulates data, so it is a data operation
 )
 
 // Category represents the semantic category of a statement for organization

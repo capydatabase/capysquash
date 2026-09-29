@@ -45,8 +45,12 @@ There is also a container image; see [docker/README.md](docker/README.md).
   and the candidate to two PostgreSQL databases (local Docker, or any empty
   database you point it at) and compares catalog signatures: extensions,
   tables and columns, constraints, indexes, views, functions, triggers, RLS
-  policies and roles, sequences, enum/composite/domain/range types, ownership,
-  grants and comments.
+  policies and roles, sequences, enum/composite/domain/range types, owners,
+  privileges (table, column, sequence, routine, schema and type ACLs),
+  default privileges and comments.
+- **Keeps the security posture.** Grants, revokes, ownership changes and
+  `ALTER DEFAULT PRIVILEGES` come out as the net state the history leaves
+  (see [Privileges, ownership and roles](#privileges-ownership-and-roles)).
 - **Respects your stack.** Built-in plugins detect Supabase (`auth.*`,
   `storage.*`, RLS), Clerk (JWT v2 claims), Prisma and Drizzle patterns and
   adapt consolidation and validation accordingly.
@@ -94,7 +98,8 @@ same `pg_catalog` queries (`format_type`, `pg_get_constraintdef`,
 `pg_get_indexdef`, `pg_get_functiondef`, ...), and fails when any table,
 column (type, nullability, default, generation, identity, collation, order),
 constraint, index, trigger, policy, view, function overload, sequence, enum or
-other type in the schemas the baseline creates differs from production.
+other type in the schemas the baseline creates differs from production, and
+when any owner, privilege or default privilege differs.
 Production schemas the baseline creates nothing in are listed as a warning.
 
 ### Manual overrides
@@ -109,6 +114,46 @@ Two comment pragmas are honoured inside migrations:
 `capysquash-ignore-next:` and `capysquash-ignore-file:` scope a lint suppression to
 the next statement or the whole file. Rule codes are listed by
 `capysquash lint --help`.
+
+### Privileges, ownership and roles
+
+`GRANT`/`REVOKE`, ownership changes (`ALTER ... OWNER TO`) and
+`ALTER DEFAULT PRIVILEGES` are not merged into object definitions. capysquash
+replays them through a model of PostgreSQL's access control lists - following
+renames, `SET SCHEMA` and drops, so a dropped object's grants disappear and a
+recreated one starts clean - and the baseline gets two sections:
+
+- `=== ROLES ===` at the top: each `CREATE ROLE` of the history, run only when
+  the role does not exist yet (roles belong to the whole cluster, and a
+  baseline is applied to new databases in clusters that often have them), then
+  role membership (`GRANT role TO role`) in history order.
+- `=== PRIVILEGES ===` at the end, once every object exists: ownership
+  changes; statements on objects the history does not create (the `public`
+  schema, extension objects) and `ON ALL ... IN SCHEMA` statements, replayed in
+  history order; then, per object, the grants and revokes that take it from
+  PostgreSQL's built-in default privileges to its net state (grant options
+  included; a list that would need `MAINTAIN` goes through `ALL`, which works
+  on every version); finally the default privileges. Default privileges only
+  reach objects created after them, so the privileges each object received at
+  creation are written out as explicit grants.
+
+The model assumes one role runs the whole history and the baseline (`SET ROLE`
+is not followed, and objects start from the built-in defaults).
+`ALTER DEFAULT PRIVILEGES FOR ROLE name` reaches history objects only when
+`name` is that role, which cannot be known when squashing: the privileges that
+depend on it go into a `DO` block that checks `current_user` when the baseline
+runs. Anything the model cannot carry is reported as a `Privileges:` warning.
+
+Validation compares owners and effective privileges (`relacl`, `attacl`,
+`proacl`, `nspacl`, `typacl`, a `NULL` ACL counting as the `acldefault()` it
+stands for) and `pg_default_acl`. Role names are compared as they are - PUBLIC,
+the `pg_*` roles and every application role - except the role that owns the
+database, which each side names `<database owner>`: the history and the
+baseline are usually applied by that role under different names (for example
+`neondb_owner` in production and `postgres` in a validation container).
+Validation does not create roles: the history's own `CREATE ROLE` statements
+do, and any other role a history grants to must already exist in the
+validation cluster under the same name.
 
 ## Validation
 
@@ -143,6 +188,9 @@ capysquash validate-external clean/ --dsn-env CAPYSQUASH_VALIDATION_DSN \
 
 The result carries `contract_version: "capysquash.external-validation.v1"`,
 `success`, `phase`, `comparison_valid`, `has_differences` and `differences`.
+Snapshot files carry `capysquash.catalog-snapshot.v2` (v2 added owners,
+privileges and default privileges); compare snapshots taken by the same
+version.
 
 ### CapyDB-managed validation
 

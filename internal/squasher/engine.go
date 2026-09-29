@@ -24,6 +24,7 @@ import (
 	"github.com/capydatabase/capysquash/internal/plugins"
 	"github.com/capydatabase/capysquash/internal/plugins/auth"
 	"github.com/capydatabase/capysquash/internal/postprocessing"
+	"github.com/capydatabase/capysquash/internal/privileges"
 
 	// Enable for selected non-destructive fixes
 	"github.com/capydatabase/capysquash/internal/tracking"
@@ -92,6 +93,11 @@ type Engine struct {
 	// Processing state
 	processedFiles       map[string]bool
 	consolidationResults map[string]*tracking.ConsolidationResult
+
+	// privilegeHistory owns GRANT/REVOKE, default privileges, ownership
+	// changes and roles: the tracker never sees them, and the baseline gets
+	// them back as its ROLES and PRIVILEGES sections.
+	privilegeHistory *privileges.History
 
 	// Streaming components (optional)
 	streamingTracker *tracking.StreamingTracker
@@ -440,6 +446,7 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 		// Processing state
 		processedFiles:       make(map[string]bool),
 		consolidationResults: make(map[string]*tracking.ConsolidationResult),
+		privilegeHistory:     privileges.NewHistory(),
 
 		// Streaming components
 		streamingTracker:    streamingTracker,
@@ -1271,6 +1278,28 @@ func (e *Engine) SquashFromDirectory(dir string) (*SquashResult, error) {
 	}
 	extAnalysis := e.prepareMigrationEnvironment(ctx, migrationContents)
 
+	// The streaming tracker may see the files in any order, but privileges
+	// depend on it: record them from the loaded contents, in sequence order,
+	// and keep the statements the privilege history owns from the tracker.
+	sequences := make([]int, 0, len(migrationContents))
+	for sequence := range migrationContents {
+		sequences = append(sequences, sequence)
+	}
+	sort.Ints(sequences)
+	for _, sequence := range sequences {
+		migration, err := parser.ParseMigration(migrationContents[sequence], fmt.Sprintf("migration_%05d", sequence))
+		if err != nil {
+			return nil, errors.NewError(
+				errors.ErrorCodeSyntaxError,
+				fmt.Sprintf("parse migration %d", sequence),
+				errors.SeverityError,
+				errors.CategoryParsing,
+			).WithInnerError(err)
+		}
+		e.withoutPrivilegeStatements(migration)
+	}
+	e.streamingTracker.SetStatementFilter(privileges.Filter)
+
 	// Phase 1: Stream parse and track migrations
 	e.updatePhase("Parsing and Tracking")
 	if err := e.streamParseAndTrack(ctx, dir); err != nil {
@@ -1466,8 +1495,9 @@ func (e *Engine) parseAndTrackMigrations(ctx context.Context, migrations map[int
 			).WithInnerError(err)
 		}
 
-		// Process with enhanced tracker
-		e.tracker.ProcessMigration(migration, sequence)
+		// Process with enhanced tracker; the privilege statements go to the
+		// privilege history instead.
+		e.tracker.ProcessMigration(e.withoutPrivilegeStatements(migration), sequence)
 
 		// Collect data operations separately (INSERT/UPDATE/DELETE)
 		for stmtIndex, stmt := range migration.Statements {
@@ -1504,6 +1534,24 @@ func (e *Engine) parseAndTrackMigrations(ctx context.Context, migrations map[int
 
 	e.logger.Info("Tracked %d database objects across %d categories", len(e.lifecycles), len(lifecycles))
 	return nil
+}
+
+// withoutPrivilegeStatements records a migration in the privilege history
+// and returns a copy without the statements the history owns.
+func (e *Engine) withoutPrivilegeStatements(migration *types.Migration) *types.Migration {
+	tracked := *migration
+	tracked.Statements = e.privilegeHistory.Record(migration.Statements)
+	// The tracker skips a schema statement it cannot name; say so instead of
+	// letting it vanish (ALTER SCHEMA/TYPE ... RENAME are the known cases).
+	for _, stmt := range tracked.Statements {
+		if stmt.ObjectName == "" && !stmt.IsDataOp {
+			statement, _, _ := strings.Cut(strings.TrimSpace(stmt.SQL), "\n")
+			warning := fmt.Sprintf("%s: statement not carried into the baseline (capysquash does not track it): %s", migration.Filename, statement)
+			e.warnings = append(e.warnings, warning)
+			e.logger.Warn("%s", warning)
+		}
+	}
+	return &tracked
 }
 
 // analyzeDependenciesAndRisks analyzes object dependencies and assesses risks
@@ -1983,6 +2031,19 @@ func (e *Engine) generateOptimizedSQL(ctx context.Context, consolidatedObjects m
 	e.sqlBuilder.Comment(fmt.Sprintf("Generated at: %s", time.Now().Format(time.RFC3339)))
 	e.sqlBuilder.NL()
 
+	// Roles come first: schemas, policies and grants name them.
+	rolesSQL, err := e.privilegeHistory.RolesSQL()
+	if err != nil {
+		return "", err
+	}
+	if rolesSQL != "" {
+		e.sqlBuilder.NL().Comment("=== ROLES ===")
+		e.sqlBuilder.Comment("Roles belong to the whole cluster: each is created only when it does not exist yet")
+		e.sqlBuilder.NL()
+		e.sqlBuilder.Statement(rolesSQL)
+		e.sqlBuilder.NL().NL()
+	}
+
 	// Inject auth compatibility layer if needed
 	// Check if any migration uses auth.jwt(), Supabase roles, or storage schema
 	needsAuthCompat := false
@@ -2051,6 +2112,13 @@ func (e *Engine) generateOptimizedSQL(ctx context.Context, consolidatedObjects m
 		// Also check for GRANT/REVOKE statements that reference roles
 		if strings.Contains(sqlLower, "grant") && (strings.Contains(sqlLower, "to authenticated") || strings.Contains(sqlLower, "to anon") || strings.Contains(sqlLower, "to service_role")) {
 			needsRoleCreation = true
+		}
+	}
+	// Grants are held by the privilege history, not by consolidated objects.
+	for _, role := range []string{"anon", "authenticated", "service_role"} {
+		if e.privilegeHistory.ReferencesRole(role) {
+			needsRoleCreation = true
+			referencedRoles[role] = true
 		}
 	}
 
@@ -2558,6 +2626,22 @@ $$`)
 
 	finalSQL = e.removeOrphanedFunctionStatements(finalSQL)
 
+	// Ownership, privileges and default privileges run last, once every
+	// object they name exists.
+	privilegesSQL, privilegeWarnings, err := e.privilegeHistory.PrivilegesSQL(finalSQL)
+	if err != nil {
+		return "", err
+	}
+	for _, warning := range privilegeWarnings {
+		e.warnings = append(e.warnings, "Privileges: "+warning)
+		e.logger.Warn("Privileges: %s", warning)
+	}
+	if privilegesSQL != "" {
+		finalSQL = strings.TrimRight(finalSQL, "\n") + "\n\n\n-- === PRIVILEGES ===\n" +
+			"-- Ownership, privileges and default privileges as the history leaves them,\n" +
+			"-- applied once every object exists.\n\n" + privilegesSQL + "\n"
+	}
+
 	return finalSQL, nil
 }
 
@@ -3003,7 +3087,9 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 			return "", true
 		}
 		if signature := parser.FunctionSignatureFromArgs(obj.GetObjectWithArgs()); signature != "" {
-			return fn + signature, aliveFunctions[fn+signature]
+			// An unqualified name resolves to public, as the keys record it.
+			alive := aliveFunctions[fn+signature] || !strings.Contains(fn, ".") && aliveFunctions["public."+fn+signature]
+			return fn + signature, alive
 		}
 		if aliveFunctions[fn] {
 			return fn, true
@@ -3412,8 +3498,9 @@ func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int
 			).WithInnerError(err)
 		}
 
-		// Process through tracker
-		e.streamingTracker.GetTracker().ProcessMigration(migration, migrationFile.Sequence)
+		// Process through tracker; the privilege statements go to the
+		// privilege history instead.
+		e.streamingTracker.GetTracker().ProcessMigration(e.withoutPrivilegeStatements(migration), migrationFile.Sequence)
 
 		// Release memory
 		e.memManager.ReleaseMemory(migrationFile.Size)

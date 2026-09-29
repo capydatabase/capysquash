@@ -135,15 +135,20 @@ func createDefaultConsolidation(lifecycle *tracking.ObjectLifecycle) *tracking.C
 
 	// No rule merged the history, so the ALTERs made after the final CREATE
 	// are replayed as written; the final state alone would lose them (a
-	// column added later, a default changed later).
-	statements := []types.Statement{*finalState}
-	sql := strings.TrimRight(strings.TrimSpace(finalState.SQL), ";") + ";"
+	// column added later, a default changed later). The replay starts from
+	// that CREATE: for objects other than tables the final state is the last
+	// ALTER itself (ALTER FUNCTION ... RENAME), which would lose the CREATE.
 	lastCreate := -1
 	for i, event := range lifecycle.History {
 		if event.Operation == types.OpCreate {
 			lastCreate = i
 		}
 	}
+	if lastCreate >= 0 {
+		finalState = &lifecycle.History[lastCreate].Statement
+	}
+	statements := []types.Statement{*finalState}
+	sql := strings.TrimRight(strings.TrimSpace(finalState.SQL), ";") + ";"
 	if lastCreate >= 0 {
 		for _, event := range lifecycle.History[lastCreate+1:] {
 			if event.Operation != types.OpAlter || strings.TrimSpace(event.Statement.SQL) == "" {

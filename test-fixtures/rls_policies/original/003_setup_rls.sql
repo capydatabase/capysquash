@@ -1,3 +1,17 @@
+-- Session helpers the policies call: the application sets app.user_id,
+-- app.org_id and app.role for each connection.
+CREATE FUNCTION current_user_id() RETURNS integer
+    LANGUAGE sql STABLE
+    AS $$ SELECT nullif(current_setting('app.user_id', true), '')::integer $$;
+
+CREATE FUNCTION current_user_org_id() RETURNS integer
+    LANGUAGE sql STABLE
+    AS $$ SELECT nullif(current_setting('app.org_id', true), '')::integer $$;
+
+CREATE FUNCTION current_user_role() RETURNS text
+    LANGUAGE sql STABLE
+    AS $$ SELECT current_setting('app.role', true) $$;
+
 -- Enable RLS on organizations table
 ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
 

@@ -36,6 +36,7 @@ type DatabaseMetadata struct {
 	Schemas    map[string]*SchemaMetadata    `json:"schemas"`
 	SearchPath []string                      `json:"search_path"`
 	Extensions map[string]*ExtensionMetadata `json:"extensions"`
+	Privileges []PrivilegeMetadata           `json:"privileges"` // owners, privileges and default privileges
 	IsSystemDB bool                          `json:"is_system_db"`
 	Version    *PostgreSQLVersion            `json:"version"`
 	CreatedAt  time.Time                     `json:"created_at"`
@@ -540,6 +541,17 @@ func (m *MetadataManager) loadMetadataFromDB(ctx context.Context, database strin
 		).WithInnerError(err)
 	}
 	meta.Extensions = extensions
+
+	privileges, err := LoadPrivileges(ctx, tx)
+	if err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeAnalysisError,
+			"loading privileges",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+	meta.Privileges = privileges
 
 	if err := tx.Commit(); err != nil {
 		return nil, errors.NewError(

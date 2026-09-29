@@ -118,7 +118,7 @@ GRANT USAGE ON SEQUENCE public.accounts_id_seq TO PUBLIC;
 		t.Fatalf("identical migrations produced catalog differences: %v", diff.Differences)
 	}
 
-	wantedKinds := []string{"sequence|", "type|", "relation|", "policy_roles|", "grant|", "comment|"}
+	wantedKinds := []string{"sequence|", "type|", "relation|", "policy_roles|", "privileges|", "comment|"}
 	for _, kind := range wantedKinds {
 		found := false
 		for _, signature := range original.Signature {
@@ -206,6 +206,10 @@ CREATE TRIGGER items_touch BEFORE UPDATE ON public.items FOR EACH ROW EXECUTE FU
 CREATE PROCEDURE public.noop() LANGUAGE sql AS $$ SELECT 1 $$;
 CREATE TABLE app.events (id int);
 CREATE TABLE platform.extra (id int);
+ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC;
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT USAGE ON TYPES TO PUBLIC;
 `
 	if err := ExecuteSQLScript(ctx, db, script, "reset.sql"); err != nil {
 		t.Fatalf("apply script: %v", err)
@@ -235,5 +239,138 @@ SELECT (SELECT count(*) FROM pg_extension WHERE extname = 'pgcrypto')
 	}
 	if platformTables != 2 {
 		t.Fatalf("allowed schema was modified: %d tables, want 2", platformTables)
+	}
+	var defaultACLs int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_default_acl`).Scan(&defaultACLs); err != nil {
+		t.Fatalf("count default privileges: %v", err)
+	}
+	if defaultACLs != 0 {
+		t.Fatalf("%d default privilege entries survived the reset", defaultACLs)
+	}
+}
+
+// Owners and privileges compare with the database owner normalized: the
+// same history applied by the owners of two databases with different names
+// matches, and a missing grant does not.
+func TestPrivilegeSignaturesNormalizeTheDatabaseOwner(t *testing.T) {
+	baseDSN := os.Getenv("DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("DATABASE_URL is required for integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	parsed, err := url.Parse(baseDSN)
+	if err != nil {
+		t.Fatalf("parse DATABASE_URL: %v", err)
+	}
+	adminURL := *parsed
+	adminURL.Path = "/postgres"
+	admin, err := sql.Open("postgres", adminURL.String())
+	if err != nil {
+		t.Fatalf("open admin database: %v", err)
+	}
+	defer func() { _ = admin.Close() }()
+
+	suffix := time.Now().UnixNano()
+	owner := fmt.Sprintf("csq_owner_%d", suffix)
+	reader := fmt.Sprintf("csq_reader_%d", suffix)
+	first := fmt.Sprintf("capysquash_priv_a_%d", suffix)
+	second := fmt.Sprintf("capysquash_priv_b_%d", suffix)
+	setup := []string{
+		"CREATE ROLE " + pq.QuoteIdentifier(owner) + " LOGIN PASSWORD 'owner'",
+		"CREATE ROLE " + pq.QuoteIdentifier(reader),
+		"CREATE DATABASE " + pq.QuoteIdentifier(first),
+		"CREATE DATABASE " + pq.QuoteIdentifier(second) + " OWNER " + pq.QuoteIdentifier(owner),
+	}
+	for _, statement := range setup {
+		if _, err := admin.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	defer func() {
+		for _, statement := range []string{
+			"DROP DATABASE IF EXISTS " + pq.QuoteIdentifier(first) + " WITH (FORCE)",
+			"DROP DATABASE IF EXISTS " + pq.QuoteIdentifier(second) + " WITH (FORCE)",
+			"DROP ROLE IF EXISTS " + pq.QuoteIdentifier(reader),
+			"DROP ROLE IF EXISTS " + pq.QuoteIdentifier(owner),
+		} {
+			if _, err := admin.ExecContext(context.Background(), statement); err != nil {
+				t.Errorf("%s: %v", statement, err)
+			}
+		}
+	}()
+
+	history := fmt.Sprintf(`
+CREATE TABLE public.accounts (id bigint PRIMARY KEY, email text);
+GRANT SELECT (email) ON public.accounts TO %[1]s;
+REVOKE ALL ON public.accounts FROM PUBLIC;
+CREATE FUNCTION public.visible() RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
+REVOKE EXECUTE ON FUNCTION public.visible() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.visible() TO %[1]s WITH GRANT OPTION;
+ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO %[1]s;
+`, pq.QuoteIdentifier(reader))
+	withGrant := t.TempDir()
+	if err := os.WriteFile(filepath.Join(withGrant, "001.sql"), []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withoutGrant := t.TempDir()
+	missing := strings.Replace(history, "WITH GRANT OPTION", "", 1)
+	if err := os.WriteFile(filepath.Join(withoutGrant, "001.sql"), []byte(missing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dsnFor := func(database, user, password string) string {
+		u := *parsed
+		u.Path = "/" + database
+		if user != "" {
+			u.User = url.UserPassword(user, password)
+		}
+		return u.String()
+	}
+	validator := NewSchemaValidator(DefaultValidationConfig(), nil, nil)
+	defer func() { _ = validator.Close() }()
+
+	original, err := validator.ApplyAndSnapshot(ctx, withGrant, dsnFor(first, "", ""))
+	if err != nil {
+		t.Fatalf("snapshot as the superuser: %v", err)
+	}
+	asOwner, err := validator.ApplyAndSnapshot(ctx, withGrant, dsnFor(second, owner, "owner"))
+	if err != nil {
+		t.Fatalf("snapshot as the database owner: %v", err)
+	}
+	diff, err := CompareCatalogSnapshots(original, asOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff.HasDifferences {
+		t.Fatalf("the same history applied by each database's owner differs: %v", diff.Differences)
+	}
+	found := false
+	for _, line := range original.Signature {
+		if strings.HasPrefix(line, "privileges|routine|public|visible()|owner=<database owner> ") && strings.Contains(line, reader+"=EXECUTE*/<database owner>") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no normalized routine privilege line in %v", original.Signature)
+	}
+
+	if _, err := admin.ExecContext(ctx, "DROP DATABASE "+pq.QuoteIdentifier(second)+" WITH (FORCE)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+pq.QuoteIdentifier(second)+" OWNER "+pq.QuoteIdentifier(owner)); err != nil {
+		t.Fatal(err)
+	}
+	withoutOption, err := validator.ApplyAndSnapshot(ctx, withoutGrant, dsnFor(second, owner, "owner"))
+	if err != nil {
+		t.Fatalf("snapshot without the grant option: %v", err)
+	}
+	diff, err = CompareCatalogSnapshots(original, withoutOption)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diff.HasDifferences || !strings.Contains(strings.Join(diff.Differences, "\n"), "visible()") {
+		t.Fatalf("a missing grant option must be a difference: %v", diff.Differences)
 	}
 }

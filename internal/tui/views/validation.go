@@ -146,10 +146,11 @@ func (v *ValidationView) runValidation() tea.Msg {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
+		// Check returns the findings of every rule that ran even when another
+		// rule failed; report both instead of dropping the file's findings.
 		violations, err := validator.Check(string(content))
 		if err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", name, err))
-			continue
 		}
 		for _, vl := range violations {
 			line := fmt.Sprintf("%s:%d [%s] %s: %s", name, vl.Line, vl.Category, vl.Code, vl.Message)
