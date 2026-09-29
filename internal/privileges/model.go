@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/capydatabase/capysquash/internal/parser"
+	"github.com/capydatabase/capysquash/internal/pgnames"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 	"google.golang.org/protobuf/proto"
 )
@@ -417,59 +418,12 @@ func columnNeedsSequence(def *pg_query.ColumnDef) bool {
 // implicitSequence creates the sequence PostgreSQL makes for a serial or
 // identity column, named as ChooseRelationName names it.
 func (m *model) implicitSequence(table *object, column string) {
-	name := chooseRelationName(table.name, column, "seq", func(candidate string) bool {
+	name := pgnames.ChooseRelationName(table.name, column, "seq", func(candidate string) bool {
 		return m.objects[objectKey(kindRelation, table.schema, candidate, "")] != nil
 	})
 	seq := m.create(kindRelation, "SEQUENCE", table.schema, name, "", table.owner, defaultsSequences)
 	seq.linked = table
 	seq.linkedColumn = column
-}
-
-// chooseRelationName follows PostgreSQL's makeObjectName: name1_name2_label
-// truncated to 63 bytes by shortening the longer part first, with a number
-// appended to the label while the name is taken.
-func chooseRelationName(name1, name2, label string, taken func(string) bool) string {
-	for pass := 0; ; pass++ {
-		modLabel := label
-		if pass > 0 {
-			modLabel = fmt.Sprintf("%s%d", label, pass)
-		}
-		name := makeObjectName(name1, name2, modLabel)
-		if !taken(name) {
-			return name
-		}
-	}
-}
-
-func makeObjectName(name1, name2, label string) string {
-	const maxLength = 63
-	overhead := 1 + len(label) + 1
-	if name2 == "" {
-		overhead = len(label) + 1
-	}
-	chars1, chars2 := len(name1), len(name2)
-	for chars1+chars2 > maxLength-overhead {
-		if chars1 > chars2 {
-			chars1--
-		} else {
-			chars2--
-		}
-	}
-	chars1 = clipRunes(name1, chars1)
-	chars2 = clipRunes(name2, chars2)
-	name := name1[:chars1]
-	if name2 != "" {
-		name += "_" + name2[:chars2]
-	}
-	return name + "_" + label
-}
-
-// clipRunes shortens a byte count so it does not split a UTF-8 character.
-func clipRunes(s string, n int) int {
-	for n > 0 && n < len(s) && s[n]&0xC0 == 0x80 {
-		n--
-	}
-	return n
 }
 
 // ---- statements ----------------------------------------------------------

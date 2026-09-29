@@ -384,18 +384,3 @@ func TestQuoteIdent(t *testing.T) {
 		}
 	}
 }
-
-func TestChooseRelationNameFollowsPostgreSQL(t *testing.T) {
-	never := func(string) bool { return false }
-	if got := chooseRelationName("orders", "id", "seq", never); got != "orders_id_seq" {
-		t.Errorf("got %s", got)
-	}
-	long := strings.Repeat("t", 60)
-	if got := chooseRelationName(long, "id", "seq", never); got != strings.Repeat("t", 56)+"_id_seq" || len(got) != 63 {
-		t.Errorf("truncation: got %s (%d)", got, len(got))
-	}
-	taken := func(name string) bool { return name == "orders_id_seq" }
-	if got := chooseRelationName("orders", "id", "seq", taken); got != "orders_id_seq1" {
-		t.Errorf("collision: got %s", got)
-	}
-}
