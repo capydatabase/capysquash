@@ -26,7 +26,6 @@ type MetadataManager struct {
 	cacheTTL   time.Duration
 	mutex      sync.RWMutex
 	db         *sql.DB
-	queries    *catalogsqlc.Queries
 	hitCount   int64
 	missCount  int64
 }
@@ -95,6 +94,7 @@ type ConstraintMetadata struct {
 	CheckExpression   string   `json:"check_expression,omitempty"`
 	IsDeferrable      bool     `json:"is_deferrable"`
 	InitiallyDeferred bool     `json:"initially_deferred"`
+	Definition        string   `json:"definition"` // pg_get_constraintdef
 }
 
 // IndexMetadata represents index information with parent table references
@@ -179,15 +179,16 @@ type TypeMetadata struct {
 
 // TriggerMetadata represents trigger information
 type TriggerMetadata struct {
-	Name      string   `json:"name"`
-	Table     string   `json:"table"`
-	Schema    string   `json:"schema"`
-	Function  string   `json:"function"`
-	Events    []string `json:"events"` // INSERT, UPDATE, DELETE
-	Timing    string   `json:"timing"` // BEFORE, AFTER, INSTEAD OF
-	Level     string   `json:"level"`  // ROW, STATEMENT
-	Condition string   `json:"condition,omitempty"`
-	IsEnabled bool     `json:"is_enabled"`
+	Name       string   `json:"name"`
+	Table      string   `json:"table"`
+	Schema     string   `json:"schema"`
+	Function   string   `json:"function"`
+	Events     []string `json:"events"` // INSERT, UPDATE, DELETE
+	Timing     string   `json:"timing"` // BEFORE, AFTER, INSTEAD OF
+	Level      string   `json:"level"`  // ROW, STATEMENT
+	Condition  string   `json:"condition,omitempty"`
+	IsEnabled  bool     `json:"is_enabled"`
+	Definition string   `json:"definition"` // pg_get_triggerdef
 }
 
 // PolicyMetadata represents RLS policy information
@@ -230,7 +231,6 @@ func NewMetadataManager(db *sql.DB, cacheTTL time.Duration) *MetadataManager {
 		lastUpdate: make(map[string]time.Time),
 		cacheTTL:   cacheTTL,
 		db:         db,
-		queries:    catalogsqlc.New(db),
 	}
 }
 
@@ -455,7 +455,14 @@ func contains(slice []string, item string) bool {
 	return slices.Contains(slice, item)
 }
 
-// loadMetadataFromDB loads comprehensive metadata from PostgreSQL
+// loadMetadataFromDB loads comprehensive metadata from PostgreSQL.
+//
+// The catalog is read inside one READ ONLY, REPEATABLE READ transaction: the
+// database refuses any write, and every query sees the same snapshot. After
+// recording the session search_path, the transaction clears it (SET LOCAL, as
+// pg_dump does) so that format_type and the pg_get_*def functions qualify every
+// user object with its schema. Definitions loaded from two databases are then
+// comparable regardless of either session's search_path.
 func (m *MetadataManager) loadMetadataFromDB(ctx context.Context, database string) (*DatabaseMetadata, error) {
 	meta := &DatabaseMetadata{
 		Database:   database,
@@ -464,8 +471,21 @@ func (m *MetadataManager) loadMetadataFromDB(ctx context.Context, database strin
 		CreatedAt:  time.Now(),
 	}
 
+	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeAnalysisError,
+			"starting read-only catalog transaction",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+	// Rollback after a successful Commit is a no-op returning sql.ErrTxDone.
+	defer func() { _ = tx.Rollback() }()
+	q := catalogsqlc.New(tx)
+
 	// Load PostgreSQL version
-	version, err := m.loadVersion(ctx)
+	version, err := m.loadVersion(ctx, q)
 	if err != nil {
 		return nil, errors.NewError(
 			errors.ErrorCodeAnalysisError,
@@ -477,7 +497,7 @@ func (m *MetadataManager) loadMetadataFromDB(ctx context.Context, database strin
 	meta.Version = version
 
 	// Load search path
-	searchPath, err := m.loadSearchPath(ctx)
+	searchPath, err := m.loadSearchPath(ctx, tx, q)
 	if err != nil {
 		return nil, errors.NewError(
 			errors.ErrorCodeAnalysisError,
@@ -488,8 +508,17 @@ func (m *MetadataManager) loadMetadataFromDB(ctx context.Context, database strin
 	}
 	meta.SearchPath = searchPath
 
+	if _, err := tx.ExecContext(ctx, "SELECT pg_catalog.set_config('search_path', '', true)"); err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeAnalysisError,
+			"clearing search path for catalog rendering",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+
 	// Load schemas
-	schemas, err := m.loadSchemas(ctx)
+	schemas, err := m.loadSchemas(ctx, q)
 	if err != nil {
 		return nil, errors.NewError(
 			errors.ErrorCodeAnalysisError,
@@ -501,7 +530,7 @@ func (m *MetadataManager) loadMetadataFromDB(ctx context.Context, database strin
 	meta.Schemas = schemas
 
 	// Load extensions
-	extensions, err := m.loadExtensions(ctx)
+	extensions, err := m.loadExtensions(ctx, q)
 	if err != nil {
 		return nil, errors.NewError(
 			errors.ErrorCodeAnalysisError,
@@ -512,12 +541,21 @@ func (m *MetadataManager) loadMetadataFromDB(ctx context.Context, database strin
 	}
 	meta.Extensions = extensions
 
+	if err := tx.Commit(); err != nil {
+		return nil, errors.NewError(
+			errors.ErrorCodeAnalysisError,
+			"closing read-only catalog transaction",
+			errors.SeverityError,
+			errors.CategoryValidation,
+		).WithInnerError(err)
+	}
+
 	return meta, nil
 }
 
 // loadVersion loads PostgreSQL version information
-func (m *MetadataManager) loadVersion(ctx context.Context) (*PostgreSQLVersion, error) {
-	versionString, err := m.queries.GetPostgresVersion(ctx)
+func (m *MetadataManager) loadVersion(ctx context.Context, q *catalogsqlc.Queries) (*PostgreSQLVersion, error) {
+	versionString, err := q.GetPostgresVersion(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -561,8 +599,8 @@ func (m *MetadataManager) loadVersion(ctx context.Context) (*PostgreSQLVersion, 
 }
 
 // loadSearchPath loads the current search path
-func (m *MetadataManager) loadSearchPath(ctx context.Context) ([]string, error) {
-	searchPathStr, err := m.queries.GetSearchPath(ctx)
+func (m *MetadataManager) loadSearchPath(ctx context.Context, tx *sql.Tx, q *catalogsqlc.Queries) ([]string, error) {
+	searchPathStr, err := q.GetSearchPath(ctx)
 	if err != nil {
 		return []string{"public"}, nil // Return default on error
 	}
@@ -574,7 +612,7 @@ func (m *MetadataManager) loadSearchPath(ctx context.Context) ([]string, error) 
 		// Handle "$user" placeholder
 		if paths[i] == "$user" {
 			var currentUser string
-			if err := m.db.QueryRowContext(ctx, "SELECT current_user").Scan(&currentUser); err == nil {
+			if err := tx.QueryRowContext(ctx, "SELECT current_user").Scan(&currentUser); err == nil {
 				paths[i] = currentUser
 			}
 		}
@@ -584,10 +622,10 @@ func (m *MetadataManager) loadSearchPath(ctx context.Context) ([]string, error) 
 }
 
 // loadSchemas loads all schema metadata
-func (m *MetadataManager) loadSchemas(ctx context.Context) (map[string]*SchemaMetadata, error) {
+func (m *MetadataManager) loadSchemas(ctx context.Context, q *catalogsqlc.Queries) (map[string]*SchemaMetadata, error) {
 	schemas := make(map[string]*SchemaMetadata)
 
-	schemaRows, err := m.queries.ListUserSchemas(ctx)
+	schemaRows, err := q.ListUserSchemas(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +645,7 @@ func (m *MetadataManager) loadSchemas(ctx context.Context) (map[string]*SchemaMe
 		}
 
 		// Load tables for this schema
-		tables, err := m.loadTablesForSchema(ctx, schemaName)
+		tables, err := m.loadTablesForSchema(ctx, q, schemaName)
 		if err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
@@ -619,7 +657,7 @@ func (m *MetadataManager) loadSchemas(ctx context.Context) (map[string]*SchemaMe
 		schema.Tables = tables
 
 		// Load views
-		views, err := m.loadViewsForSchema(ctx, schemaName)
+		views, err := m.loadViewsForSchema(ctx, q, schemaName)
 		if err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
@@ -631,7 +669,7 @@ func (m *MetadataManager) loadSchemas(ctx context.Context) (map[string]*SchemaMe
 		schema.Views = views
 
 		// Load materialized views
-		matViews, err := m.loadMaterializedViewsForSchema(ctx, schemaName)
+		matViews, err := m.loadMaterializedViewsForSchema(ctx, q, schemaName)
 		if err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
@@ -643,7 +681,7 @@ func (m *MetadataManager) loadSchemas(ctx context.Context) (map[string]*SchemaMe
 		schema.MaterializedViews = matViews
 
 		// Load functions
-		functions, err := m.loadFunctionsForSchema(ctx, schemaName)
+		functions, err := m.loadFunctionsForSchema(ctx, q, schemaName)
 		if err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
@@ -655,7 +693,7 @@ func (m *MetadataManager) loadSchemas(ctx context.Context) (map[string]*SchemaMe
 		schema.Functions = functions
 
 		// Load sequences
-		sequences, err := m.loadSequencesForSchema(ctx, schemaName)
+		sequences, err := m.loadSequencesForSchema(ctx, q, schemaName)
 		if err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
@@ -667,7 +705,7 @@ func (m *MetadataManager) loadSchemas(ctx context.Context) (map[string]*SchemaMe
 		schema.Sequences = sequences
 
 		// Load types
-		types, err := m.loadTypesForSchema(ctx, schemaName)
+		types, err := m.loadTypesForSchema(ctx, q, schemaName)
 		if err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
@@ -685,10 +723,10 @@ func (m *MetadataManager) loadSchemas(ctx context.Context) (map[string]*SchemaMe
 }
 
 // loadTablesForSchema loads table metadata for a specific schema
-func (m *MetadataManager) loadTablesForSchema(ctx context.Context, schemaName string) (map[string]*TableMetadata, error) {
+func (m *MetadataManager) loadTablesForSchema(ctx context.Context, q *catalogsqlc.Queries, schemaName string) (map[string]*TableMetadata, error) {
 	tables := make(map[string]*TableMetadata)
 
-	tableRows, err := m.queries.ListTablesForSchema(ctx, schemaName)
+	tableRows, err := q.ListTablesForSchema(ctx, schemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -711,7 +749,7 @@ func (m *MetadataManager) loadTablesForSchema(ctx context.Context, schemaName st
 		}
 
 		// Load detailed table metadata
-		if err := m.loadColumnsForTable(ctx, schemaName, tableName, table); err != nil {
+		if err := m.loadColumnsForTable(ctx, q, schemaName, tableName, table); err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
 				fmt.Sprintf("loading columns for %s.%s", schemaName, tableName),
@@ -720,7 +758,7 @@ func (m *MetadataManager) loadTablesForSchema(ctx context.Context, schemaName st
 			).WithInnerError(err)
 		}
 
-		if err := m.loadConstraintsForTable(ctx, schemaName, tableName, table); err != nil {
+		if err := m.loadConstraintsForTable(ctx, q, schemaName, tableName, table); err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
 				fmt.Sprintf("loading constraints for %s.%s", schemaName, tableName),
@@ -729,7 +767,7 @@ func (m *MetadataManager) loadTablesForSchema(ctx context.Context, schemaName st
 			).WithInnerError(err)
 		}
 
-		if err := m.loadIndexesForTable(ctx, schemaName, tableName, table); err != nil {
+		if err := m.loadIndexesForTable(ctx, q, schemaName, tableName, table); err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
 				fmt.Sprintf("loading indexes for %s.%s", schemaName, tableName),
@@ -738,7 +776,7 @@ func (m *MetadataManager) loadTablesForSchema(ctx context.Context, schemaName st
 			).WithInnerError(err)
 		}
 
-		if err := m.loadTriggersForTable(ctx, schemaName, tableName, table); err != nil {
+		if err := m.loadTriggersForTable(ctx, q, schemaName, tableName, table); err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
 				fmt.Sprintf("loading triggers for %s.%s", schemaName, tableName),
@@ -747,7 +785,7 @@ func (m *MetadataManager) loadTablesForSchema(ctx context.Context, schemaName st
 			).WithInnerError(err)
 		}
 
-		if err := m.loadPoliciesForTable(ctx, schemaName, tableName, table); err != nil {
+		if err := m.loadPoliciesForTable(ctx, q, schemaName, tableName, table); err != nil {
 			return nil, errors.NewError(
 				errors.ErrorCodeAnalysisError,
 				fmt.Sprintf("loading policies for %s.%s", schemaName, tableName),
@@ -763,10 +801,10 @@ func (m *MetadataManager) loadTablesForSchema(ctx context.Context, schemaName st
 }
 
 // loadExtensions loads extension metadata
-func (m *MetadataManager) loadExtensions(ctx context.Context) (map[string]*ExtensionMetadata, error) {
+func (m *MetadataManager) loadExtensions(ctx context.Context, q *catalogsqlc.Queries) (map[string]*ExtensionMetadata, error) {
 	extensions := make(map[string]*ExtensionMetadata)
 
-	rows, err := m.queries.ListExtensions(ctx)
+	rows, err := q.ListExtensions(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -793,8 +831,8 @@ func (m *MetadataManager) loadExtensions(ctx context.Context) (map[string]*Exten
 }
 
 // loadColumnsForTable loads column metadata for a specific table
-func (m *MetadataManager) loadColumnsForTable(ctx context.Context, schemaName, tableName string, table *TableMetadata) error {
-	columnRows, err := m.queries.ListColumnsForTable(ctx, catalogsqlc.ListColumnsForTableParams{
+func (m *MetadataManager) loadColumnsForTable(ctx context.Context, q *catalogsqlc.Queries, schemaName, tableName string, table *TableMetadata) error {
+	columnRows, err := q.ListColumnsForTable(ctx, catalogsqlc.ListColumnsForTableParams{
 		SchemaName: schemaName,
 		TableName:  tableName,
 	})
@@ -823,8 +861,8 @@ func (m *MetadataManager) loadColumnsForTable(ctx context.Context, schemaName, t
 }
 
 // loadConstraintsForTable loads constraint metadata for a specific table
-func (m *MetadataManager) loadConstraintsForTable(ctx context.Context, schemaName, tableName string, table *TableMetadata) error {
-	constraintRows, err := m.queries.ListConstraintsForTable(ctx, catalogsqlc.ListConstraintsForTableParams{
+func (m *MetadataManager) loadConstraintsForTable(ctx context.Context, q *catalogsqlc.Queries, schemaName, tableName string, table *TableMetadata) error {
+	constraintRows, err := q.ListConstraintsForTable(ctx, catalogsqlc.ListConstraintsForTableParams{
 		SchemaName: schemaName,
 		TableName:  tableName,
 	})
@@ -848,10 +886,8 @@ func (m *MetadataManager) loadConstraintsForTable(ctx context.Context, schemaNam
 			con.RefColumns = append([]string(nil), row.RefColumns...)
 		}
 
-		if row.CheckExpr != "" && strings.HasPrefix(con.Type, "CHECK") {
-			// Extract just the check expression, not the full constraint definition.
-			con.CheckExpression = row.CheckExpr
-		}
+		con.CheckExpression = row.CheckExpr
+		con.Definition = row.Definition
 
 		table.Constraints = append(table.Constraints, con)
 	}
@@ -860,8 +896,8 @@ func (m *MetadataManager) loadConstraintsForTable(ctx context.Context, schemaNam
 }
 
 // loadIndexesForTable loads index metadata for a specific table
-func (m *MetadataManager) loadIndexesForTable(ctx context.Context, schemaName, tableName string, table *TableMetadata) error {
-	indexRows, err := m.queries.ListIndexesForTable(ctx, catalogsqlc.ListIndexesForTableParams{
+func (m *MetadataManager) loadIndexesForTable(ctx context.Context, q *catalogsqlc.Queries, schemaName, tableName string, table *TableMetadata) error {
+	indexRows, err := q.ListIndexesForTable(ctx, catalogsqlc.ListIndexesForTableParams{
 		SchemaName: schemaName,
 		TableName:  tableName,
 	})
@@ -893,8 +929,8 @@ func (m *MetadataManager) loadIndexesForTable(ctx context.Context, schemaName, t
 }
 
 // loadTriggersForTable loads trigger metadata for a specific table
-func (m *MetadataManager) loadTriggersForTable(ctx context.Context, schemaName, tableName string, table *TableMetadata) error {
-	triggerRows, err := m.queries.ListTriggersForTable(ctx, catalogsqlc.ListTriggersForTableParams{
+func (m *MetadataManager) loadTriggersForTable(ctx context.Context, q *catalogsqlc.Queries, schemaName, tableName string, table *TableMetadata) error {
+	triggerRows, err := q.ListTriggersForTable(ctx, catalogsqlc.ListTriggersForTableParams{
 		SchemaName: schemaName,
 		TableName:  tableName,
 	})
@@ -904,15 +940,16 @@ func (m *MetadataManager) loadTriggersForTable(ctx context.Context, schemaName, 
 
 	for _, row := range triggerRows {
 		trg := &TriggerMetadata{
-			Schema:    schemaName,
-			Table:     tableName,
-			Name:      row.TriggerName,
-			Function:  row.FunctionName,
-			Timing:    row.Timing,
-			Level:     row.Level,
-			Events:    append([]string(nil), row.Events...),
-			Condition: row.Condition,
-			IsEnabled: row.IsEnabled,
+			Schema:     schemaName,
+			Table:      tableName,
+			Name:       row.TriggerName,
+			Function:   row.FunctionName,
+			Timing:     row.Timing,
+			Level:      row.Level,
+			Events:     append([]string(nil), row.Events...),
+			Condition:  row.Condition,
+			IsEnabled:  row.IsEnabled,
+			Definition: row.Definition,
 		}
 
 		table.Triggers = append(table.Triggers, trg)
@@ -922,8 +959,8 @@ func (m *MetadataManager) loadTriggersForTable(ctx context.Context, schemaName, 
 }
 
 // loadPoliciesForTable loads RLS policy metadata for a specific table
-func (m *MetadataManager) loadPoliciesForTable(ctx context.Context, schemaName, tableName string, table *TableMetadata) error {
-	policyRows, err := m.queries.ListPoliciesForTable(ctx, catalogsqlc.ListPoliciesForTableParams{
+func (m *MetadataManager) loadPoliciesForTable(ctx context.Context, q *catalogsqlc.Queries, schemaName, tableName string, table *TableMetadata) error {
+	policyRows, err := q.ListPoliciesForTable(ctx, catalogsqlc.ListPoliciesForTableParams{
 		SchemaName: schemaName,
 		TableName:  tableName,
 	})
@@ -947,7 +984,7 @@ func (m *MetadataManager) loadPoliciesForTable(ctx context.Context, schemaName, 
 	}
 
 	// Also check if RLS is enabled on the table
-	table.RowSecurity, err = m.queries.GetTableRowSecurity(ctx, catalogsqlc.GetTableRowSecurityParams{
+	table.RowSecurity, err = q.GetTableRowSecurity(ctx, catalogsqlc.GetTableRowSecurityParams{
 		SchemaName: schemaName,
 		TableName:  tableName,
 	})
@@ -959,10 +996,10 @@ func (m *MetadataManager) loadPoliciesForTable(ctx context.Context, schemaName, 
 }
 
 // loadViewsForSchema loads view metadata for a specific schema
-func (m *MetadataManager) loadViewsForSchema(ctx context.Context, schemaName string) (map[string]*ViewMetadata, error) {
+func (m *MetadataManager) loadViewsForSchema(ctx context.Context, q *catalogsqlc.Queries, schemaName string) (map[string]*ViewMetadata, error) {
 	views := make(map[string]*ViewMetadata)
 
-	viewRows, err := m.queries.ListViewsForSchema(ctx, schemaName)
+	viewRows, err := q.ListViewsForSchema(ctx, schemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -983,10 +1020,10 @@ func (m *MetadataManager) loadViewsForSchema(ctx context.Context, schemaName str
 }
 
 // loadMaterializedViewsForSchema loads materialized view metadata for a specific schema
-func (m *MetadataManager) loadMaterializedViewsForSchema(ctx context.Context, schemaName string) (map[string]*MaterializedViewMetadata, error) {
+func (m *MetadataManager) loadMaterializedViewsForSchema(ctx context.Context, q *catalogsqlc.Queries, schemaName string) (map[string]*MaterializedViewMetadata, error) {
 	matViews := make(map[string]*MaterializedViewMetadata)
 
-	matViewRows, err := m.queries.ListMaterializedViewsForSchema(ctx, schemaName)
+	matViewRows, err := q.ListMaterializedViewsForSchema(ctx, schemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -1012,10 +1049,10 @@ func (m *MetadataManager) loadMaterializedViewsForSchema(ctx context.Context, sc
 }
 
 // loadFunctionsForSchema loads function metadata for a specific schema
-func (m *MetadataManager) loadFunctionsForSchema(ctx context.Context, schemaName string) (map[string][]*FunctionMetadata, error) {
+func (m *MetadataManager) loadFunctionsForSchema(ctx context.Context, q *catalogsqlc.Queries, schemaName string) (map[string][]*FunctionMetadata, error) {
 	functions := make(map[string][]*FunctionMetadata)
 
-	functionRows, err := m.queries.ListFunctionsForSchema(ctx, schemaName)
+	functionRows, err := q.ListFunctionsForSchema(ctx, schemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -1043,10 +1080,10 @@ func (m *MetadataManager) loadFunctionsForSchema(ctx context.Context, schemaName
 }
 
 // loadSequencesForSchema loads sequence metadata for a specific schema
-func (m *MetadataManager) loadSequencesForSchema(ctx context.Context, schemaName string) (map[string]*SequenceMetadata, error) {
+func (m *MetadataManager) loadSequencesForSchema(ctx context.Context, q *catalogsqlc.Queries, schemaName string) (map[string]*SequenceMetadata, error) {
 	sequences := make(map[string]*SequenceMetadata)
 
-	sequenceRows, err := m.queries.ListSequencesForSchema(ctx, schemaName)
+	sequenceRows, err := q.ListSequencesForSchema(ctx, schemaName)
 	if err != nil {
 		return nil, err
 	}
@@ -1072,32 +1109,22 @@ func (m *MetadataManager) loadSequencesForSchema(ctx context.Context, schemaName
 }
 
 // loadTypesForSchema loads custom type metadata for a specific schema
-func (m *MetadataManager) loadTypesForSchema(ctx context.Context, schemaName string) (map[string]*TypeMetadata, error) {
+func (m *MetadataManager) loadTypesForSchema(ctx context.Context, q *catalogsqlc.Queries, schemaName string) (map[string]*TypeMetadata, error) {
 	types := make(map[string]*TypeMetadata)
 
-	typeRows, err := m.queries.ListTypesForSchema(ctx, schemaName)
+	typeRows, err := q.ListTypesForSchema(ctx, schemaName)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, row := range typeRows {
 		typ := &TypeMetadata{
-			Name:     row.TypeName,
-			Schema:   schemaName,
-			Type:     row.TypeKind,
-			Elements: append([]string(nil), row.EnumElements...),
-			Comment:  row.Comment,
-		}
-
-		// For non-enum types, get the full definition
-		if typ.Type != "ENUM" {
-			def, err := m.queries.GetTypeDefinition(ctx, catalogsqlc.GetTypeDefinitionParams{
-				TypeName:   typ.Name,
-				SchemaName: schemaName,
-			})
-			if err == nil && def != "" {
-				typ.Definition = def
-			}
+			Name:       row.TypeName,
+			Schema:     schemaName,
+			Type:       row.TypeKind,
+			Definition: row.Definition,
+			Elements:   append([]string(nil), row.EnumElements...),
+			Comment:    row.Comment,
 		}
 
 		types[typ.Name] = typ
