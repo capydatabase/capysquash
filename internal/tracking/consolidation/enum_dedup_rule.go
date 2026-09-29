@@ -447,11 +447,6 @@ func quoteEnumValues(values []string) []string {
 	return quoted
 }
 
-// contains checks if a string slice contains a specific value
-func contains(slice []string, value string) bool {
-	return slices.Contains(slice, value)
-}
-
 // extractEnumValuesFromLifecycle extracts enum values from a lifecycle's SQL
 func extractEnumValuesFromLifecycle(lifecycle *tracking.ObjectLifecycle) []string {
 	for _, event := range lifecycle.History {
