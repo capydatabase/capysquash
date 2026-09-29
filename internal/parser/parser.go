@@ -361,6 +361,9 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 				}
 			} else if firstObject != nil {
 				stmt.ObjectName = extractObjectNameWithNormalization(firstObject, normalizer)
+				if isRoutineObjectType(node.DropStmt.RemoveType) {
+					stmt.FunctionSignature = FunctionSignatureFromArgs(firstObject.GetObjectWithArgs())
+				}
 			}
 		}
 
@@ -480,6 +483,9 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		stmt.ObjectType = mapGrantObjectType(node.GrantStmt.Objtype)
 		if len(node.GrantStmt.Objects) > 0 {
 			stmt.ObjectName = extractObjectNameWithNormalization(node.GrantStmt.Objects[0], normalizer)
+			if isRoutineObjectType(node.GrantStmt.Objtype) {
+				stmt.FunctionSignature = FunctionSignatureFromArgs(node.GrantStmt.Objects[0].GetObjectWithArgs())
+			}
 		}
 		stmt.Grantees = extractGranteesWithNormalization(node.GrantStmt.Grantees, normalizer)
 		stmt.Privileges = extractPrivileges(node.GrantStmt.Privileges)
@@ -500,6 +506,7 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		stmt.Operation = types.OpCreate
 		if node.CreateFunctionStmt.Funcname != nil {
 			stmt.ObjectName = extractFunctionNameWithNormalization(node.CreateFunctionStmt.Funcname, normalizer)
+			stmt.FunctionSignature = FunctionSignatureFromParameters(node.CreateFunctionStmt.Parameters)
 
 			// Extract schema explicitly for dependency matching
 			// Dependency matching compares Dep.Schema == Lifecycle.Schema
@@ -526,6 +533,9 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 		// Extract object name and type from comment statement
 		if node.CommentStmt.Object != nil {
 			stmt.ObjectName = extractCommentObjectNameWithNormalization(node.CommentStmt, normalizer)
+			if isRoutineObjectType(node.CommentStmt.Objtype) {
+				stmt.FunctionSignature = FunctionSignatureFromArgs(node.CommentStmt.Object.GetObjectWithArgs())
+			}
 			// Extract dependency on the object being commented (with proper type)
 			// This creates a dependency like: "collection_contents::COMMENT depends on collection_contents::VIEW"
 			stmt.Dependencies = extractCommentDependenciesWithNormalization(node.CommentStmt, normalizer)
@@ -990,7 +1000,7 @@ func mapGrantObjectType(objType pg_query.ObjectType) types.ObjectType {
 		return types.TypeSequence
 	case pg_query.ObjectType_OBJECT_SCHEMA:
 		return types.TypeSchema
-	case pg_query.ObjectType_OBJECT_FUNCTION:
+	case pg_query.ObjectType_OBJECT_FUNCTION, pg_query.ObjectType_OBJECT_PROCEDURE, pg_query.ObjectType_OBJECT_ROUTINE:
 		return types.TypeFunction
 	default:
 		return types.TypeUnknown
@@ -1003,7 +1013,7 @@ func mapObjectType(removeType pg_query.ObjectType) types.ObjectType {
 		return types.TypeTable
 	case pg_query.ObjectType_OBJECT_INDEX:
 		return types.TypeIndex
-	case pg_query.ObjectType_OBJECT_FUNCTION:
+	case pg_query.ObjectType_OBJECT_FUNCTION, pg_query.ObjectType_OBJECT_PROCEDURE, pg_query.ObjectType_OBJECT_ROUTINE:
 		return types.TypeFunction
 	case pg_query.ObjectType_OBJECT_TRIGGER:
 		return types.TypeTrigger
@@ -1043,9 +1053,8 @@ func extractObjectNameWithNormalization(obj *pg_query.Node, normalizer *Contextu
 				parts = append(parts, normalizer.NormalizeIdentifier(str.Sval))
 			}
 		}
-		// NOTE: currently we ignore args.Objargs signatures to match extractFunctionNameWithNormalization behavior
-		// This ensures CREATE FUNCTION foo() and DROP FUNCTION foo() generate matching keys.
-		// TODO: Support full function signatures in object keys for strict overloading support.
+		// The argument types are not part of the name; statements naming a
+		// function carry them in Statement.FunctionSignature.
 
 		// Normalize: always add default schema (public) if not present
 		if len(parts) == 1 {
@@ -1165,7 +1174,7 @@ func mapCommentObjectType(objtype pg_query.ObjectType) types.ObjectType {
 		return types.TypeView
 	case pg_query.ObjectType_OBJECT_INDEX:
 		return types.TypeIndex
-	case pg_query.ObjectType_OBJECT_FUNCTION:
+	case pg_query.ObjectType_OBJECT_FUNCTION, pg_query.ObjectType_OBJECT_PROCEDURE, pg_query.ObjectType_OBJECT_ROUTINE:
 		return types.TypeFunction
 	case pg_query.ObjectType_OBJECT_TRIGGER:
 		return types.TypeTrigger

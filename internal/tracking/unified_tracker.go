@@ -47,6 +47,10 @@ type UnifiedTracker struct {
 	// Statement analysis
 	statementAnalyzer *parser.StatementAnalyzer
 
+	// routineOverloads maps a function's lower-cased qualified name to the
+	// name+signature identities of its tracked overloads.
+	routineOverloads map[string][]string
+
 	// Column type tracking for index optimization
 }
 
@@ -645,6 +649,7 @@ func NewUnifiedTracker() *UnifiedTracker {
 		cycleDetector:     NewAdvancedDDLCycleDetector(cycleConfig),
 		detectedCycles:    make([]DDLCycle, 0),
 		statementAnalyzer: parser.NewStatementAnalyzer("17"), // Default to PostgreSQL 17
+		routineOverloads:  make(map[string][]string),
 	}
 }
 
@@ -742,7 +747,7 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 		// Handle statements with ObjectName (schema objects)
 		if stmt.ObjectName != "" {
 			normalizedObjectName := ut.normalizeObjectNameForTracking(stmt)
-			key := makeKey(normalizedObjectName, stmt.ObjectType)
+			key := makeKey(ut.routineIdentity(stmt, normalizedObjectName), stmt.ObjectType)
 			objectID := ObjectID{
 				Type:   stmt.ObjectType,
 				Schema: stmt.Schema,
@@ -751,7 +756,7 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 
 			lifecycle, exists := ut.objects[key]
 			if !exists {
-				lifecycle = ut.createObjectLifecycle(stmt, objectID)
+				lifecycle = ut.createObjectLifecycle(stmt, objectID, key)
 				ut.objects[key] = lifecycle
 			}
 
@@ -772,7 +777,7 @@ func (ut *UnifiedTracker) ProcessMigration(m *types.Migration, sequence int) {
 			}
 
 			// Track dependencies
-			ut.processDependencies(stmt, objectID, lifecycle)
+			ut.processDependencies(stmt, objectID, key)
 
 			// NOTE: We previously created separate CONSTRAINT objects for ALTER TABLE ADD CONSTRAINT,
 			// but this caused duplicate output (constraint in both CREATE TABLE and ALTER TABLE)
@@ -826,9 +831,7 @@ func (ut *UnifiedTracker) createLifecycleEvent(stmt types.Statement, migrationFi
 }
 
 // createObjectLifecycle creates a new object lifecycle
-func (ut *UnifiedTracker) createObjectLifecycle(stmt types.Statement, objectID ObjectID) *ObjectLifecycle {
-	key := makeKey(objectID.Name, stmt.ObjectType)
-
+func (ut *UnifiedTracker) createObjectLifecycle(stmt types.Statement, objectID ObjectID, key string) *ObjectLifecycle {
 	lifecycle := &ObjectLifecycle{
 		Key:       key,
 		Name:      objectID.Name,
@@ -932,7 +935,7 @@ func (ut *UnifiedTracker) processPermissionEvent(stmt types.Statement, lifecycle
 }
 
 // processDependencies processes object dependencies with enhanced tracking
-func (ut *UnifiedTracker) processDependencies(stmt types.Statement, objectID ObjectID, lifecycle *ObjectLifecycle) {
+func (ut *UnifiedTracker) processDependencies(stmt types.Statement, objectID ObjectID, key string) {
 	var dependencies []ObjectDependency
 
 	for _, depName := range stmt.Dependencies {
@@ -950,8 +953,55 @@ func (ut *UnifiedTracker) processDependencies(stmt types.Statement, objectID Obj
 		ut.dependencyGraph.AddEdge(objectID, dep.DependsOn)
 	}
 
-	key := makeKey(objectID.Name, stmt.ObjectType)
 	ut.dependencies[key] = dependencies
+}
+
+// routineIdentity returns the name a statement is tracked under. For a
+// function (and a comment on one) that is the name plus its normalized
+// argument signature, so overloads such as f(integer) and f(text) are
+// separate objects. A statement naming a function without its arguments
+// (DROP FUNCTION f, GRANT ... ON FUNCTION f, COMMENT ON FUNCTION f) refers
+// to the only overload seen so far; with none or several the plain name is
+// kept, which PostgreSQL itself only accepts when the name is unique.
+func (ut *UnifiedTracker) routineIdentity(stmt types.Statement, name string) string {
+	if !targetsRoutine(stmt) {
+		return name
+	}
+	plain := strings.ToLower(name)
+	if stmt.FunctionSignature != "" {
+		identity := name + stmt.FunctionSignature
+		if stmt.ObjectType == types.TypeFunction && !slices.Contains(ut.routineOverloads[plain], identity) {
+			ut.routineOverloads[plain] = append(ut.routineOverloads[plain], identity)
+		}
+		return identity
+	}
+	if overloads := ut.routineOverloads[plain]; len(overloads) == 1 {
+		return overloads[0]
+	}
+	return name
+}
+
+// targetsRoutine reports whether stmt is about a function or procedure:
+// the routine itself, or a comment on one.
+func targetsRoutine(stmt types.Statement) bool {
+	if stmt.ObjectType == types.TypeFunction {
+		return true
+	}
+	if stmt.ObjectType != types.TypeComment {
+		return false
+	}
+	for _, dep := range stmt.Dependencies {
+		if strings.HasPrefix(dep, string(types.TypeFunction)+":") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRoutineNamed reports whether any overload of the named function is
+// tracked; references to a function (a trigger, a call) carry no signature.
+func (ut *UnifiedTracker) hasRoutineNamed(name string) bool {
+	return len(ut.routineOverloads[strings.ToLower(name)]) > 0
 }
 
 func (ut *UnifiedTracker) normalizeObjectNameForTracking(stmt types.Statement) string {

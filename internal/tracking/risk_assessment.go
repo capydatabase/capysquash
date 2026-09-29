@@ -603,6 +603,13 @@ func (ut *UnifiedTracker) ValidateConsistency() []string {
 				}
 			}
 
+			// A reference to a function names no signature (and, from a trigger
+			// or an expression, often no type either); any overload satisfies it.
+			if !depExists {
+				depExists = ut.hasRoutineNamed(depName) ||
+					(dep.DependsOn.Schema == "" && !strings.Contains(depName, ".") && ut.hasRoutineNamed("public."+depName))
+			}
+
 			if !depExists {
 				// Filter out common false positives
 				depName := strings.ToLower(dep.DependsOn.Name)

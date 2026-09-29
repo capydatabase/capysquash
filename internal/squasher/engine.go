@@ -2924,20 +2924,41 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 			continue
 		}
 
-		parts := strings.Split(key, "::")
-		if len(parts) == 0 {
-			continue
-		}
-
-		fullName := normalizeFunctionIdentifier(parts[0])
+		// The key is "<name><signature>::FUNCTION"; the signature is only
+		// missing for a function never created with one.
+		identity, _, _ := strings.Cut(key, "::")
+		name, signature, hasSignature := strings.Cut(identity, "(")
+		fullName := normalizeFunctionIdentifier(name)
 		if fullName == "" {
 			continue
 		}
 
 		aliveFunctions[fullName] = true
+		if hasSignature {
+			aliveFunctions[fullName+"("+signature] = true
+		}
 		if idx := strings.LastIndex(fullName, "."); idx >= 0 && idx+1 < len(fullName) {
 			aliveFunctions[fullName[idx+1:]] = true
 		}
+	}
+
+	// isAlive reports whether a COMMENT/GRANT target still exists: by exact
+	// overload when the statement names argument types, by name otherwise.
+	isAlive := func(obj *pg_query.Node) (string, bool) {
+		fn := normalizeFunctionIdentifier(extractFunctionNameFromObjectNode(obj))
+		if fn == "" {
+			return "", true
+		}
+		if signature := parser.FunctionSignatureFromArgs(obj.GetObjectWithArgs()); signature != "" {
+			return fn + signature, aliveFunctions[fn+signature]
+		}
+		if aliveFunctions[fn] {
+			return fn, true
+		}
+		if idx := strings.LastIndex(fn, "."); idx >= 0 && idx+1 < len(fn) && aliveFunctions[fn[idx+1:]] {
+			return fn, true
+		}
+		return fn, false
 	}
 
 	parseResult, err := pg_query.Parse(rawSQL)
@@ -2958,13 +2979,9 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 			continue
 		}
 
-		start := int(rawStmt.StmtLocation)
-		end := start + int(rawStmt.StmtLen)
-		if start < 0 || start >= len(rawSQL) {
+		start, end, ok := statementSpan(rawSQL, rawStmt)
+		if !ok {
 			continue
-		}
-		if end <= start || end > len(rawSQL) {
-			end = len(rawSQL)
 		}
 
 		node := rawStmt.Stmt.GetNode()
@@ -2975,11 +2992,7 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 		case *pg_query.Node_CommentStmt:
 			commentStmt := typed.CommentStmt
 			if commentStmt != nil && commentStmt.Objtype == pg_query.ObjectType_OBJECT_FUNCTION {
-				fn := normalizeFunctionIdentifier(extractFunctionNameFromObjectNode(commentStmt.Object))
-				if fn != "" && !aliveFunctions[fn] {
-					if idx := strings.LastIndex(fn, "."); idx >= 0 && idx+1 < len(fn) && aliveFunctions[fn[idx+1:]] {
-						break
-					}
+				if fn, alive := isAlive(commentStmt.Object); !alive {
 					shouldRemove = true
 					reason = fmt.Sprintf("orphaned COMMENT ON FUNCTION '%s'", fn)
 				}
@@ -2989,15 +3002,8 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 			grantStmt := typed.GrantStmt
 			if grantStmt != nil && grantStmt.Objtype == pg_query.ObjectType_OBJECT_FUNCTION {
 				for _, obj := range grantStmt.Objects {
-					fn := normalizeFunctionIdentifier(extractFunctionNameFromObjectNode(obj))
-					if fn == "" {
-						continue
-					}
-
-					if aliveFunctions[fn] {
-						continue
-					}
-					if idx := strings.LastIndex(fn, "."); idx >= 0 && idx+1 < len(fn) && aliveFunctions[fn[idx+1:]] {
+					fn, alive := isAlive(obj)
+					if alive {
 						continue
 					}
 
@@ -3055,6 +3061,41 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 	}
 
 	return rebuilt.String()
+}
+
+// statementSpan returns the byte range of rawStmt in sql from its first
+// token through its terminating semicolon. pg_query's statement location
+// starts right after the previous statement, so it would also cover the
+// comments in between (section headers), and its length excludes the ";".
+func statementSpan(sql string, rawStmt *pg_query.RawStmt) (start, end int, ok bool) {
+	start = int(rawStmt.StmtLocation)
+	end = start + int(rawStmt.StmtLen)
+	if start < 0 || start >= len(sql) {
+		return 0, 0, false
+	}
+	if end <= start || end > len(sql) {
+		end = len(sql)
+	}
+
+	scan, err := pg_query.Scan(sql[start:end])
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, tok := range scan.GetTokens() {
+		if tok.GetToken() != pg_query.Token_SQL_COMMENT && tok.GetToken() != pg_query.Token_C_COMMENT {
+			start += int(tok.GetStart())
+			break
+		}
+	}
+
+	rest := end
+	for rest < len(sql) && (sql[rest] == ' ' || sql[rest] == '\t' || sql[rest] == '\n' || sql[rest] == '\r') {
+		rest++
+	}
+	if rest < len(sql) && sql[rest] == ';' {
+		end = rest + 1
+	}
+	return start, end, true
 }
 
 func extractFunctionNameFromObjectNode(node *pg_query.Node) string {
