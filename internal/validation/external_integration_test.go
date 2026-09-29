@@ -35,7 +35,7 @@ func TestExternalCatalogValidationAgainstPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open admin database: %v", err)
 	}
-	defer admin.Close()
+	defer func() { _ = admin.Close() }()
 
 	databaseName := fmt.Sprintf("capysquash_external_%d", time.Now().UnixNano())
 	databaseURL := *parsed
@@ -58,7 +58,7 @@ func TestExternalCatalogValidationAgainstPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open validation database: %v", err)
 		}
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		if _, err := db.ExecContext(ctx, "CREATE EXTENSION IF NOT EXISTS pgcrypto"); err != nil {
 			t.Fatalf("install baseline extension: %v", err)
 		}
@@ -94,7 +94,7 @@ GRANT USAGE ON SEQUENCE public.accounts_id_seq TO PUBLIC;
 	config := DefaultValidationConfig()
 	config.Verbose = false
 	validator := NewSchemaValidator(config, nil, nil)
-	defer validator.Close()
+	defer func() { _ = validator.Close() }()
 
 	createDatabase()
 	original, err := validator.ApplyAndSnapshot(ctx, migrations, dsn)
@@ -152,7 +152,7 @@ func TestClaimedDatabaseResetReturnsDatabaseToEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open admin database: %v", err)
 	}
-	defer admin.Close()
+	defer func() { _ = admin.Close() }()
 
 	databaseName := fmt.Sprintf("capysquash_reset_%d", time.Now().UnixNano())
 	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+pq.QuoteIdentifier(databaseName)); err != nil {
@@ -170,7 +170,7 @@ func TestClaimedDatabaseResetReturnsDatabaseToEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open validation database: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
 
 	if _, err := db.ExecContext(ctx, "CREATE SCHEMA platform; CREATE TABLE platform.settings (id int)"); err != nil {
