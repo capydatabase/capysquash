@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/capydatabase/capysquash/internal/buildinfo"
 )
 
 // setTestVersionInfo stamps a distinctive version through the same seam the
@@ -15,17 +17,15 @@ import (
 // previous values when the test finishes.
 func setTestVersionInfo(t *testing.T, version, buildDate, gitCommit string) {
 	t.Helper()
-	prevVersion := versionInfo.version
-	prevBuildDate := versionInfo.buildDate
-	prevGitCommit := versionInfo.gitCommit
+	prevVersion := buildinfo.Version()
+	prevBuildDate := buildinfo.BuildDate()
+	prevGitCommit := buildinfo.GitCommit()
 	prevRootVersion := rootCmd.Version
 
 	SetVersionInfo(version, buildDate, gitCommit)
 
 	t.Cleanup(func() {
-		versionInfo.version = prevVersion
-		versionInfo.buildDate = prevBuildDate
-		versionInfo.gitCommit = prevGitCommit
+		buildinfo.Set(prevVersion, prevBuildDate, prevGitCommit)
 		rootCmd.Version = prevRootVersion
 	})
 }

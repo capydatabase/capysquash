@@ -17,6 +17,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/capydatabase/capysquash/internal/buildinfo"
 	"github.com/capydatabase/capysquash/internal/config"
 	engineapi "github.com/capydatabase/capysquash/internal/engine"
 	"github.com/capydatabase/capysquash/internal/errors"
@@ -88,7 +89,7 @@ var (
 var rootCmd = &cobra.Command{
 	Use:     "capysquash",
 	Short:   "capysquash - Intelligent PostgreSQL migration consolidation",
-	Version: "1.0.0",
+	Version: buildinfo.Version(),
 	Long: `capysquash consolidates PostgreSQL migration files into clean,
 production-ready SQL while preserving data integrity, respecting dependencies,
 and validating safety at every step.`,

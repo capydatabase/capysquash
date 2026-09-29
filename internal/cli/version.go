@@ -1,30 +1,16 @@
 package cli
 
-import "os"
+import (
+	"os"
 
-// versionInfo is set from build-time ldflags through SetVersionInfo.
-var versionInfo = struct {
-	version   string
-	buildDate string
-	gitCommit string
-}{
-	version:   "1.0.0",
-	buildDate: "unknown",
-	gitCommit: "unknown",
-}
+	"github.com/capydatabase/capysquash/internal/buildinfo"
+)
 
-// SetVersionInfo updates version information (called from main package)
+// SetVersionInfo records the build stamp from main's ldflags. Empty values
+// keep the buildinfo fallback.
 func SetVersionInfo(version, buildDate, gitCommit string) {
-	if version != "" {
-		versionInfo.version = version
-		rootCmd.Version = version
-	}
-	if buildDate != "" {
-		versionInfo.buildDate = buildDate
-	}
-	if gitCommit != "" {
-		versionInfo.gitCommit = gitCommit
-	}
+	buildinfo.Set(version, buildDate, gitCommit)
+	rootCmd.Version = buildinfo.Version()
 }
 
 // defaultConfigFileName is the config file init-config writes and every

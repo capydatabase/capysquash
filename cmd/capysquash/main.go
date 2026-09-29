@@ -12,10 +12,12 @@ import (
 // Version information, set via ldflags at build time:
 //
 //	-ldflags "-X main.version=x.y.z -X main.buildDate=... -X main.gitCommit=..."
+//
+// Unstamped builds report the module version Go records (see buildinfo).
 var (
-	version   = "1.0.0"
-	buildDate = "unknown"
-	gitCommit = "unknown"
+	version   string
+	buildDate string
+	gitCommit string
 )
 
 func init() {
