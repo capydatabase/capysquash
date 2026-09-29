@@ -3003,7 +3003,9 @@ func (e *Engine) removeOrphanedFunctionStatements(rawSQL string) string {
 			return "", true
 		}
 		if signature := parser.FunctionSignatureFromArgs(obj.GetObjectWithArgs()); signature != "" {
-			return fn + signature, aliveFunctions[fn+signature]
+			// An unqualified name resolves to public, as the keys record it.
+			alive := aliveFunctions[fn+signature] || !strings.Contains(fn, ".") && aliveFunctions["public."+fn+signature]
+			return fn + signature, alive
 		}
 		if aliveFunctions[fn] {
 			return fn, true
