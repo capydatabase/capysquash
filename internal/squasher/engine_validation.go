@@ -28,10 +28,10 @@ func (e *Engine) runPreFlightValidation(ctx context.Context, migrations map[int]
 
 		violations, err := e.preFlightValidator.Check(sqlContent)
 		if err != nil {
+			// A rule that failed still leaves the other rules' findings below.
 			msg := fmt.Sprintf("Migration %d could not be validated: %v", id, err)
 			validationErrors = append(validationErrors, msg)
 			e.logger.Warn("%s", msg)
-			continue
 		}
 
 		for _, v := range violations {

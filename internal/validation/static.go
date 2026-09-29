@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -181,13 +182,15 @@ func (v *StaticValidator) Check(sql string) ([]Violation, error) {
 		return nil, fmt.Errorf("failed to parse SQL: %w", err)
 	}
 
+	// A failing rule does not stop the others: every rule's findings are
+	// returned, together with the joined errors of the rules that failed.
 	var violations []Violation
+	var ruleErrs []error
 	for _, rule := range v.rules {
 		ruleViolations, err := rule.Check(sql, tree)
 		if err != nil {
-			// Log error but continue validation? Or return?
-			// For now, let's treat rule failure as non-fatal to other rules but return error
-			return violations, fmt.Errorf("rule %s failed: %w", rule.Code(), err)
+			ruleErrs = append(ruleErrs, fmt.Errorf("rule %s failed: %w", rule.Code(), err))
+			continue
 		}
 		violations = append(violations, ruleViolations...)
 	}
@@ -195,7 +198,7 @@ func (v *StaticValidator) Check(sql string) ([]Violation, error) {
 	violations = filterIgnoredViolations(sql, violations)
 	annotateViolationLineNumbers(sql, violations)
 
-	return violations, nil
+	return violations, errors.Join(ruleErrs...)
 }
 
 func annotateViolationLineNumbers(rawSQL string, violations []Violation) {
