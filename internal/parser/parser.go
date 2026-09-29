@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/capydatabase/capysquash/internal/errors"
@@ -28,14 +29,10 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 	// Initialize normalizer with PostgreSQL defaults
 	normalizer := NewContextualNormalizer(DefaultNormalizationContext())
 
-	// Clean and normalize SQL content
-	cleanContent := cleanSQL(content)
-
-	// Extract comments separately
-	cleanContent, comments := extractComments(cleanContent)
-
-	// Split into individual statements
-	stmts, err := pg_query.SplitWithScanner(cleanContent, true)
+	// Split the original file, so each statement keeps its real position
+	// and the comments that belong to it (the capysquash:ignore/no-merge
+	// pragmas live in comments).
+	sourceStmts, err := splitSourceStatements(content)
 	if err != nil {
 		parseCtx := errorHandler.CreateContext(filename, 0, nil)
 		if handleErr := errorHandler.HandleParseError(err, parseCtx); handleErr != nil {
@@ -44,12 +41,11 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 		if !errorHandler.ShouldContinue() {
 			return nil, errors.Wrap(err, errors.ErrorCodeSyntaxError, errors.CategoryParsing, "failed to split statements", nil)
 		}
-		// If we should continue, create empty stmts slice
-		stmts = []string{}
+		sourceStmts = nil
 	}
 
 	// If splitting returned no statements but we have content, try parsing to detect syntax errors
-	if len(stmts) == 0 && strings.TrimSpace(cleanContent) != "" {
+	if cleanContent := cleanSQL(content); len(sourceStmts) == 0 && cleanContent != "" {
 		_, parseErr := pg_query.Parse(cleanContent)
 		if parseErr != nil {
 			parseCtx := errorHandler.CreateContext(filename, 0, nil)
@@ -67,17 +63,16 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 		ParseErrors: make([]string, 0),
 	}
 
-	searchCursor := 0
-	for i, stmtStr := range stmts {
-		if strings.TrimSpace(stmtStr) == "" {
+	for _, src := range sourceStmts {
+		stmtSQL := cleanSQL(src.text)
+		if stmtSQL == "" {
 			continue
 		}
 
-		stmtLine, stmtColumn, nextCursor := locateStatementPosition(cleanContent, stmtStr, searchCursor)
-		searchCursor = nextCursor
+		stmtLine, stmtColumn := offsetToLineColumn(content, src.offset)
 
 		// Parse the statement normally
-		stmt, err := parseStatementWithNormalizationAndContext(stmtStr, stmtLine, stmtColumn, normalizer, errorHandler, filename)
+		stmt, err := parseStatementWithNormalizationAndContext(stmtSQL, src.comments, stmtLine, stmtColumn, normalizer, errorHandler, filename)
 		if err != nil {
 			// Error was already handled by parseStatementWithNormalizationAndContext
 			if !errorHandler.ShouldContinue() {
@@ -86,8 +81,6 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 			continue
 		}
 
-		// Assign relevant comments to statement
-		stmt.Comments = getRelevantComments(comments, i)
 		stmt.Category = categorizeStatement(*stmt)
 
 		migration.Statements = append(migration.Statements, *stmt)
@@ -121,8 +114,10 @@ func ParseMigrationWithContext(ctx context.Context, content string, filename str
 	return migration, nil
 }
 
-// parseStatementWithNormalizationAndContext parses a statement with context and error handling
-func parseStatementWithNormalizationAndContext(sql string, line int, column int, normalizer *ContextualNormalizer, errorHandler *ErrorHandler, filename string) (*types.Statement, error) {
+// parseStatementWithNormalizationAndContext parses a statement with context and error handling.
+// comments are the source comments attached to the statement; pragmas in them
+// are analyzed here.
+func parseStatementWithNormalizationAndContext(sql string, comments []string, line int, column int, normalizer *ContextualNormalizer, errorHandler *ErrorHandler, filename string) (*types.Statement, error) {
 	defer errorHandler.Recovery(filename, line)
 
 	parsed, err := pg_query.Parse(sql)
@@ -151,6 +146,7 @@ func parseStatementWithNormalizationAndContext(sql string, line int, column int,
 		Filename:  filename,
 		Line:      line,
 		Column:    column,
+		Comments:  slices.Clone(comments),
 	}
 
 	// Analyze first statement with normalization
@@ -193,33 +189,94 @@ func parseStatementWithNormalizationAndContext(sql string, line int, column int,
 	return stmt, nil
 }
 
-func locateStatementPosition(content string, statement string, searchFrom int) (line int, column int, nextSearchFrom int) {
-	if searchFrom < 0 {
-		searchFrom = 0
+// sourceStatement is one statement of a migration file, located in the
+// original text together with the comments that belong to it.
+type sourceStatement struct {
+	text     string   // from the statement's first token to its end; leading comments excluded
+	offset   int      // byte offset of text in the file
+	comments []string // attached comments, in file order
+}
+
+// splitSourceStatements splits a migration file into statements and attaches
+// every comment to exactly one statement, by position from the pg_query
+// scanner rather than by counting:
+//
+//   - a comment inside a statement (after its first token) belongs to it;
+//   - a comment that starts on the line where the previous statement ended
+//     (`CREATE ...; -- note`) belongs to that previous statement;
+//   - any other comment belongs to the statement that follows it;
+//   - comments after the last statement belong to none.
+//
+// Comments inside string or dollar-quoted literals are part of the literal
+// token and never attach.
+func splitSourceStatements(content string) ([]sourceStatement, error) {
+	parts, err := pg_query.SplitWithScanner(content, true)
+	if err != nil {
+		return nil, err
 	}
-	if searchFrom > len(content) {
-		searchFrom = len(content)
+	scan, err := pg_query.Scan(content)
+	if err != nil {
+		return nil, err
 	}
 
-	absoluteOffset := searchFrom
-	searchTarget := statement
+	type span struct {
+		start, codeStart, end int
+		comments              []string
+	}
+	spans := make([]*span, 0, len(parts))
+	cursor := 0
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		// The scanner returns exact (trimmed) slices of content in order, so
+		// the next occurrence after the cursor is the statement itself.
+		idx := strings.Index(content[cursor:], part)
+		if idx < 0 {
+			return nil, fmt.Errorf("statement %d could not be located in the source", len(spans)+1)
+		}
+		start := cursor + idx
+		spans = append(spans, &span{start: start, codeStart: -1, end: start + len(part)})
+		cursor = start + len(part)
+	}
 
-	if idx := strings.Index(content[searchFrom:], statement); idx >= 0 {
-		absoluteOffset = searchFrom + idx
-	} else {
-		trimmed := strings.TrimSpace(statement)
-		if trimmed != "" {
-			if idx := strings.Index(content[searchFrom:], trimmed); idx >= 0 {
-				absoluteOffset = searchFrom + idx
-				searchTarget = trimmed
+	next := 0 // first span that ends after the current token
+	for _, tok := range scan.GetTokens() {
+		start, end := int(tok.GetStart()), int(tok.GetEnd())
+		for next < len(spans) && start >= spans[next].end {
+			next++
+		}
+
+		if tok.GetToken() != pg_query.Token_SQL_COMMENT && tok.GetToken() != pg_query.Token_C_COMMENT {
+			if next < len(spans) && start >= spans[next].start && spans[next].codeStart < 0 {
+				spans[next].codeStart = start
 			}
+			continue
+		}
+
+		comment := content[start:end]
+		switch {
+		case next < len(spans) && spans[next].codeStart >= 0 && start >= spans[next].codeStart:
+			spans[next].comments = append(spans[next].comments, comment)
+		case next > 0 && !strings.Contains(content[spans[next-1].end:start], "\n"):
+			spans[next-1].comments = append(spans[next-1].comments, comment)
+		case next < len(spans):
+			spans[next].comments = append(spans[next].comments, comment)
 		}
 	}
 
-	line, column = offsetToLineColumn(content, absoluteOffset)
-	nextSearchFrom = max(absoluteOffset+len(searchTarget), searchFrom)
-
-	return line, column, nextSearchFrom
+	statements := make([]sourceStatement, 0, len(spans))
+	for _, sp := range spans {
+		if sp.codeStart < 0 {
+			continue
+		}
+		statements = append(statements, sourceStatement{
+			text:     content[sp.codeStart:sp.end],
+			offset:   sp.codeStart,
+			comments: sp.comments,
+		})
+	}
+	return statements, nil
 }
 
 func offsetToLineColumn(content string, offset int) (line int, column int) {
@@ -1085,35 +1142,6 @@ func extractDropTriggerDetails(obj *pg_query.Node, normalizer *ContextualNormali
 	}
 
 	return tableName, triggerName
-}
-
-func extractComments(content string) (string, []string) {
-	lines := strings.Split(content, "\n")
-	var cleanLines []string
-	var comments []string
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "--") {
-			comments = append(comments, trimmed)
-		} else {
-			cleanLines = append(cleanLines, line)
-		}
-	}
-
-	return strings.Join(cleanLines, "\n"), comments
-}
-
-func getRelevantComments(comments []string, stmtIndex int) []string {
-	// Simple heuristic: assign comments to nearby statements
-	// This could be enhanced with more sophisticated logic
-	var relevant []string
-
-	if stmtIndex < len(comments) {
-		relevant = append(relevant, comments[stmtIndex])
-	}
-
-	return relevant
 }
 
 // Helper functions for enhanced PostgreSQL parsing
