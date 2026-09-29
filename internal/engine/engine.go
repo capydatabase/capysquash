@@ -281,6 +281,7 @@ func (e *Engine) GetMemoryStats() MemoryStats {
 	internal := e.internal.GetMemoryStats()
 
 	currentMB := internal.CurrentMemoryBytes / (1024 * 1024)
+	peakMB := internal.PeakMemoryBytes / (1024 * 1024)
 	maxMB := internal.MaxMemoryBytes / (1024 * 1024)
 	usagePercent := 0.0
 	if maxMB > 0 {
@@ -289,7 +290,7 @@ func (e *Engine) GetMemoryStats() MemoryStats {
 
 	return MemoryStats{
 		CurrentUsageMB: currentMB,
-		PeakUsageMB:    currentMB, // Use current as peak for now
+		PeakUsageMB:    peakMB,
 		LimitMB:        maxMB,
 		UsagePercent:   usagePercent,
 	}

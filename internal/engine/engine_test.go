@@ -255,6 +255,10 @@ func TestEngine_GetMemoryStats(t *testing.T) {
 		t.Error("GetMemoryStats() returned negative CurrentUsageMB")
 	}
 
+	if stats.PeakUsageMB < stats.CurrentUsageMB {
+		t.Errorf("GetMemoryStats() PeakUsageMB = %d below CurrentUsageMB = %d", stats.PeakUsageMB, stats.CurrentUsageMB)
+	}
+
 	if stats.LimitMB != 512 {
 		t.Errorf("GetMemoryStats() LimitMB = %d, want 512", stats.LimitMB)
 	}

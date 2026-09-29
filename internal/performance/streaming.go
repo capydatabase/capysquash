@@ -218,10 +218,10 @@ func (sp *StreamingProcessor) processFile(migrationFile *MigrationFile) {
 	memStats := sp.memManager.GetMemoryStats()
 	for {
 		currentPeak := atomic.LoadInt64(&sp.stats.PeakMemoryUsage)
-		if memStats.CurrentMemoryBytes <= currentPeak {
+		if memStats.PeakMemoryBytes <= currentPeak {
 			break
 		}
-		if atomic.CompareAndSwapInt64(&sp.stats.PeakMemoryUsage, currentPeak, memStats.CurrentMemoryBytes) {
+		if atomic.CompareAndSwapInt64(&sp.stats.PeakMemoryUsage, currentPeak, memStats.PeakMemoryBytes) {
 			break
 		}
 	}

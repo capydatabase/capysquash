@@ -3243,7 +3243,7 @@ func (e *Engine) streamParseAndTrack(ctx context.Context, dir string) error {
 	e.mu.Lock()
 	e.stats.MigrationsProcessed = streamStats.MigrationsProcessed
 	e.stats.ObjectsTracked = streamStats.ObjectsTracked
-	e.stats.PeakMemoryUsage = e.memManager.GetMemoryStats().CurrentMemoryBytes
+	e.stats.PeakMemoryUsage = e.memManager.GetMemoryStats().PeakMemoryBytes
 	e.mu.Unlock()
 
 	return nil
@@ -3354,8 +3354,8 @@ func (e *Engine) GetStats() SquashStats {
 	// Update peak memory from memory manager if streaming is enabled
 	if e.enableStreaming && e.memManager != nil {
 		memStats := e.memManager.GetMemoryStats()
-		if memStats.CurrentMemoryBytes > stats.PeakMemoryUsage {
-			stats.PeakMemoryUsage = memStats.CurrentMemoryBytes
+		if memStats.PeakMemoryBytes > stats.PeakMemoryUsage {
+			stats.PeakMemoryUsage = memStats.PeakMemoryBytes
 		}
 	}
 
