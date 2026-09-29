@@ -3,10 +3,11 @@
 #
 #   1. starts a throwaway PostgreSQL container (Docker required);
 #   2. runs every test, including the integration-tagged ones, against it;
-#   3. squashes each fixture at every safety level that needs no production
-#      database and proves, with `validate-external` (the contract the CapyDB
-#      CLI uses), that the squashed baseline builds the same catalog as the
-#      original history.
+#   3. squashes each fixture at the paranoid level against the database the
+#      original history was applied to (its own catalog comparison), and at
+#      the conservative, standard and aggressive levels, proving with
+#      `validate-external` (the contract the CapyDB CLI uses) that the
+#      squashed baseline builds the same catalog as the original history.
 #
 # CAPYSQUASH_E2E_POSTGRES_IMAGE picks the server (default postgres:18).
 set -euo pipefail
@@ -88,6 +89,21 @@ for dir in test-fixtures/*/original; do
     echo "FAIL $fixture: the original history does not apply (see validate-external output)"
     failures=$((failures + 1))
     continue
+  fi
+
+  # Paranoid compares against a production database: the one the original
+  # history was just applied to. The baseline goes to a second, empty one.
+  docker exec "$container" dropdb -U postgres --if-exists capysquash_e2e_validation
+  docker exec "$container" createdb -U postgres capysquash_e2e_validation
+  if PROD_DB_DSN="$CAPYSQUASH_E2E_DSN" \
+    CAPYSQUASH_VALIDATION_DSN="${CAPYSQUASH_E2E_DSN/capysquash_e2e/capysquash_e2e_validation}" \
+    "$work/capysquash" squash "$dir"/*.sql --output "$work/$fixture-paranoid" --safety paranoid \
+    --no-validate --i-know-what-im-doing --quiet --no-emoji >/dev/null 2>"$work/squash.log"; then
+    echo "PASS $fixture (paranoid)"
+  else
+    echo "FAIL $fixture (paranoid): the baseline does not reproduce the original catalog"
+    grep -E "ERROR|differences" "$work/squash.log" | tail -n 20
+    failures=$((failures + 1))
   fi
 
   for level in conservative standard aggressive; do
