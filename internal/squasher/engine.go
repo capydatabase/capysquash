@@ -487,19 +487,21 @@ func NewSquasherRuleEngine(safetyLevel SafetyLevel, ruleOverrides map[string]boo
 	}
 
 	engine := consolidation.NewConsolidationRuleEngine()
-	for _, rule := range ladder {
-		engine.AddRule(rule)
-	}
 
-	// Add error recovery as the last rule to catch any failures from primary
-	// consolidation rules. Only Aggressive uses aggressive recovery; stricter
-	// levels (including Paranoid) always recover conservatively.
+	// Error recovery wraps the ladder: it runs the rules in order and recovers
+	// when one of them fails, instead of the failure aborting the object. Only
+	// Aggressive uses aggressive recovery; stricter levels (including
+	// Paranoid) always recover conservatively.
 	if includeErrorRecovery {
 		recoveryMode := "conservative"
 		if safetyLevel == Aggressive {
 			recoveryMode = "aggressive"
 		}
-		engine.AddRule(consolidation.NewErrorRecoveryRule(3, recoveryMode, true))
+		engine.AddRule(consolidation.NewErrorRecoveryRule(3, recoveryMode, true, ladder...))
+	} else {
+		for _, rule := range ladder {
+			engine.AddRule(rule)
+		}
 	}
 
 	return engine, nil

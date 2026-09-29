@@ -49,11 +49,22 @@ func (cre *ConsolidationRuleEngine) AddRule(rule ConsolidationRule) {
 	cre.rules = append(cre.rules, rule)
 }
 
-// Rules returns the explicitly ordered rules registered on this engine.
-// The returned slice is a copy; mutating it does not affect the engine.
+// ruleWrapper is a rule that runs other rules itself (ErrorRecoveryRule).
+type ruleWrapper interface {
+	Delegates() []ConsolidationRule
+}
+
+// Rules returns the effective, ordered rules of this engine: a wrapping rule
+// is listed right after the rules it runs. The returned slice is a copy;
+// mutating it does not affect the engine.
 func (cre *ConsolidationRuleEngine) Rules() []ConsolidationRule {
-	rules := make([]ConsolidationRule, len(cre.rules))
-	copy(rules, cre.rules)
+	var rules []ConsolidationRule
+	for _, rule := range cre.rules {
+		if wrapper, ok := rule.(ruleWrapper); ok {
+			rules = append(rules, wrapper.Delegates()...)
+		}
+		rules = append(rules, rule)
+	}
 	return rules
 }
 
@@ -134,7 +145,7 @@ func createDefaultConsolidation(lifecycle *tracking.ObjectLifecycle) *tracking.C
 func (cre *ConsolidationRuleEngine) GetApplicableRules(lifecycle *tracking.ObjectLifecycle) []ConsolidationRule {
 	if len(cre.rules) > 0 {
 		var applicable []ConsolidationRule
-		for _, rule := range cre.rules {
+		for _, rule := range cre.Rules() {
 			if rule.CanApply(lifecycle) {
 				applicable = append(applicable, rule)
 			}
