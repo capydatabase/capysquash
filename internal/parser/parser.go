@@ -329,6 +329,14 @@ func analyzeStatementWithNormalization(raw *pg_query.RawStmt, stmt *types.Statem
 			stmt.ObjectType = types.TypeTable
 		}
 
+		// ALTER FUNCTION/PROCEDURE/ROUTINE ... RENAME TO belongs to the renamed
+		// overload's lifecycle; without a name the tracker dropped it.
+		if isRoutineObjectType(renameStmt.RenameType) && renameStmt.Object.GetObjectWithArgs() != nil {
+			stmt.ObjectType = types.TypeFunction
+			stmt.ObjectName = extractObjectNameWithNormalization(renameStmt.Object, normalizer)
+			stmt.FunctionSignature = FunctionSignatureFromArgs(renameStmt.Object.GetObjectWithArgs())
+		}
+
 		// No dependencies for RENAME operations
 		stmt.Dependencies = []string{}
 
