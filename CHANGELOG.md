@@ -15,6 +15,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Fixtures `sequence_lifecycle`, `fk_unique_index_targets` and `auto_constraint_names` in the e2e
+  suite.
+
+### Fixed
+
+- A sequence the history creates and drops again is left out of the baseline, with everything
+  done to it (`ALTER SEQUENCE`, `COMMENT ON SEQUENCE`). Its `CREATE SEQUENCE` used to stay while
+  the `DROP SEQUENCE` was dropped with it, so the baseline created a sequence the original
+  history did not end with. The same holds for a sequence dropped along with the column or table
+  it belongs to (a `serial` or identity column, `OWNED BY`, `DROP IDENTITY`), and a sequence the
+  history detaches (`OWNED BY NONE`) before dropping its table keeps no `OWNED BY` naming that
+  table, which made the baseline fail.
+- A foreign key whose referenced columns are unique only through `CREATE UNIQUE INDEX` (not a
+  `UNIQUE` or `PRIMARY KEY` constraint) no longer fails with "there is no unique constraint
+  matching given keys". Foreign keys run with their tables or in the constraints section, both
+  before the indexes section; such an index is now created with its table's statements, where
+  the history created it, and a foreign key of a table on itself that consolidation had merged
+  into its `CREATE TABLE` is added after the index.
+- Constraints and indexes created without a name get the name PostgreSQL gave them in the
+  history. PostgreSQL appends a number when the plain name is taken (`_fkey1`, `_key1`,
+  `_check1`, `_idx1`), and which names are taken depends on everything that ran before, so the
+  baseline, which groups and orders statements differently and leaves dropped objects out, could
+  end up with other names. The history's names are now worked out as PostgreSQL chooses them
+  (checks, then index constraints, then foreign keys; constraint names are unique per schema)
+  and written out wherever the baseline could get another one: numbered names, and names
+  another object of the schema also takes somewhere in the history.
+- An index created without a name always gets its name written out. Two unnamed indexes, even
+  on different tables, were taken for the same object and all but one were lost.
+
+### Removed
+
+- The engine's unused batch processor (`BatchProcessor`, and the `Deduplicator` only it used).
+  `--batch-size` and `EngineConfig.BatchSize` are still accepted but, as before, change nothing.
+
 ## [1.5.0] - 2026-09-30
 
 ### Added

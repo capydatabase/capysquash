@@ -107,7 +107,6 @@ type Engine struct {
 	// Streaming components (optional)
 	streamingTracker *tracking.StreamingTracker
 	memManager       *performance.MemoryManager
-	batchProcessor   *performance.BatchProcessor
 
 	// Streaming configuration
 	batchSize           int
@@ -368,12 +367,10 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 	// Initialize streaming components if enabled
 	var memManager *performance.MemoryManager
 	var streamingTracker *tracking.StreamingTracker
-	var batchProcessor *performance.BatchProcessor
 
 	if enableStreaming {
 		memManager = performance.NewMemoryManager(memoryLimitMB)
 		streamingTracker = tracking.NewStreamingTracker()
-		batchProcessor = performance.NewBatchProcessor(batchSize, memoryLimitMB/4, memManager)
 	}
 
 	// Initialize transformation components if enabled
@@ -457,7 +454,6 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 		// Streaming components
 		streamingTracker:    streamingTracker,
 		memManager:          memManager,
-		batchProcessor:      batchProcessor,
 		batchSize:           batchSize,
 		workerCount:         workerCount,
 		memoryLimitMB:       memoryLimitMB,
@@ -2255,6 +2251,29 @@ $$`)
 			deferredTableAlters[key] = &deferredResult
 		}
 	}
+	// A unique index a foreign key references goes with its table's
+	// statements, ahead of the foreign keys.
+	var foreignKeySQL []string
+	for _, result := range foundationObjects {
+		foreignKeySQL = append(foreignKeySQL, result.ConsolidatedSQL)
+	}
+	for _, result := range e.getObjectsByCategoryAsMap(consolidatedObjects, types.CategoryConstraints) {
+		foreignKeySQL = append(foreignKeySQL, result.ConsolidatedSQL)
+	}
+	for _, result := range deferredTableAlters {
+		foreignKeySQL = append(foreignKeySQL, result.ConsolidatedSQL)
+	}
+	for _, alterations := range pendingTableAlters {
+		for _, alteration := range alterations {
+			foreignKeySQL = append(foreignKeySQL, alteration.sql)
+		}
+	}
+	foreignKeySQL = append(foreignKeySQL, circularFKAlterStatements...)
+	movedIndexes, err := moveUniqueIndexesBackingForeignKeys(consolidatedObjects, foundationObjects, e.lifecycles, foreignKeySQL, pendingTableAlters)
+	if err != nil {
+		return "", err
+	}
+
 	for tableResult, alterations := range pendingTableAlters {
 		tableResult.ConsolidatedSQL = insertSQLAtHistoryPositions(tableResult, alterations)
 	}
@@ -2279,6 +2298,11 @@ $$`)
 		}
 		if category == types.CategoryConstraints && len(deferredTableAlters) > 0 {
 			maps.Copy(categoryObjectsMap, deferredTableAlters)
+		}
+		if category == types.CategoryIndexes {
+			for key := range movedIndexes {
+				delete(categoryObjectsMap, key)
+			}
 		}
 
 		// Sort objects by dependencies within category

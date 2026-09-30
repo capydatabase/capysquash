@@ -296,3 +296,53 @@ CREATE INDEX ON public.t ((coalesce(a, b)));
 ALTER TABLE public.t RENAME TO u;`)
 	assertContains(t, n.sql(), "CREATE INDEX t_case_idx ON public.u", "CREATE INDEX t_coalesce_idx ON public.u")
 }
+
+func TestDroppedSequencesLeaveTheHistory(t *testing.T) {
+	out := run(t,
+		`CREATE SEQUENCE temp_seq;
+COMMENT ON SEQUENCE temp_seq IS 'x';
+CREATE TABLE widgets (id serial PRIMARY KEY, label text);
+CREATE SEQUENCE widget_labels OWNED BY widgets.label;
+ALTER SEQUENCE widgets_id_seq RESTART WITH 100;
+CREATE TABLE gadgets (id bigint, legacy bigint, kept bigint);
+CREATE SEQUENCE gadget_batches OWNED BY gadgets.legacy;
+CREATE SEQUENCE survivor OWNED BY gadgets.legacy;
+CREATE SEQUENCE recycled;`,
+		`DROP SEQUENCE temp_seq;
+DROP TABLE widgets;
+ALTER SEQUENCE survivor OWNED BY NONE;
+ALTER SEQUENCE survivor OWNED BY gadgets.legacy;
+ALTER SEQUENCE survivor OWNED BY gadgets.kept;
+ALTER TABLE gadgets DROP COLUMN legacy;
+DROP SEQUENCE recycled;
+CREATE SEQUENCE recycled START 5;`)
+	sql := out.sql()
+	assertNotContains(t, sql, "temp_seq", "widget_labels", "widgets_id_seq", "gadget_batches",
+		"OWNED BY gadgets.legacy", "CREATE SEQUENCE recycled;", "DROP SEQUENCE recycled")
+	assertContains(t, sql, "CREATE SEQUENCE survivor;", "ALTER SEQUENCE survivor OWNED BY NONE",
+		"ALTER SEQUENCE survivor OWNED BY gadgets.kept", "CREATE SEQUENCE recycled START 5")
+}
+
+func TestNamesPostgreSQLNumbersAreSpelledOut(t *testing.T) {
+	out := run(t, `CREATE TABLE a (id int PRIMARY KEY, x int);
+CREATE TABLE b (id int, a_id int REFERENCES a (id));
+CREATE INDEX ON b (a_id);
+CREATE INDEX ON b (a_id);
+ALTER TABLE b ADD FOREIGN KEY (a_id) REFERENCES a (id);
+ALTER TABLE a ADD UNIQUE (x), ADD CHECK (x > 0), ADD CHECK (x < 9);
+ALTER TABLE a ADD UNIQUE (x);
+ALTER TABLE a DROP CONSTRAINT a_x_check;
+ALTER TABLE a ADD CHECK (x > 1);`)
+	sql := out.sql()
+	assertContains(t, sql,
+		"CREATE INDEX b_a_id_idx ON b",
+		"CREATE INDEX b_a_id_idx1 ON b",
+		"ADD CONSTRAINT b_a_id_fkey1 FOREIGN KEY",
+		// The first a_x_check shares its name with the last one.
+		"ADD UNIQUE (x), ADD CONSTRAINT a_x_check CHECK (x > 0), ADD CONSTRAINT a_x_check1 CHECK (x < 9)",
+		"ADD CONSTRAINT a_x_key1 UNIQUE (x)",
+		// a_x_check is free again, but another constraint of the history
+		// takes that name too, so it is spelled out.
+		"ADD CONSTRAINT a_x_check CHECK (x > 1)")
+	assertNotContains(t, sql, "CONSTRAINT a_pkey", "CONSTRAINT b_a_id_fkey FOREIGN")
+}

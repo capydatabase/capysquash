@@ -1,12 +1,9 @@
 package performance
 
 import (
-	"fmt"
 	"io"
-	"path/filepath"
 	"sync"
 	"time"
-
 )
 
 // MigrationFile represents a migration file to be processed
@@ -15,61 +12,6 @@ type MigrationFile struct {
 	Content  []byte
 	Sequence int
 	Size     int64
-}
-
-// BatchProcessor handles batch processing with configurable batch sizes
-type BatchProcessor struct {
-	batchSize        int
-	memManager       *MemoryManager
-	deduplicator     *Deduplicator[*MigrationFile]
-	currentBatch     []*MigrationFile
-	currentBatchSize int64
-	maxBatchSize     int64
-}
-
-// NewBatchProcessor creates a new batch processor
-func NewBatchProcessor(batchSize int, maxBatchSizeMB int, memManager *MemoryManager) *BatchProcessor {
-	dedup := NewDeduplicator[*MigrationFile](func(file *MigrationFile) string {
-		return fmt.Sprintf("%s_%d", filepath.Base(file.Path), file.Size)
-	})
-
-	return &BatchProcessor{
-		batchSize:    batchSize,
-		memManager:   memManager,
-		deduplicator: dedup,
-		maxBatchSize: int64(maxBatchSizeMB) * 1024 * 1024,
-	}
-}
-
-// AddFile adds a file to the current batch
-func (bp *BatchProcessor) AddFile(file *MigrationFile) (bool, error) {
-	// Check for duplicates
-	if bp.deduplicator.IsDuplicate(file) {
-		return false, nil // Skip duplicate
-	}
-
-	// Check if adding this file would exceed batch limits
-	if len(bp.currentBatch) >= bp.batchSize || bp.currentBatchSize+file.Size > bp.maxBatchSize {
-		return true, nil // Batch is full, needs processing
-	}
-
-	bp.currentBatch = append(bp.currentBatch, file)
-	bp.currentBatchSize += file.Size
-
-	return false, nil
-}
-
-// GetCurrentBatch returns the current batch and resets it
-func (bp *BatchProcessor) GetCurrentBatch() []*MigrationFile {
-	batch := bp.currentBatch
-	bp.currentBatch = make([]*MigrationFile, 0, bp.batchSize)
-	bp.currentBatchSize = 0
-	return batch
-}
-
-// HasPendingBatch returns true if there are files in the current batch
-func (bp *BatchProcessor) HasPendingBatch() bool {
-	return len(bp.currentBatch) > 0
 }
 
 // FileStreamReader provides streaming file reading capabilities
