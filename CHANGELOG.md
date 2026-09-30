@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Indirect dependency `github.com/charmbracelet/ultraviolet` v0.0.0-20260929091141-666ce5eec9fc
+  (was v0.0.0-20260922123528-4e49372c11f9). No behavior change.
+
 ## [1.6.0] - 2026-09-30
 
 ### Added
