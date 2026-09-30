@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Fixture `sequence_lifecycle` in the e2e suite.
+- Fixtures `sequence_lifecycle` and `fk_unique_index_targets` in the e2e suite.
 
 ### Fixed
 
@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it belongs to (a `serial` or identity column, `OWNED BY`, `DROP IDENTITY`), and a sequence the
   history detaches (`OWNED BY NONE`) before dropping its table keeps no `OWNED BY` naming that
   table, which made the baseline fail.
+- A foreign key whose referenced columns are unique only through `CREATE UNIQUE INDEX` (not a
+  `UNIQUE` or `PRIMARY KEY` constraint) no longer fails with "there is no unique constraint
+  matching given keys". Foreign keys run with their tables or in the constraints section, both
+  before the indexes section; such an index is now created with its table's statements, where
+  the history created it, and a foreign key of a table on itself that consolidation had merged
+  into its `CREATE TABLE` is added after the index.
 
 ## [1.5.0] - 2026-09-30
 

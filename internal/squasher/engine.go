@@ -2251,6 +2251,29 @@ $$`)
 			deferredTableAlters[key] = &deferredResult
 		}
 	}
+	// A unique index a foreign key references goes with its table's
+	// statements, ahead of the foreign keys.
+	var foreignKeySQL []string
+	for _, result := range foundationObjects {
+		foreignKeySQL = append(foreignKeySQL, result.ConsolidatedSQL)
+	}
+	for _, result := range e.getObjectsByCategoryAsMap(consolidatedObjects, types.CategoryConstraints) {
+		foreignKeySQL = append(foreignKeySQL, result.ConsolidatedSQL)
+	}
+	for _, result := range deferredTableAlters {
+		foreignKeySQL = append(foreignKeySQL, result.ConsolidatedSQL)
+	}
+	for _, alterations := range pendingTableAlters {
+		for _, alteration := range alterations {
+			foreignKeySQL = append(foreignKeySQL, alteration.sql)
+		}
+	}
+	foreignKeySQL = append(foreignKeySQL, circularFKAlterStatements...)
+	movedIndexes, err := moveUniqueIndexesBackingForeignKeys(consolidatedObjects, foundationObjects, e.lifecycles, foreignKeySQL, pendingTableAlters)
+	if err != nil {
+		return "", err
+	}
+
 	for tableResult, alterations := range pendingTableAlters {
 		tableResult.ConsolidatedSQL = insertSQLAtHistoryPositions(tableResult, alterations)
 	}
@@ -2275,6 +2298,11 @@ $$`)
 		}
 		if category == types.CategoryConstraints && len(deferredTableAlters) > 0 {
 			maps.Copy(categoryObjectsMap, deferredTableAlters)
+		}
+		if category == types.CategoryIndexes {
+			for key := range movedIndexes {
+				delete(categoryObjectsMap, key)
+			}
 		}
 
 		// Sort objects by dependencies within category
