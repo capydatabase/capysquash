@@ -52,6 +52,10 @@ type Normalizer struct {
 	schemaOps     []string  // ALTER SCHEMA ... RENAME / DROP SCHEMA of schemas the history did not create
 	schemaCreates []created // CREATE SCHEMA of schemas the history creates
 	renamedNames  []string  // names objects had before a rename, for the DO block check
+
+	// observedUses counts, from the first pass, the objects taking each
+	// name in a schema over the whole history (see spellOut).
+	observedUses map[string]int
 }
 
 type created struct {
@@ -75,6 +79,7 @@ func (n *Normalizer) Observe(statements []types.Statement) {
 
 // Finish ends the first pass.
 func (n *Normalizer) Finish() {
+	n.observedUses = n.st.uses
 	n.st = newState(n.st.entities)
 	n.second = true
 }

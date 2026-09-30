@@ -130,10 +130,13 @@ type state struct {
 	routines   []*routine
 	extensions []*extension
 	searchPath []string
+
+	constraints []*constraint
+	uses        map[string]int // see useRelationName
 }
 
 func newState(previous []any) *state {
-	return &state{previous: previous, searchPath: []string{"public"}}
+	return &state{previous: previous, searchPath: []string{"public"}, uses: map[string]int{}}
 }
 
 // register numbers a new entity and links it to its first-pass counterpart.
@@ -169,6 +172,7 @@ func (s *state) newRelation(kind relKind, sc *schema, name string) *relation {
 	rel.id = s.register(rel)
 	rel.final = counterpart[*relation](s, rel.id)
 	s.relations = append(s.relations, rel)
+	s.useRelationName(sc, name)
 	return rel
 }
 
@@ -358,6 +362,7 @@ func (s *state) dropRelation(rel *relation, killed bool) {
 	}
 	rel.dead = true
 	rel.killed = rel.killed || killed
+	s.dropConstraintsOf(rel)
 	for _, other := range s.relations {
 		if !other.dead && (other.owner == rel || other.ownedBy == rel) {
 			s.dropRelation(other, killed)
@@ -365,9 +370,11 @@ func (s *state) dropRelation(rel *relation, killed bool) {
 	}
 }
 
-// dropColumn drops a column with the sequences that belong to it.
+// dropColumn drops a column with the constraints that involve it and the
+// sequences that belong to it.
 func (s *state) dropColumn(rel *relation, col *column) {
 	col.dead = true
+	s.dropConstraintsOnColumn(rel, col)
 	for _, other := range s.relations {
 		if !other.dead && other.ownedBy == rel && other.ownedColumn == col {
 			s.dropRelation(other, false)
@@ -381,6 +388,11 @@ func (s *state) dropType(t *typ, killed bool) {
 	}
 	t.dead = true
 	t.killed = t.killed || killed
+	for _, c := range s.constraints {
+		if c.domain == t {
+			c.dead = true
+		}
+	}
 }
 
 // dropSchemaContents drops what lives in a schema; it reports whether

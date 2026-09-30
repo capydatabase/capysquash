@@ -250,14 +250,13 @@ func (r *rewriter) renameStmt(node *pg_query.Node, stmt *pg_query.RenameStmt) []
 			return r.keep(node)
 		}
 		r.noteRename(rel.name)
+		r.s.renameRelation(rel, stmt.GetNewname())
 		if table := ownerTable(rel); table != nil {
 			r.own, r.subject = table, table
 			r.relRef(stmt.GetRelation())
-			rel.name = stmt.GetNewname()
 			table.renamed = true
 			return r.keep(node)
 		}
-		rel.name = stmt.GetNewname()
 		rel.renamed = true
 		return removed()
 
@@ -315,6 +314,9 @@ func (r *rewriter) renameStmt(node *pg_query.Node, stmt *pg_query.RenameStmt) []
 	case pg_query.ObjectType_OBJECT_TABCONSTRAINT:
 		if rel := r.findRelation(stmt.GetRelation()); rel != nil && rel.kind == relTable {
 			r.own, r.subject = rel, rel
+			if c := r.s.tableConstraint(rel, stmt.GetSubname()); c != nil {
+				r.s.renameConstraint(c, stmt.GetNewname())
+			}
 		}
 	}
 	r.walk(node, nil)
@@ -390,9 +392,17 @@ func (r *rewriter) setSchema(node *pg_query.Node, stmt *pg_query.AlterObjectSche
 // belong to it, to another schema.
 func (r *rewriter) moveRelation(rel *relation, sc *schema) {
 	rel.schema = sc
+	r.s.useRelationName(sc, rel.name)
 	for _, other := range r.s.relations {
 		if !other.dead && other.owner == rel {
 			other.schema = sc
+			r.s.useRelationName(sc, other.name)
+		}
+	}
+	for _, c := range r.s.constraints {
+		if !c.dead && c.table == rel {
+			c.schema = sc
+			r.s.useConstraintName(sc, c.name)
 		}
 	}
 }
@@ -545,7 +555,7 @@ func (r *rewriter) createTable(stmt *pg_query.CreateStmt) {
 		}
 	}
 	sc2 := r.tableScope(written, table)
-	var indexes []indexConstraint
+	var pending pendingConstraints
 	var constraints []*pg_query.Constraint
 	for _, element := range stmt.GetTableElts() {
 		switch {
@@ -558,12 +568,13 @@ func (r *rewriter) createTable(stmt *pg_query.CreateStmt) {
 			} else if t != nil {
 				col.typ = t
 			}
-			r.columnDef(def, table, col, sc2, &indexes)
+			r.columnDef(def, table, col, sc2, &pending)
 			r.walk(def.GetCollClause(), nil)
 		case element.GetConstraint() != nil:
-			switch c := element.GetConstraint(); c.GetContype() {
+			c := element.GetConstraint()
+			pending.add(c, nil)
+			switch c.GetContype() {
 			case pg_query.ConstrType_CONSTR_PRIMARY, pg_query.ConstrType_CONSTR_UNIQUE, pg_query.ConstrType_CONSTR_EXCLUSION:
-				indexes = append(indexes, indexConstraint{c: c})
 			default:
 				constraints = append(constraints, c)
 			}
@@ -580,7 +591,7 @@ func (r *rewriter) createTable(stmt *pg_query.CreateStmt) {
 	for _, c := range constraints {
 		r.constraint(c, table, nil, sc2)
 	}
-	r.indexConstraints(table, sc2, indexes)
+	r.nameConstraints(table, sc2, &pending)
 	if spec := stmt.GetPartspec(); spec != nil {
 		r.walk(spec, sc2)
 	}
@@ -596,9 +607,10 @@ type indexConstraint struct {
 }
 
 // columnDef rewrites a column definition's constraints and creates the
-// sequence a serial or identity column gets. Index constraints are
-// collected: PostgreSQL creates their indexes after the columns.
-func (r *rewriter) columnDef(def *pg_query.ColumnDef, table *relation, col *column, sc *scope, indexes *[]indexConstraint) {
+// sequence a serial or identity column gets. The constraints are collected
+// for naming: PostgreSQL names them, and creates the indexes of index
+// constraints, once the columns exist.
+func (r *rewriter) columnDef(def *pg_query.ColumnDef, table *relation, col *column, sc *scope, pending *pendingConstraints) {
 	if isSerial(def.GetTypeName()) {
 		r.implicitSequence(table, col, "")
 	}
@@ -607,9 +619,9 @@ func (r *rewriter) columnDef(def *pg_query.ColumnDef, table *relation, col *colu
 		if c == nil {
 			continue
 		}
+		pending.add(c, col)
 		switch c.GetContype() {
 		case pg_query.ConstrType_CONSTR_PRIMARY, pg_query.ConstrType_CONSTR_UNIQUE, pg_query.ConstrType_CONSTR_EXCLUSION:
-			*indexes = append(*indexes, indexConstraint{c: c, column: col})
 			continue
 		}
 		r.constraint(c, table, col, sc)
@@ -684,8 +696,25 @@ func (r *rewriter) constraint(c *pg_query.Constraint, table *relation, col *colu
 			r.walk(pair, sc)
 		}
 		r.walk(c.GetWhereClause(), sc)
+		entry := &constraint{schema: table.schema, table: table}
+		for _, key := range keys {
+			if keyColumn := table.column(key); keyColumn != nil {
+				entry.columns = append(entry.columns, keyColumn)
+			}
+		}
 		if c.GetIndexname() != "" {
-			return // USING INDEX: the index exists already
+			// USING INDEX: the index exists already, and takes the
+			// constraint's name when it has one.
+			entry.index = r.s.findRelation(table.schema.name, c.GetIndexname())
+			entry.name = c.GetConname()
+			if entry.name == "" {
+				entry.name = c.GetIndexname()
+			} else if entry.index != nil {
+				entry.index.name = entry.name
+				r.s.useRelationName(table.schema, entry.name)
+			}
+			r.s.addConstraint(entry)
+			return
 		}
 		name := c.GetConname()
 		if name == "" {
@@ -694,11 +723,16 @@ func (r *rewriter) constraint(c *pg_query.Constraint, table *relation, col *colu
 				second = ""
 			}
 			name = pgnames.ChooseRelationName(table.name, second, label, func(candidate string) bool {
-				return r.s.relationTaken(table.schema, candidate)
+				return r.s.relationTaken(table.schema, candidate) || r.s.constraintTaken(table.schema, candidate)
 			})
+			if r.rewrite && r.spellOut(table.schema, name, pgnames.MakeObjectName(table.name, second, label), true, true) {
+				c.Conname = name
+			}
 		}
 		index := r.s.newRelation(relIndex, table.schema, name)
 		index.implicit, index.owner = true, table
+		entry.name, entry.index = name, index
+		r.s.addConstraint(entry)
 	default:
 		r.walk(c, sc)
 	}
@@ -762,6 +796,8 @@ func (r *rewriter) alterTable(stmt *pg_query.AlterTableStmt) {
 		return
 	}
 	sc := r.tableScope(written, rel)
+	var pending pendingConstraints
+	defer r.nameConstraints(rel, sc, &pending)
 	for _, node := range stmt.GetCmds() {
 		cmd := node.GetAlterTableCmd()
 		if cmd == nil {
@@ -780,10 +816,8 @@ func (r *rewriter) alterTable(stmt *pg_query.AlterTableStmt) {
 			}
 			t := r.typeName(def.GetTypeName())
 			added := r.s.newColumn(rel, def.GetColname(), t)
-			var indexes []indexConstraint
-			r.columnDef(def, rel, added, sc, &indexes)
+			r.columnDef(def, rel, added, sc, &pending)
 			r.walk(def.GetCollClause(), nil)
-			r.indexConstraints(rel, sc, indexes)
 			continue
 		case pg_query.AlterTableType_AT_DropColumn:
 			r.columnName(&cmd.Name, rel)
@@ -809,9 +843,20 @@ func (r *rewriter) alterTable(stmt *pg_query.AlterTableStmt) {
 			continue
 		case pg_query.AlterTableType_AT_AddConstraint:
 			if c := cmd.GetDef().GetConstraint(); c != nil {
-				r.constraint(c, rel, nil, sc)
+				pending.add(c, nil)
+				switch c.GetContype() {
+				case pg_query.ConstrType_CONSTR_PRIMARY, pg_query.ConstrType_CONSTR_UNIQUE, pg_query.ConstrType_CONSTR_EXCLUSION:
+				default:
+					r.constraint(c, rel, nil, sc)
+				}
 				continue
 			}
+		case pg_query.AlterTableType_AT_DropConstraint:
+			if c := r.s.tableConstraint(rel, cmd.GetName()); c != nil {
+				c.dead = true
+				r.s.dropRelation(c.index, false)
+			}
+			continue
 		case pg_query.AlterTableType_AT_AddIdentity:
 			r.columnName(&cmd.Name, rel)
 			if c := cmd.GetDef().GetConstraint(); c != nil && col != nil {
@@ -860,10 +905,6 @@ func (r *rewriter) createIndex(stmt *pg_query.IndexStmt) {
 			}
 		}
 	}
-	changed := false
-	if rel != nil {
-		changed = r.rewrite && (rel.finalName() != rel.name || columnsRenamed(rel, stmt))
-	}
 	written := rv.GetRelname()
 	r.relRef(rv)
 	r.subject = rel
@@ -892,19 +933,12 @@ func (r *rewriter) createIndex(stmt *pg_query.IndexStmt) {
 	index := r.s.newRelation(relIndex, rel.schema, name)
 	index.owner = rel
 	r.subject = index
-	if r.rewrite && (!implicit || changed || index.finalName() != name) {
+	// An index without a name gets the name PostgreSQL gave it spelled out:
+	// the baseline creates it elsewhere, where the name can be taken or
+	// free, and the pipeline tracks indexes by name.
+	if r.rewrite {
 		stmt.Idxname = index.finalName()
 	}
-}
-
-// columnsRenamed reports an index column whose name changes by the end.
-func columnsRenamed(rel *relation, stmt *pg_query.IndexStmt) bool {
-	for _, node := range append(slices.Clone(stmt.GetIndexParams()), stmt.GetIndexIncludingParams()...) {
-		if col := rel.column(node.GetIndexElem().GetName()); col != nil && col.finalName() != col.name {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *rewriter) createView(stmt *pg_query.ViewStmt) {
@@ -1198,7 +1232,6 @@ func (r *rewriter) createDomain(stmt *pg_query.CreateDomainStmt) {
 // is named after the domain; when the domain is renamed later, the name it
 // got is spelled out.
 func (r *rewriter) domainConstraints(t *typ, timeName string, constraints []*pg_query.Node) {
-	var chosen []string
 	for _, node := range constraints {
 		c := node.GetConstraint()
 		if c == nil {
@@ -1206,15 +1239,16 @@ func (r *rewriter) domainConstraints(t *typ, timeName string, constraints []*pg_
 		}
 		switch c.GetContype() {
 		case pg_query.ConstrType_CONSTR_CHECK:
-			if c.GetConname() == "" {
-				name := pgnames.ChooseRelationName(timeName, "", "check", func(candidate string) bool {
-					return slices.Contains(chosen, candidate)
+			name := c.GetConname()
+			if name == "" {
+				name = pgnames.ChooseRelationName(timeName, "", "check", func(candidate string) bool {
+					return r.s.constraintTaken(t.schema, candidate)
 				})
-				chosen = append(chosen, name)
-				if r.rewrite && t.finalName() != timeName {
+				if r.rewrite && (t.finalName() != timeName || r.spellOut(t.schema, name, pgnames.MakeObjectName(timeName, "", "check"), false, true)) {
 					c.Conname = name
 				}
 			}
+			r.s.addConstraint(&constraint{schema: t.schema, name: name, domain: t})
 		case pg_query.ConstrType_CONSTR_DEFAULT:
 			r.enumLiteral(c.GetRawExpr(), t.base)
 		}
@@ -1238,6 +1272,12 @@ func (r *rewriter) alterDomain(stmt *pg_query.AlterDomainStmt) {
 	case "T":
 		r.enumLiteral(stmt.GetDef(), t.base)
 		r.walk(stmt.GetDef(), nil)
+	case "X":
+		for _, c := range r.s.constraints {
+			if !c.dead && c.domain == t && c.name == stmt.GetName() {
+				c.dead = true
+			}
+		}
 	default:
 		r.walk(stmt.GetDef(), nil)
 	}
