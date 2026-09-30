@@ -3,7 +3,7 @@
 The migrations of CapyDB's own control plane
 (`backend/internal/store/migrations/*.sql` in the CapyDB workspace), copied
 unchanged from backend commit `a1bf6da` (2026-09-30), 64 files. A real history
-of three years of product changes: a table that other tables reference is
+of the control plane's schema changes since its first migration: a table that other tables reference is
 replaced and dropped (`clusters`, migration 019), tables end up referencing
 each other through foreign keys added with `ALTER TABLE`, conditional `DO`
 blocks add and replace check constraints (some `NOT VALID`, validated later),
