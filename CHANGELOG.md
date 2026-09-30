@@ -15,7 +15,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Fixtures `sequence_defaults`, `dropped_referenced_table` and `capydb_backend` in the e2e suite.
+  `capydb_backend` is CapyDB's own control-plane history (64 migrations, copied unchanged;
+  `scripts/sync-capydb-backend-fixture.sh` refreshes the copy from a backend checkout).
+
 ### Fixed
+
+- A history that drops a table other tables reference, or whose tables end up referencing each
+  other, gets a baseline that applies. CapyDB's own control-plane history did not produce one at
+  any safety level (1.3.0 and 1.4.0 alike); it now reproduces the original catalog at all four,
+  on PostgreSQL 15 to 18. The causes, all in the engine:
+  - A table with a foreign key to a table the history drops was left out of the baseline with
+    that table. Dropping a referenced table drops the constraint, not the referencing table. The
+    kept table's statements now lose only their foreign keys to dropped tables; the columns stay,
+    so a later `DROP COLUMN` leaves the same column positions.
+  - One dependency cycle among the tables, types and functions of the baseline made the whole
+    section fall back to alphabetical order, so tables came before the tables they reference.
+    Statements are now ordered by their dependencies with the history's order breaking ties, and
+    a cycle is broken at its earliest statement without moving anything that waits on it.
+  - Foreign keys added with `ALTER TABLE` between two tables that end up referencing each other
+    (`projects` and `instances`) were not deferred. Every foreign key between tables of a cycle,
+    inline or added later, is now added once all tables exist, under the name PostgreSQL gave
+    it. The old handler only looked at `CREATE TABLE`, rewrote the whole table's statements and
+    named the constraints `fk_table_column`, which PostgreSQL never does.
+  - A constraint a `DO` block adds conditionally was placed right after `CREATE TABLE`, before
+    the `ALTER TABLE ... ADD COLUMN` that creates the column it checks (at the levels that keep
+    those separate). It now goes where the history ran it among the table's statements.
+  - `DO` blocks altering a dropped table landed in the constraints section and in
+    `010_data.sql`.
+  - `ALTER TABLE ... ADD COLUMN` recorded neither the table its inline `REFERENCES` names nor
+    the column's type, so at the paranoid level the statement could run before either existed.
+- A sequence named in a column default (`nextval`, `currval`, `setval`, `'name'::regclass`) is
+  created before the table: the default is read for the sequence it names, and the sequence of a
+  `serial` or identity column counts as created by its table. `ALTER SEQUENCE ... OWNED BY` (and
+  `CREATE SEQUENCE ... OWNED BY`) comes after the table it names. The sequence used to be emitted
+  wherever its name sorted.
+- Columns of an enum, domain or composite type (renamed, in another schema, or added with
+  `ALTER TABLE`) no longer produce "depends on X which is never created" warnings: the name is
+  looked up among the types the history creates. A type nothing creates is still reported.
 
 - `SquashDirectory` with streaming enabled (the programmatic API in `internal/engine`) no longer
   hangs. It ran a concurrent parse pipeline whose output channel was never closed, so the
@@ -99,12 +138,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   given.
 - `scripts/run-e2e.sh` skips a fixture directory without migrations (an empty `original/` left in
   a checkout) instead of failing on it.
-
-### Known issues
-
-- The order of a table whose column default calls `nextval('sequence')` against the
-  `CREATE SEQUENCE` it names is not derived from the default (the sequence can be emitted after
-  the table). This predates this release.
 
 ## [1.3.0] - 2026-09-29
 
