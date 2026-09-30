@@ -107,7 +107,6 @@ type Engine struct {
 	// Streaming components (optional)
 	streamingTracker *tracking.StreamingTracker
 	memManager       *performance.MemoryManager
-	batchProcessor   *performance.BatchProcessor
 
 	// Streaming configuration
 	batchSize           int
@@ -368,12 +367,10 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 	// Initialize streaming components if enabled
 	var memManager *performance.MemoryManager
 	var streamingTracker *tracking.StreamingTracker
-	var batchProcessor *performance.BatchProcessor
 
 	if enableStreaming {
 		memManager = performance.NewMemoryManager(memoryLimitMB)
 		streamingTracker = tracking.NewStreamingTracker()
-		batchProcessor = performance.NewBatchProcessor(batchSize, memoryLimitMB/4, memManager)
 	}
 
 	// Initialize transformation components if enabled
@@ -457,7 +454,6 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 		// Streaming components
 		streamingTracker:    streamingTracker,
 		memManager:          memManager,
-		batchProcessor:      batchProcessor,
 		batchSize:           batchSize,
 		workerCount:         workerCount,
 		memoryLimitMB:       memoryLimitMB,

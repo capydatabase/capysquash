@@ -257,62 +257,6 @@ func (c *LRUCache[K, V]) Clear() {
 	c.misses = 0
 }
 
-// Deduplicator handles duplicate statement detection and removal
-type Deduplicator[T any] struct {
-	seen     map[string]bool
-	hashFunc func(T) string
-	mu       sync.RWMutex
-}
-
-// NewDeduplicator creates a new deduplicator with the specified hash function
-func NewDeduplicator[T any](hashFunc func(T) string) *Deduplicator[T] {
-	return &Deduplicator[T]{
-		seen:     make(map[string]bool),
-		hashFunc: hashFunc,
-	}
-}
-
-// IsDuplicate checks if an item has been seen before
-func (d *Deduplicator[T]) IsDuplicate(item T) bool {
-	hash := d.hashFunc(item)
-
-	d.mu.RLock()
-	exists := d.seen[hash]
-	d.mu.RUnlock()
-
-	if exists {
-		return true
-	}
-
-	d.mu.Lock()
-	d.seen[hash] = true
-	d.mu.Unlock()
-
-	return false
-}
-
-// Reset clears the deduplicator state
-func (d *Deduplicator[T]) Reset() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.seen = make(map[string]bool)
-}
-
-// GetStats returns deduplication statistics
-func (d *Deduplicator[T]) GetStats() DeduplicationStats {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	return DeduplicationStats{
-		UniqueItems: len(d.seen),
-	}
-}
-
-// DeduplicationStats provides deduplication information
-type DeduplicationStats struct {
-	UniqueItems int `json:"unique_items"`
-}
-
 // MemoryOptimizedStatement wraps a statement with memory optimization features
 type MemoryOptimizedStatement struct {
 	*types.Statement
