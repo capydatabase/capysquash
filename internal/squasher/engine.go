@@ -1727,6 +1727,24 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 		}
 	}
 
+	// The tables the baseline keeps must not reference the tables it leaves
+	// out.
+	for key, result := range consolidatedObjects {
+		if lifecycle := e.lifecycles[key]; lifecycle == nil || lifecycle.Type != types.TypeTable {
+			continue
+		}
+		stripped, err := stripForeignKeysToDroppedTables(result.ConsolidatedSQL, droppedTables)
+		if err != nil {
+			return nil, errors.NewError(
+				errors.ErrorCodeConsolidationFailed,
+				fmt.Sprintf("remove the foreign keys of %s to dropped tables", key),
+				errors.SeverityError,
+				errors.CategoryConsolidation,
+			).WithInnerError(err)
+		}
+		result.ConsolidatedSQL = stripped
+	}
+
 	e.logger.Info("Successfully consolidated %d objects", len(consolidatedObjects))
 	return consolidatedObjects, nil
 }
@@ -1772,6 +1790,23 @@ func renamedTableResult(lifecycle *tracking.ObjectLifecycle) *tracking.Consolida
 		Optimizations:      []string{"renamed_table_in_history_order"},
 		RiskLevel:          tracking.RiskLevelLow,
 	}
+}
+
+// isDroppedTableName reports whether name (bare or schema-qualified) names a
+// table the history ends up dropping.
+func isDroppedTableName(droppedTables map[string]struct{}, name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	if _, ok := droppedTables[name]; ok {
+		return true
+	}
+	if !strings.Contains(name, ".") {
+		_, ok := droppedTables["public."+name]
+		return ok
+	}
+	return false
 }
 
 func lifecycleDependsOnDroppedTables(lifecycle *tracking.ObjectLifecycle, droppedTables map[string]struct{}) bool {
@@ -1861,9 +1896,14 @@ func lifecycleDependsOnDroppedTables(lifecycle *tracking.ObjectLifecycle, droppe
 		return strings.TrimSpace(strings.Trim(d, `"`))
 	}
 
-	// Primary check: statement dependency list.
+	// Primary check: statement dependency list. A table's foreign key to a
+	// dropped table does not take the table with it: DROP TABLE ... CASCADE
+	// drops the constraint and keeps the referencing table.
 	for _, event := range lifecycle.History {
 		for _, dep := range event.Statement.Dependencies {
+			if lifecycle.Type == types.TypeTable && strings.HasPrefix(dep, "REFERENCES:") {
+				continue
+			}
 			if matchesDroppedTable(normalizeDependency(dep)) {
 				return true
 			}
@@ -2118,79 +2158,18 @@ $$`)
 	// Initialize unified dependency resolver
 	unifiedResolver := NewUnifiedDependencyResolver()
 
-	// ================================================================
-	// CIRCULAR FK DETECTION AND RESOLUTION
-	// ================================================================
-	// Before generating Foundation objects (tables), check for circular
-	// foreign key dependencies and handle them with 2-phase approach:
-	// 1. CREATE TABLE without circular FKs
-	// 2. ALTER TABLE ADD CONSTRAINT for circular FKs (after all tables exist)
-	// ================================================================
-	var circularFKAlterStatements []*types.Statement
-
-	// Extract table statements from Foundation category
+	// Foreign keys between tables that end up needing each other are added
+	// once every table exists, in the constraints section.
 	foundationObjects := e.getObjectsByCategoryAsMap(consolidatedObjects, types.CategoryFoundation)
-	tableStatements := make(map[string]*types.Statement)
+	foundationTables := make(map[string]*tracking.ConsolidationResult)
 	for key, result := range foundationObjects {
 		if lifecycle, exists := e.lifecycles[key]; exists && lifecycle.Type == types.TypeTable {
-			// Use consolidated SQL for circular FK detection (includes integrated constraints)
-			// This is critical because ALTER TABLE ADD CONSTRAINT may have been integrated into CREATE TABLE
-			if result.ConsolidatedSQL != "" {
-				// Create a statement from the consolidated SQL
-				consolidatedStmt := &types.Statement{
-					SQL:        result.ConsolidatedSQL,
-					ObjectType: types.TypeTable,
-					ObjectName: lifecycle.Name,
-					Schema:     lifecycle.Schema,
-					Operation:  types.OpCreate,
-				}
-				// Parse the consolidated SQL to get AST for FK extraction
-				if parseResult, err := pg_query.Parse(result.ConsolidatedSQL); err == nil {
-					consolidatedStmt.ParseTree = parseResult
-				}
-				tableStatements[lifecycle.Name] = consolidatedStmt
-			}
+			foundationTables[key] = result
 		}
 	}
-
-	if len(tableStatements) > 0 {
-		e.logger.Info("Checking %d tables for circular FK dependencies", len(tableStatements))
-		circularFKHandler := NewCircularFKHandler()
-
-		// Detect circular dependencies
-		cycles := circularFKHandler.DetectCircularDependencies(tableStatements)
-
-		if len(cycles) > 0 {
-			e.logger.Info("☑ Detected %d circular FK dependency chains - applying 2-phase constraint generation", len(cycles))
-
-			// Remove circular FKs from tables and generate ALTER statements
-			modifiedTables, alterStmts, err := circularFKHandler.RemoveCircularFKsFromTables(tableStatements, cycles)
-			if err != nil {
-				e.warnings = append(e.warnings, fmt.Sprintf("Circular FK handling warning: %v", err))
-			} else {
-				// Update consolidation results with modified table statements
-				for tableName, modifiedStmt := range modifiedTables {
-					// Find the consolidation result for this table
-					for key := range foundationObjects {
-						if lifecycle, exists := e.lifecycles[key]; exists && lifecycle.Name == tableName {
-							// Update BOTH maps with the modified version (circular FKs removed)
-							foundationObjects[key].ConsolidatedSQL = modifiedStmt.SQL
-							foundationObjects[key].Warnings = append(foundationObjects[key].Warnings, "Circular FK constraints removed and deferred to ALTER TABLE")
-							consolidatedObjects[key].ConsolidatedSQL = modifiedStmt.SQL
-							consolidatedObjects[key].Warnings = append(consolidatedObjects[key].Warnings, "Circular FK constraints removed and deferred to ALTER TABLE")
-							e.logger.Info("Updated table %s with circular FKs removed", tableName)
-							break
-						}
-					}
-				}
-
-				// Store ALTER statements for later insertion
-				circularFKAlterStatements = alterStmts
-				e.logger.Info("Generated %d ALTER TABLE statements for circular FK constraints", len(alterStmts))
-			}
-		} else {
-			e.logger.Info("☑ No circular FK dependencies detected - all tables can be created directly")
-		}
+	circularFKAlterStatements, err := deferCyclicForeignKeys(foundationTables, e.lifecycles)
+	if err != nil {
+		return "", err
 	}
 
 	// Some DROP POLICY statements are occasionally mis-categorized into the foundation bucket
@@ -2207,7 +2186,7 @@ $$`)
 	// constraints category instead.
 	deferredTableAlters := make(map[string]*tracking.ConsolidationResult)
 	handledTableAlterKeys := make(map[string]struct{})
-	pendingTableAlters := make(map[*tracking.ConsolidationResult][]string)
+	pendingTableAlters := make(map[*tracking.ConsolidationResult][]positionedSQL)
 	tableAlterKeys := make([]string, 0, len(consolidatedObjects))
 	for key := range consolidatedObjects {
 		tableAlterKeys = append(tableAlterKeys, key)
@@ -2243,6 +2222,10 @@ $$`)
 		remaining := make([]string, 0, len(alterStatements))
 		for _, alterStatement := range alterStatements {
 			alterSQL := terminateSQLStatement(alterStatement.SQL)
+			// An alteration of a table the history drops goes with it.
+			if isDroppedTableName(droppedTablesForGeneration, alterStatement.ObjectName) {
+				continue
+			}
 			tableResult := findTableConsolidationResult(foundationObjects, e.lifecycles, alterStatement.ObjectName)
 			if tableResult == nil {
 				remaining = append(remaining, alterSQL)
@@ -2255,12 +2238,15 @@ $$`)
 
 			prospectiveTableSQL := tableResult.ConsolidatedSQL
 			if pending := pendingTableAlters[tableResult]; len(pending) > 0 {
-				prospectiveTableSQL, _ = insertSQLAfterCreateTable(prospectiveTableSQL, strings.Join(pending, "\n"))
+				prospectiveTableSQL = insertSQLAtHistoryPositions(tableResult, pending)
 			}
 			if tableAlterAlreadyApplied(prospectiveTableSQL, alterStatement) {
 				continue
 			}
-			pendingTableAlters[tableResult] = append(pendingTableAlters[tableResult], alterSQL)
+			pendingTableAlters[tableResult] = append(pendingTableAlters[tableResult], positionedSQL{
+				sql:      alterSQL,
+				position: lifecycleStatementPosition(lifecycle),
+			})
 		}
 
 		if len(remaining) > 0 {
@@ -2270,10 +2256,7 @@ $$`)
 		}
 	}
 	for tableResult, alterations := range pendingTableAlters {
-		updatedSQL, inserted := insertSQLAfterCreateTable(tableResult.ConsolidatedSQL, strings.Join(alterations, "\n"))
-		if inserted {
-			tableResult.ConsolidatedSQL = updatedSQL
-		}
+		tableResult.ConsolidatedSQL = insertSQLAtHistoryPositions(tableResult, alterations)
 	}
 
 	for _, category := range categories {
@@ -2356,16 +2339,11 @@ $$`)
 		// CRITICAL: After Foundation objects, add circular FK ALTER statements to Constraints category
 		// This ensures tables are created first, then circular FK constraints are added
 		if category == types.CategoryConstraints && len(circularFKAlterStatements) > 0 {
-			e.sqlBuilder.NL().Comment("Circular FK constraints (added after all tables exist)").NL()
-			for _, alterStmt := range circularFKAlterStatements {
-				// Add comment from statement
-				for _, comment := range alterStmt.Comments {
-					e.sqlBuilder.Comment(strings.TrimPrefix(comment, "-- ")).NL()
-				}
-				e.sqlBuilder.Statement(alterStmt.SQL)
+			e.sqlBuilder.NL().Comment("Foreign keys between tables that reference each other (added once every table exists)").NL()
+			for _, alterSQL := range circularFKAlterStatements {
+				e.sqlBuilder.Statement(alterSQL)
 				e.sqlBuilder.NL().NL()
 			}
-			e.logger.Info("☑ Added %d circular FK ALTER TABLE statements to Constraints category", len(circularFKAlterStatements))
 		}
 	}
 
@@ -2881,6 +2859,17 @@ func (e *Engine) generateDataOperationsSQL() (string, error) {
 				shouldSkip = true
 			}
 
+			// A DO block that alters a dropped table (a conditional ADD
+			// CONSTRAINT) has no table to alter in the baseline.
+			if !shouldSkip {
+				for _, ddl := range parser.ExtractStaticDDLFromDoBlock(dataOp.Statement.SQL) {
+					if alters, ok := parseStaticTableAlterSQL(ddl); ok &&
+						slices.ContainsFunc(alters, func(alter types.Statement) bool { return matchesDroppedTable(alter.ObjectName) }) {
+						shouldSkip = true
+					}
+				}
+			}
+
 			if shouldSkip {
 				skippedOps++
 				e.logger.Info("[DATA-OPS] Skipping %s on %s because it references a dropped table", dataOp.Operation, dataOp.Table)
@@ -3365,7 +3354,7 @@ func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int
 	for _, sequence := range sequences {
 		content := migrations[sequence]
 		migrationFile := &performance.MigrationFile{
-			Path:     fmt.Sprintf("migration_%d.sql", sequence),
+			Path:     fmt.Sprintf("migration_%05d", sequence),
 			Content:  []byte(content),
 			Sequence: sequence,
 			Size:     int64(len(content)),

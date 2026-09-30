@@ -2,569 +2,385 @@ package squasher
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
-	"github.com/capydatabase/capysquash/internal/errors"
-	"github.com/capydatabase/capysquash/internal/types"
-	"github.com/capydatabase/capysquash/internal/utils"
+	"github.com/capydatabase/capysquash/internal/pgnames"
+	"github.com/capydatabase/capysquash/internal/tracking"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
-// CircularFKHandler detects and handles circular foreign key dependencies
-type CircularFKHandler struct {
-	// Maps table name -> list of tables it references via FK
-	fkDependencies map[string][]string
-	// Maps table name -> list of FK constraints
-	tableConstraints map[string][]*ForeignKeyConstraint
+// foreignKeyUse is one foreign key in the statements of a table's
+// consolidation result: an inline REFERENCES of a column (in CREATE TABLE
+// or ALTER TABLE ... ADD COLUMN), a table constraint of CREATE TABLE, or an
+// ALTER TABLE ... ADD CONSTRAINT.
+type foreignKeyUse struct {
+	statement  int
+	constraint *pg_query.Constraint
+	column     string // set for an inline REFERENCES
+	refTable   string // canonical name of the referenced table
 }
 
-// ForeignKeyConstraint represents a foreign key constraint
-type ForeignKeyConstraint struct {
-	ConstraintName string
-	SourceTable    string
-	SourceColumns  []string
-	RefTable       string
-	RefColumns     []string
-	OnDelete       string
-	OnUpdate       string
-	Deferrable     bool
-	Initially      string
-	OriginalSQL    string // Original SQL for the constraint
-}
-
-// NewCircularFKHandler creates a new circular FK handler
-func NewCircularFKHandler() *CircularFKHandler {
-	return &CircularFKHandler{
-		fkDependencies:   make(map[string][]string),
-		tableConstraints: make(map[string][]*ForeignKeyConstraint),
+// deferCyclicForeignKeys breaks the foreign key cycles between the tables
+// the baseline creates. Consolidation gathers each table's statements into
+// one result, so a foreign key the history added once both tables existed
+// (ALTER TABLE a ADD CONSTRAINT ... REFERENCES b, with b referencing a) can
+// leave two tables that each need the other to exist first. Every foreign
+// key between two tables of the same cycle is taken out of its table's
+// statements and returned as an ALTER TABLE ... ADD CONSTRAINT, in history
+// order, to run once every table exists - under the name PostgreSQL gives
+// it, so the catalog is the same. The dependencies of the results are
+// updated to match.
+func deferCyclicForeignKeys(tables map[string]*tracking.ConsolidationResult, lifecycles map[string]*tracking.ObjectLifecycle) ([]string, error) {
+	keys := make([]string, 0, len(tables))
+	for key := range tables {
+		keys = append(keys, key)
 	}
-}
+	sort.Slice(keys, func(i, j int) bool {
+		return historyPositionLess(lifecycles[keys[i]], lifecycles[keys[j]], keys[i], keys[j])
+	})
 
-// DetectCircularDependencies finds all circular FK dependencies in a set of tables
-func (h *CircularFKHandler) DetectCircularDependencies(tables map[string]*types.Statement) [][]string {
-	// Build FK dependency graph
-	h.buildDependencyGraph(tables)
-
-	// Detect cycles using DFS
-	visited := make(map[string]bool)
-	recursionStack := make(map[string]bool)
-	var cycles [][]string
-	var currentPath []string
-
-	for table := range h.fkDependencies {
-		if !visited[table] {
-			h.detectCyclesDFS(table, visited, recursionStack, &currentPath, &cycles)
+	trees := make(map[string]*pg_query.ParseResult, len(keys))
+	uses := make(map[string][]foreignKeyUse, len(keys))
+	tableOf := make(map[string]string, len(keys)) // canonical table name -> key
+	for _, key := range keys {
+		if lifecycle := lifecycles[key]; lifecycle != nil {
+			tableOf[canonicalRelationName(lifecycle.Name)] = key
 		}
 	}
-
-	if len(cycles) > 0 {
-		utils.GetDefaultLogger().WithPrefix("CIRCULAR-FK").Info("Detected %d circular FK dependency chains", len(cycles))
-		for i, cycle := range cycles {
-			utils.GetDefaultLogger().WithPrefix("CIRCULAR-FK").Info("  Cycle %d: %s", i+1, strings.Join(cycle, " -> "))
-		}
-	}
-
-	return cycles
-}
-
-// buildDependencyGraph builds the FK dependency graph from table statements
-func (h *CircularFKHandler) buildDependencyGraph(tables map[string]*types.Statement) {
-	for tableName, stmt := range tables {
-		// Extract FK constraints from the statement
-		constraints := h.extractForeignKeys(stmt)
-
-		if len(constraints) > 0 {
-			h.tableConstraints[tableName] = constraints
-
-			// Build dependency list
-			for _, constraint := range constraints {
-				if constraint.RefTable != tableName { // Ignore self-references for cycle detection
-					h.fkDependencies[tableName] = append(h.fkDependencies[tableName], constraint.RefTable)
-				}
-			}
-		}
-	}
-}
-
-// extractForeignKeys extracts all foreign key constraints from a CREATE TABLE statement
-func (h *CircularFKHandler) extractForeignKeys(stmt *types.Statement) []*ForeignKeyConstraint {
-	var constraints []*ForeignKeyConstraint
-
-	// Parse the statement AST
-	if stmt.ParseTree == nil {
-		return constraints
-	}
-
-	parseResult := stmt.ParseTree
-	if parseResult == nil {
-		return constraints
-	}
-
-	if len(parseResult.Stmts) == 0 {
-		return constraints
-	}
-
-	rawStmt := parseResult.Stmts[0]
-	createStmt := rawStmt.Stmt.GetCreateStmt()
-	if createStmt == nil {
-		return constraints
-	}
-
-	tableName := stmt.ObjectName
-
-	// Extract table-level constraints
-	for _, tableElt := range createStmt.TableElts {
-		if constraint := tableElt.GetConstraint(); constraint != nil {
-			if constraint.Contype == pg_query.ConstrType_CONSTR_FOREIGN {
-				fk := h.buildForeignKeyFromConstraint(constraint, tableName)
-				if fk != nil {
-					constraints = append(constraints, fk)
-				}
-			}
-		}
-
-		// Extract column-level constraints (inline REFERENCES)
-		if columnDef := tableElt.GetColumnDef(); columnDef != nil {
-			for _, colConstraint := range columnDef.Constraints {
-				if constraint := colConstraint.GetConstraint(); constraint != nil {
-					if constraint.Contype == pg_query.ConstrType_CONSTR_FOREIGN {
-						fk := h.buildForeignKeyFromConstraint(constraint, tableName)
-						if fk != nil {
-							// Add source column from the column definition
-							if fk.SourceColumns == nil {
-								fk.SourceColumns = []string{columnDef.Colname}
-							}
-							constraints = append(constraints, fk)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return constraints
-}
-
-// buildForeignKeyFromConstraint builds a ForeignKeyConstraint from pg_query Constraint
-func (h *CircularFKHandler) buildForeignKeyFromConstraint(constraint *pg_query.Constraint, sourceTable string) *ForeignKeyConstraint {
-	if constraint.Pktable == nil {
-		return nil
-	}
-
-	fk := &ForeignKeyConstraint{
-		ConstraintName: constraint.Conname,
-		SourceTable:    sourceTable,
-		RefTable:       h.getTableName(constraint.Pktable),
-		Deferrable:     constraint.Deferrable,
-	}
-
-	// Extract source columns (local columns)
-	for _, key := range constraint.FkAttrs {
-		if str := key.GetString_(); str != nil {
-			fk.SourceColumns = append(fk.SourceColumns, str.Sval)
-		}
-	}
-
-	// Extract referenced columns
-	for _, key := range constraint.PkAttrs {
-		if str := key.GetString_(); str != nil {
-			fk.RefColumns = append(fk.RefColumns, str.Sval)
-		}
-	}
-
-	// Extract ON DELETE/UPDATE actions (stored as bytes/runes in pg_query)
-	switch string(constraint.FkDelAction) {
-	case "a": // NO ACTION
-		fk.OnDelete = "NO ACTION"
-	case "r": // RESTRICT
-		fk.OnDelete = "RESTRICT"
-	case "c": // CASCADE
-		fk.OnDelete = "CASCADE"
-	case "n": // SET NULL
-		fk.OnDelete = "SET NULL"
-	case "d": // SET DEFAULT
-		fk.OnDelete = "SET DEFAULT"
-	}
-
-	switch string(constraint.FkUpdAction) {
-	case "a":
-		fk.OnUpdate = "NO ACTION"
-	case "r":
-		fk.OnUpdate = "RESTRICT"
-	case "c":
-		fk.OnUpdate = "CASCADE"
-	case "n":
-		fk.OnUpdate = "SET NULL"
-	case "d":
-		fk.OnUpdate = "SET DEFAULT"
-	}
-
-	// Build deferrable status
-	if constraint.Deferrable {
-		if constraint.Initdeferred {
-			fk.Initially = "DEFERRED"
-		} else {
-			fk.Initially = "IMMEDIATE"
-		}
-	}
-
-	return fk
-}
-
-// getTableName extracts table name from RangeVar
-func (h *CircularFKHandler) getTableName(rangeVar *pg_query.RangeVar) string {
-	if rangeVar == nil {
-		return ""
-	}
-
-	if rangeVar.Schemaname != "" {
-		return fmt.Sprintf("%s.%s", rangeVar.Schemaname, rangeVar.Relname)
-	}
-	return rangeVar.Relname
-}
-
-// detectCyclesDFS performs DFS to detect cycles in the FK dependency graph
-func (h *CircularFKHandler) detectCyclesDFS(
-	table string,
-	visited map[string]bool,
-	recursionStack map[string]bool,
-	currentPath *[]string,
-	cycles *[][]string,
-) {
-	visited[table] = true
-	recursionStack[table] = true
-	*currentPath = append(*currentPath, table)
-
-	// Visit all dependencies
-	for _, refTable := range h.fkDependencies[table] {
-		if !visited[refTable] {
-			h.detectCyclesDFS(refTable, visited, recursionStack, currentPath, cycles)
-		} else if recursionStack[refTable] {
-			// Found a cycle - extract the cycle from currentPath
-			cycle := h.extractCycle(*currentPath, refTable)
-			if len(cycle) > 0 {
-				*cycles = append(*cycles, cycle)
-			}
-		}
-	}
-
-	// Backtrack
-	*currentPath = (*currentPath)[:len(*currentPath)-1]
-	recursionStack[table] = false
-}
-
-// extractCycle extracts a cycle from the current path
-func (h *CircularFKHandler) extractCycle(path []string, cycleStart string) []string {
-	// Find where the cycle starts
-	startIdx := -1
-	for i, table := range path {
-		if table == cycleStart {
-			startIdx = i
-			break
-		}
-	}
-
-	if startIdx == -1 {
-		return nil
-	}
-
-	// Extract cycle (including the cycleStart node at the end to close the loop)
-	cycle := make([]string, len(path)-startIdx+1)
-	copy(cycle, path[startIdx:])
-	cycle[len(cycle)-1] = cycleStart // Close the loop
-
-	return cycle
-}
-
-// RemoveCircularFKsFromTables removes FK constraints that are part of circular dependencies
-// Returns modified table statements and a list of ALTER TABLE statements to add FKs later
-func (h *CircularFKHandler) RemoveCircularFKsFromTables(
-	tables map[string]*types.Statement,
-	cycles [][]string,
-) (map[string]*types.Statement, []*types.Statement, error) {
-
-	// Build set of tables involved in cycles
-	cycleTableSet := make(map[string]bool)
-	for _, cycle := range cycles {
-		for _, table := range cycle {
-			cycleTableSet[table] = true
-		}
-	}
-
-	modifiedTables := make(map[string]*types.Statement)
-	var alterStatements []*types.Statement
-
-	// Process each table
-	for tableName, stmt := range tables {
-		if !cycleTableSet[tableName] {
-			// Table not in any cycle - keep as is
-			modifiedTables[tableName] = stmt
-			continue
-		}
-
-		utils.GetDefaultLogger().WithPrefix("CIRCULAR-FK").Info("Removing circular FK constraints from table: %s", tableName)
-
-		// Get FK constraints for this table
-		constraints := h.tableConstraints[tableName]
-		if len(constraints) == 0 {
-			modifiedTables[tableName] = stmt
-			continue
-		}
-
-		// Separate circular FKs from non-circular FKs
-		var circularFKs []*ForeignKeyConstraint
-
-		for _, fk := range constraints {
-			isCircular := false
-			// Check if this FK is part of a cycle
-			for _, cycle := range cycles {
-				if h.fkInCycle(fk, cycle) {
-					isCircular = true
-					break
-				}
-			}
-
-			if isCircular {
-				circularFKs = append(circularFKs, fk)
-			}
-			// Non-circular FKs remain in the original CREATE TABLE
-		}
-
-		// Generate modified CREATE TABLE statement (without circular FKs)
-		modifiedStmt, err := h.removeConstraintsFromCreateTable(stmt, circularFKs)
+	edges := make(map[string][]string, len(keys))
+	for _, key := range keys {
+		tree, err := pg_query.Parse(tables[key].ConsolidatedSQL)
 		if err != nil {
-			return nil, nil, errors.NewError(
-				errors.ErrorCodeConsolidationFailed,
-				fmt.Sprintf("failed to remove constraints from %s: %v", tableName, err),
-				errors.SeverityError,
-				errors.CategoryConstraint,
-			).WithObject(tableName, "table").WithInnerError(err)
+			continue
 		}
-
-		modifiedTables[tableName] = modifiedStmt
-
-		// Generate ALTER TABLE statements for circular FKs
-		for _, fk := range circularFKs {
-			alterStmt := h.generateAlterTableAddConstraint(fk)
-			alterStatements = append(alterStatements, alterStmt)
-		}
-	}
-
-	utils.GetDefaultLogger().WithPrefix("CIRCULAR-FK").Info("Generated %d ALTER TABLE statements for circular FK constraints", len(alterStatements))
-	return modifiedTables, alterStatements, nil
-}
-
-// fkInCycle checks if a foreign key is part of a circular dependency cycle
-func (h *CircularFKHandler) fkInCycle(fk *ForeignKeyConstraint, cycle []string) bool {
-	// Check if both source and ref tables are in the cycle
-	sourceInCycle := false
-	refInCycle := false
-
-	for _, table := range cycle {
-		if table == fk.SourceTable {
-			sourceInCycle = true
-		}
-		if table == fk.RefTable {
-			refInCycle = true
-		}
-	}
-
-	return sourceInCycle && refInCycle
-}
-
-// removeConstraintsFromCreateTable removes specified FK constraints from a CREATE TABLE statement
-// using AST manipulation instead of fragile regex patterns.
-//
-// This implementation:
-// 1. Parses stmt.ParseTree to get the CREATE TABLE AST
-// 2. Filters out FK constraint nodes from TableElts
-// 3. Uses Deparse() to convert the modified AST back to SQL
-func (h *CircularFKHandler) removeConstraintsFromCreateTable(
-	stmt *types.Statement,
-	constraintsToRemove []*ForeignKeyConstraint,
-) (*types.Statement, error) {
-
-	// Build set of constraint names to remove (case-insensitive)
-	removeSet := make(map[string]bool)
-	for _, fk := range constraintsToRemove {
-		if fk.ConstraintName != "" {
-			removeSet[strings.ToLower(fk.ConstraintName)] = true
-		}
-	}
-
-	// Build set of source columns for inline FK removal
-	// Key format: "columnname:reftable" for matching
-	inlineRefsToRemove := make(map[string]bool)
-	for _, fk := range constraintsToRemove {
-		if len(fk.SourceColumns) == 1 {
-			key := strings.ToLower(fk.SourceColumns[0]) + ":" + strings.ToLower(fk.RefTable)
-			inlineRefsToRemove[key] = true
-		}
-	}
-
-	// Parse the statement AST
-	if stmt.ParseTree == nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeSyntaxError,
-			"statement has no parse tree",
-			errors.SeverityError,
-			errors.CategoryParsing,
-		).WithObject(stmt.ObjectName, string(stmt.ObjectType))
-	}
-
-	parseResult := stmt.ParseTree
-	if parseResult == nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeSyntaxError,
-			"invalid parse tree type",
-			errors.SeverityError,
-			errors.CategoryParsing,
-		).WithObject(stmt.ObjectName, string(stmt.ObjectType))
-	}
-
-	if len(parseResult.Stmts) == 0 {
-		return nil, errors.NewError(
-			errors.ErrorCodeSyntaxError,
-			"parse tree has no statements",
-			errors.SeverityError,
-			errors.CategoryParsing,
-		).WithObject(stmt.ObjectName, string(stmt.ObjectType))
-	}
-
-	rawStmt := parseResult.Stmts[0]
-	createStmt := rawStmt.Stmt.GetCreateStmt()
-	if createStmt == nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeSyntaxError,
-			"not a CREATE TABLE statement",
-			errors.SeverityError,
-			errors.CategoryParsing,
-		).WithObject(stmt.ObjectName, string(stmt.ObjectType))
-	}
-
-	// Filter TableElts to remove FK constraints
-	var filteredElts []*pg_query.Node
-
-	for _, tableElt := range createStmt.TableElts {
-		shouldKeep := true
-
-		// Check table-level constraints
-		if constraint := tableElt.GetConstraint(); constraint != nil {
-			if constraint.Contype == pg_query.ConstrType_CONSTR_FOREIGN {
-				// Table-level FK constraint - check if it should be removed
-				constraintName := strings.ToLower(constraint.Conname)
-				if removeSet[constraintName] {
-					shouldKeep = false
-					utils.GetDefaultLogger().WithPrefix("CIRCULAR-FK").Info("Removing table-level FK constraint: %s", constraint.Conname)
-				}
+		trees[key] = tree
+		uses[key] = foreignKeyUses(tree)
+		seen := make(map[string]bool)
+		for _, use := range uses[key] {
+			target, ok := tableOf[use.refTable]
+			if ok && target != key && !seen[target] {
+				seen[target] = true
+				edges[key] = append(edges[key], target)
 			}
 		}
+	}
 
-		// Check column-level inline REFERENCES constraints
-		if columnDef := tableElt.GetColumnDef(); columnDef != nil {
-			var filteredConstraints []*pg_query.Node
+	component := make(map[string]int)
+	for index, members := range stronglyConnectedComponents(keys, edges) {
+		if len(members) < 2 {
+			continue
+		}
+		for _, member := range members {
+			component[member] = index + 1
+		}
+	}
+	if len(component) == 0 {
+		return nil, nil
+	}
 
-			for _, colConstraintNode := range columnDef.Constraints {
-				colConstraint := colConstraintNode.GetConstraint()
-				if colConstraint != nil && colConstraint.Contype == pg_query.ConstrType_CONSTR_FOREIGN {
-					// Inline FK - check if it should be removed
-					colName := strings.ToLower(columnDef.Colname)
-					refTable := strings.ToLower(h.getTableName(colConstraint.Pktable))
-					key := colName + ":" + refTable
+	var deferred []string
+	for _, key := range keys {
+		if component[key] == 0 {
+			continue
+		}
+		var moved []foreignKeyUse
+		for _, use := range uses[key] {
+			if target, ok := tableOf[use.refTable]; ok && target != key && component[target] == component[key] {
+				moved = append(moved, use)
+			}
+		}
+		if len(moved) == 0 {
+			continue
+		}
+		sql, statements, err := removeForeignKeys(tables[key].ConsolidatedSQL, trees[key], moved)
+		if err != nil {
+			return nil, fmt.Errorf("defer the foreign keys of %s: %w", key, err)
+		}
+		deferred = append(deferred, statements...)
+		tables[key].ConsolidatedSQL = sql
 
-					if inlineRefsToRemove[key] {
-						utils.GetDefaultLogger().WithPrefix("CIRCULAR-FK").Info("Removing inline FK constraint from column: %s REFERENCES %s", columnDef.Colname, refTable)
-						// Don't add this constraint to filteredConstraints
-						continue
+		movedTables := make(map[string]bool, len(moved))
+		for _, use := range moved {
+			movedTables[use.refTable] = true
+		}
+		dropMovedReferences(tables[key], movedTables)
+	}
+	return deferred, nil
+}
+
+// foreignKeyUses lists the foreign keys the statements of a table result
+// add.
+func foreignKeyUses(tree *pg_query.ParseResult) []foreignKeyUse {
+	var uses []foreignKeyUse
+	add := func(statement int, constraint *pg_query.Constraint, column string) {
+		if constraint.GetContype() != pg_query.ConstrType_CONSTR_FOREIGN || constraint.GetPktable() == nil {
+			return
+		}
+		uses = append(uses, foreignKeyUse{
+			statement:  statement,
+			constraint: constraint,
+			column:     column,
+			refTable:   canonicalRelationName(rangeVarName(constraint.GetPktable())),
+		})
+	}
+	addColumn := func(statement int, column *pg_query.ColumnDef) {
+		for _, node := range column.GetConstraints() {
+			if constraint := node.GetConstraint(); constraint != nil {
+				add(statement, constraint, column.GetColname())
+			}
+		}
+	}
+	for i, raw := range tree.GetStmts() {
+		switch node := raw.GetStmt().GetNode().(type) {
+		case *pg_query.Node_CreateStmt:
+			for _, element := range node.CreateStmt.GetTableElts() {
+				if constraint := element.GetConstraint(); constraint != nil {
+					add(i, constraint, "")
+				}
+				if column := element.GetColumnDef(); column != nil {
+					addColumn(i, column)
+				}
+			}
+		case *pg_query.Node_AlterTableStmt:
+			for _, command := range node.AlterTableStmt.GetCmds() {
+				cmd := command.GetAlterTableCmd()
+				switch cmd.GetSubtype() {
+				case pg_query.AlterTableType_AT_AddConstraint:
+					if constraint := cmd.GetDef().GetConstraint(); constraint != nil {
+						add(i, constraint, "")
+					}
+				case pg_query.AlterTableType_AT_AddColumn:
+					if column := cmd.GetDef().GetColumnDef(); column != nil {
+						addColumn(i, column)
 					}
 				}
-				// Keep this constraint
-				filteredConstraints = append(filteredConstraints, colConstraintNode)
 			}
-
-			// Update column's constraints list
-			columnDef.Constraints = filteredConstraints
-		}
-
-		if shouldKeep {
-			filteredElts = append(filteredElts, tableElt)
 		}
 	}
-
-	// Update the CREATE TABLE statement with filtered elements
-	createStmt.TableElts = filteredElts
-
-	// Deparse the modified AST back to SQL
-	modifiedSQL, err := Deparse(parseResult)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeSQLGenerationFailed,
-			fmt.Sprintf("failed to deparse modified statement: %v", err),
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithObject(stmt.ObjectName, string(stmt.ObjectType)).WithInnerError(err)
-	}
-
-	// Create modified statement
-	modifiedStmt := *stmt
-	modifiedStmt.SQL = strings.TrimSpace(modifiedSQL)
-
-	return &modifiedStmt, nil
+	return uses
 }
 
-// generateAlterTableAddConstraint generates an ALTER TABLE ADD CONSTRAINT statement
-func (h *CircularFKHandler) generateAlterTableAddConstraint(fk *ForeignKeyConstraint) *types.Statement {
-	var sql strings.Builder
-
-	fmt.Fprintf(&sql, "ALTER TABLE %s\n", fk.SourceTable)
-	sql.WriteString("    ADD CONSTRAINT ")
-
-	// Generate constraint name if not present
-	constraintName := fk.ConstraintName
-	if constraintName == "" {
-		constraintName = fmt.Sprintf("fk_%s_%s",
-			strings.ReplaceAll(fk.SourceTable, ".", "_"),
-			strings.Join(fk.SourceColumns, "_"))
+// removeForeignKeys takes the given foreign keys out of the statements of
+// sql (parsed as tree) and returns the statements left, with only the
+// changed statements deparsed, and an ALTER TABLE ... ADD CONSTRAINT for
+// each foreign key taken out.
+func removeForeignKeys(sql string, tree *pg_query.ParseResult, moved []foreignKeyUse) (string, []string, error) {
+	isMoved := make(map[*pg_query.Constraint]bool, len(moved))
+	for _, use := range moved {
+		isMoved[use.constraint] = true
+	}
+	keepConstraints := func(nodes []*pg_query.Node) []*pg_query.Node {
+		kept := nodes[:0]
+		for _, node := range nodes {
+			if !isMoved[node.GetConstraint()] {
+				kept = append(kept, node)
+			}
+		}
+		return kept
 	}
 
-	sql.WriteString(constraintName)
-	sql.WriteString(" FOREIGN KEY (")
-	sql.WriteString(strings.Join(fk.SourceColumns, ", "))
-	sql.WriteString(")\n    REFERENCES ")
-	sql.WriteString(fk.RefTable)
+	var deferred []string
+	type edit struct {
+		start, end int
+		text       string
+	}
+	var edits []edit
+	for i, raw := range tree.GetStmts() {
+		var relation *pg_query.RangeVar
+		var statementUses []foreignKeyUse
+		for _, use := range moved {
+			if use.statement == i {
+				statementUses = append(statementUses, use)
+			}
+		}
+		if len(statementUses) == 0 {
+			continue
+		}
 
-	if len(fk.RefColumns) > 0 {
-		sql.WriteString(" (")
-		sql.WriteString(strings.Join(fk.RefColumns, ", "))
-		sql.WriteString(")")
+		empty := false
+		switch node := raw.GetStmt().GetNode().(type) {
+		case *pg_query.Node_CreateStmt:
+			relation = node.CreateStmt.GetRelation()
+			elements := node.CreateStmt.GetTableElts()[:0]
+			for _, element := range node.CreateStmt.GetTableElts() {
+				if isMoved[element.GetConstraint()] {
+					continue
+				}
+				if column := element.GetColumnDef(); column != nil {
+					column.Constraints = keepConstraints(column.GetConstraints())
+				}
+				elements = append(elements, element)
+			}
+			node.CreateStmt.TableElts = elements
+		case *pg_query.Node_AlterTableStmt:
+			relation = node.AlterTableStmt.GetRelation()
+			commands := node.AlterTableStmt.GetCmds()[:0]
+			for _, command := range node.AlterTableStmt.GetCmds() {
+				cmd := command.GetAlterTableCmd()
+				if cmd.GetSubtype() == pg_query.AlterTableType_AT_AddConstraint && isMoved[cmd.GetDef().GetConstraint()] {
+					continue
+				}
+				if column := cmd.GetDef().GetColumnDef(); column != nil {
+					column.Constraints = keepConstraints(column.GetConstraints())
+				}
+				commands = append(commands, command)
+			}
+			node.AlterTableStmt.Cmds = commands
+			empty = len(commands) == 0
+		}
+
+		for _, use := range statementUses {
+			alter, err := addForeignKeySQL(relation, use)
+			if err != nil {
+				return "", nil, err
+			}
+			deferred = append(deferred, alter)
+		}
+
+		start, end, ok := statementSpan(sql, raw)
+		if !ok {
+			return "", nil, fmt.Errorf("locate statement %d", i+1)
+		}
+		if empty {
+			edits = append(edits, edit{start: start, end: end})
+			continue
+		}
+		text, err := pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: raw.GetStmt()}}})
+		if err != nil {
+			return "", nil, fmt.Errorf("deparse statement %d without its cyclic foreign keys: %w", i+1, err)
+		}
+		edits = append(edits, edit{start: start, end: end, text: text + ";"})
 	}
 
-	if fk.OnDelete != "" && fk.OnDelete != "NO ACTION" {
-		sql.WriteString("\n    ON DELETE ")
-		sql.WriteString(fk.OnDelete)
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
+	for _, e := range edits {
+		sql = sql[:e.start] + e.text + sql[e.end:]
 	}
+	return strings.TrimSpace(sql), deferred, nil
+}
 
-	if fk.OnUpdate != "" && fk.OnUpdate != "NO ACTION" {
-		sql.WriteString("\n    ON UPDATE ")
-		sql.WriteString(fk.OnUpdate)
-	}
-
-	if fk.Deferrable {
-		sql.WriteString("\n    DEFERRABLE")
-		if fk.Initially != "" {
-			sql.WriteString(" INITIALLY ")
-			sql.WriteString(fk.Initially)
+// addForeignKeySQL is the ALTER TABLE ... ADD CONSTRAINT that adds a
+// foreign key taken out of a statement on relation. An inline REFERENCES
+// becomes a table constraint on its column, named as PostgreSQL names it
+// (table_column_fkey) unless it has a name of its own; a table constraint
+// without a name gets the same name from PostgreSQL when it is added.
+func addForeignKeySQL(relation *pg_query.RangeVar, use foreignKeyUse) (string, error) {
+	constraint := use.constraint
+	if use.column != "" {
+		constraint.FkAttrs = []*pg_query.Node{pg_query.MakeStrNode(use.column)}
+		if constraint.GetConname() == "" {
+			constraint.Conname = pgnames.MakeObjectName(relation.GetRelname(), use.column, "fkey")
 		}
 	}
-
-	sql.WriteString(";")
-
-	return &types.Statement{
-		SQL:        sql.String(),
-		ObjectType: types.TypeConstraint,
-		Operation:  types.OpAlter,
-		ObjectName: constraintName,
-		Category:   types.CategoryConstraints,
-		Comments:   []string{fmt.Sprintf("-- Circular FK constraint: %s -> %s", fk.SourceTable, fk.RefTable)},
+	target := &pg_query.RangeVar{
+		Schemaname:     relation.GetSchemaname(),
+		Relname:        relation.GetRelname(),
+		Inh:            true,
+		Relpersistence: "p",
 	}
+	stmt := &pg_query.Node{Node: &pg_query.Node_AlterTableStmt{AlterTableStmt: &pg_query.AlterTableStmt{
+		Relation: target,
+		Objtype:  pg_query.ObjectType_OBJECT_TABLE,
+		Cmds: []*pg_query.Node{{Node: &pg_query.Node_AlterTableCmd{AlterTableCmd: &pg_query.AlterTableCmd{
+			Subtype:  pg_query.AlterTableType_AT_AddConstraint,
+			Def:      &pg_query.Node{Node: &pg_query.Node_Constraint{Constraint: constraint}},
+			Behavior: pg_query.DropBehavior_DROP_RESTRICT,
+		}}}},
+	}}}
+	text, err := pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: stmt}}})
+	if err != nil {
+		return "", fmt.Errorf("deparse the deferred foreign key of %s: %w", relation.GetRelname(), err)
+	}
+	return text + ";", nil
+}
+
+// dropMovedReferences removes, from the dependencies of a result's
+// statements, the references to tables whose foreign keys were deferred, so
+// the ordering no longer waits for them.
+func dropMovedReferences(result *tracking.ConsolidationResult, movedTables map[string]bool) {
+	for i, stmt := range result.OriginalStatements {
+		var kept []string
+		for _, dep := range stmt.Dependencies {
+			if name, ok := strings.CutPrefix(dep, "REFERENCES:"); ok && movedTables[canonicalRelationName(name)] {
+				continue
+			}
+			kept = append(kept, dep)
+		}
+		result.OriginalStatements[i].Dependencies = kept
+	}
+}
+
+func rangeVarName(rv *pg_query.RangeVar) string {
+	if rv.GetSchemaname() != "" {
+		return rv.GetSchemaname() + "." + rv.GetRelname()
+	}
+	return rv.GetRelname()
+}
+
+// canonicalRelationName is a relation name in lower case with its schema,
+// public when it has none.
+func canonicalRelationName(name string) string {
+	name = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), `"`, ""))
+	if !strings.Contains(name, ".") {
+		name = "public." + name
+	}
+	return name
+}
+
+// stronglyConnectedComponents returns the strongly connected components of
+// the graph given by nodes and edges (Tarjan's algorithm), each listing its
+// members in the order of nodes.
+func stronglyConnectedComponents(nodes []string, edges map[string][]string) [][]string {
+	position := make(map[string]int, len(nodes))
+	for i, node := range nodes {
+		position[node] = i
+	}
+	index := make(map[string]int, len(nodes))
+	low := make(map[string]int, len(nodes))
+	onStack := make(map[string]bool, len(nodes))
+	var stack []string
+	var components [][]string
+	next := 0
+
+	var visit func(node string)
+	visit = func(node string) {
+		index[node] = next
+		low[node] = next
+		next++
+		stack = append(stack, node)
+		onStack[node] = true
+		for _, target := range edges[node] {
+			if _, known := position[target]; !known {
+				continue
+			}
+			if _, seen := index[target]; !seen {
+				visit(target)
+				low[node] = min(low[node], low[target])
+			} else if onStack[target] {
+				low[node] = min(low[node], index[target])
+			}
+		}
+		if low[node] != index[node] {
+			return
+		}
+		var component []string
+		for {
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			onStack[top] = false
+			component = append(component, top)
+			if top == node {
+				break
+			}
+		}
+		sort.Slice(component, func(i, j int) bool { return position[component[i]] < position[component[j]] })
+		components = append(components, component)
+	}
+	for _, node := range nodes {
+		if _, seen := index[node]; !seen {
+			visit(node)
+		}
+	}
+	return components
 }
