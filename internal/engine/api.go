@@ -312,34 +312,6 @@ func SquashDirectory(directory string, config *Config) (*SquashResult, error) {
 		config = DefaultConfig()
 	}
 
-	// Use streaming directory processing if enabled. This goes through the
-	// same fully-configured engine as every other path.
-	if config.EnableStreaming {
-		eng, err := NewEngine(config)
-		if err != nil {
-			return nil, err
-		}
-		defer func() {
-			_ = eng.Close()
-		}()
-
-		internalResult, err := eng.internal.SquashFromDirectory(directory)
-		if err != nil {
-			return nil, err
-		}
-
-		stats := eng.internal.GetStats()
-		return &SquashResult{
-			BaselineSQL:          internalResult.BaselineSQL,
-			Warnings:             internalResult.Warnings,
-			FilesProcessed:       countFilesInDir(directory),
-			ObjectsConsolidated:  int(stats.ConsolidationsApplied),
-			ProcessingTime:       formatDuration(stats.ProcessingTime),
-			Extensions:           internalResult.Extensions,
-			AuthCompatibilitySQL: internalResult.AuthCompatibilitySQL,
-		}, nil
-	}
-
 	// Load migrations from directory
 	migrations, err := loadMigrationsFromDir(directory)
 	if err != nil {
@@ -598,14 +570,6 @@ func loadAndParseMigrations(ctx context.Context, directory string) ([]*internal_
 	}
 
 	return migrations, nil
-}
-
-func countFilesInDir(directory string) int {
-	files, err := filepath.Glob(filepath.Join(directory, "*.sql"))
-	if err != nil {
-		return 0
-	}
-	return len(files)
 }
 
 func convertRedundancies(internal []internal_tracking.RedundancyReport) []Redundancy {

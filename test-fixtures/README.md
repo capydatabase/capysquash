@@ -127,6 +127,17 @@ schema, columns and function signatures of a renamed type, indexes, foreign
 keys, views, policies, triggers, comments, grants and data of a renamed
 table, and nothing of a schema dropped with CASCADE.
 
+### 9. Ordering: `sequence_defaults`, `dropped_referenced_table`, `capydb_backend`
+
+Test that the baseline creates what an object needs before the object:
+sequences before the tables whose defaults call them, tables after the tables
+their foreign keys reference, foreign keys between tables that reference each
+other once both exist, and a `DO` block's constraint after the column it
+checks; and that a dropped table takes only its own objects with it, not the
+tables that referenced it. `capydb_backend` is CapyDB's own control-plane
+history (see its README for provenance; `scripts/sync-capydb-backend-fixture.sh`
+refreshes it).
+
 ## Running Tests
 
 ### Unit Tests

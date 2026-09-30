@@ -150,6 +150,21 @@ func GetAllFixtures() []FixtureTest {
 			Path:        "drop_schema_recreate",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
+		{
+			Name:        "sequence_defaults",
+			Path:        "sequence_defaults",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "dropped_referenced_table",
+			Path:        "dropped_referenced_table",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
+			Name:        "capydb_backend",
+			Path:        "capydb_backend",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
 	}
 }
 

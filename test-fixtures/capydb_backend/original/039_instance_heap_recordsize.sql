@@ -1,0 +1,16 @@
+-- 039: record which ZFS recordsize each instance's heap dataset has been
+-- converged to.
+--
+-- `zfs set recordsize=` only governs blocks written after the change, so the
+-- 2026-08-18 fleet default change (8k -> 16k, chosen for lz4 3.31x vs 1.75x and
+-- the ~2x effective ARC that follows from ARC storing records compressed) does
+-- nothing for instances created before it. The opportunistic converter rewrites
+-- a heap in place on the next sleep, when the postmaster is already stopped.
+--
+-- This column is the converter's idempotence key: without it the worker would
+-- re-enqueue a conversion job after every single sleep for the lifetime of the
+-- instance, each one paying an SSH round trip only to be told "already
+-- converted". Empty string = never converged (the pre-existing fleet); the
+-- worker treats that as "needs conversion" the first time it sees the instance
+-- go to sleep with the feature configured.
+ALTER TABLE instances ADD COLUMN IF NOT EXISTS heap_recordsize text NOT NULL DEFAULT '';

@@ -2,6 +2,7 @@ package squasher
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -163,7 +164,7 @@ func (udr *UnifiedDependencyResolver) SortConsolidationResults(
 	}
 
 	// Step 2: Build dependency graph and topologically sort
-	sorted := udr.topologicalSortSQL(dependencies, category)
+	sorted := udr.topologicalSortSQL(dependencies, category, lifecycles)
 
 	// Step 3: Convert back to results array
 	var results []*tracking.ConsolidationResult
@@ -626,6 +627,11 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 			}
 		}
 
+		// A column default calling nextval('seq') needs the sequence; a
+		// sequence OWNED BY a column needs the table.
+		info.Dependencies = append(info.Dependencies, sequenceDependencies(sql)...)
+		info.Provides = append(info.Provides, sequenceProvisions(sql)...)
+
 		info.Provides = append(info.Provides, udr.extractTableProvisions(sql)...)
 		info.Provides = append(info.Provides, udr.extractSchemaProvisions(sql)...)
 		info.Provides = append(info.Provides, udr.extractTypeProvisions(sql)...)
@@ -676,9 +682,14 @@ func (udr *UnifiedDependencyResolver) analyzeSQLDependencies(
 	return info
 }
 
-// topologicalSortSQL performs dependency-based sorting for SQL consolidation results
-// Delegates to tracking.DependencyGraph for topological sorting to maintain single source of truth
-func (udr *UnifiedDependencyResolver) topologicalSortSQL(dependencies map[string]*SQLDependencyInfo, category types.Category) []string {
+// topologicalSortSQL orders the consolidation results of a category so that
+// each comes after the results providing what it depends on. Results no
+// dependency orders keep the order of the history (where the object is
+// created), which is valid by construction; a dependency the analysis misses
+// is then still met whenever the history met it. A cycle does not throw the
+// whole category out of order: the result the history created first among
+// those left is emitted and the sort goes on.
+func (udr *UnifiedDependencyResolver) topologicalSortSQL(dependencies map[string]*SQLDependencyInfo, category types.Category, lifecycles map[string]*tracking.ObjectLifecycle) []string {
 	// Separate RequiredFirst and RequiredLast items for special handling
 	var requiredFirst []string
 	var requiredLast []string
@@ -696,37 +707,29 @@ func (udr *UnifiedDependencyResolver) topologicalSortSQL(dependencies map[string
 	sort.Strings(requiredFirst)
 	sort.Strings(requiredLast)
 
-	// Build a tracking.DependencyGraph for normal dependencies
-	depGraph := tracking.NewDependencyGraph()
-	keyToObjectID := make(map[string]tracking.ObjectID)
-	objectIDToKey := make(map[tracking.ObjectID]string)
-
-	// Add all nodes
+	keys := make([]string, 0, len(normalDeps))
 	for key := range normalDeps {
-		// Create ObjectID using the key as the name
-		objID := tracking.ObjectID{
-			Type: types.TypeUnknown, // Type doesn't matter for ordering
-			Name: key,
-		}
-		depGraph.AddNode(objID)
-		keyToObjectID[key] = objID
-		objectIDToKey[objID] = key
+		keys = append(keys, key)
 	}
-
-	// Build edges based on dependencies
-	for key, info := range normalDeps {
-		fromID := keyToObjectID[key]
-		for _, dep := range info.Dependencies {
-			// Find if any other object provides this dependency
-			for otherKey, otherInfo := range normalDeps {
-				if otherKey == key {
+	sort.Slice(keys, func(i, j int) bool {
+		return historyPositionLess(lifecycles[keys[i]], lifecycles[keys[j]], keys[i], keys[j])
+	})
+	// providers[key] holds the results key depends on, dependents the reverse.
+	providers := make(map[string]map[string]bool, len(keys))
+	dependents := make(map[string][]string, len(keys))
+	for _, key := range keys {
+		providers[key] = make(map[string]bool)
+	}
+	for _, key := range keys {
+		for _, dep := range normalDeps[key].Dependencies {
+			for _, otherKey := range keys {
+				if otherKey == key || providers[key][otherKey] {
 					continue
 				}
-				for _, provides := range otherInfo.Provides {
+				for _, provides := range normalDeps[otherKey].Provides {
 					if udr.dependencyMatches(dep, provides) {
-						// otherKey must come before key
-						toID := keyToObjectID[otherKey]
-						depGraph.AddEdge(fromID, toID)
+						providers[key][otherKey] = true
+						dependents[otherKey] = append(dependents[otherKey], key)
 						break
 					}
 				}
@@ -734,27 +737,36 @@ func (udr *UnifiedDependencyResolver) topologicalSortSQL(dependencies map[string
 		}
 	}
 
-	// Perform topological sort using tracking.DependencyGraph
-	sortedIDs, err := depGraph.TopologicalSort()
-	var normalResult []string
-
-	if err != nil {
-		// Cycles detected - fall back to best-effort ordering
-		utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Circular dependencies in category %s, using fallback ordering", category)
-		for key := range normalDeps {
-			normalResult = append(normalResult, key)
-		}
-		// Sort alphabetically for stability
-		sort.Strings(normalResult)
-	} else {
-		// Convert ObjectIDs back to string keys
-		for _, objID := range sortedIDs {
-			if key, exists := objectIDToKey[objID]; exists {
-				normalResult = append(normalResult, key)
+	// Kahn's algorithm, always taking the ready result the history created
+	// first.
+	emitted := make(map[string]bool, len(keys))
+	pending := make(map[string]int, len(keys))
+	for _, key := range keys {
+		pending[key] = len(providers[key])
+	}
+	normalResult := make([]string, 0, len(keys))
+	for len(normalResult) < len(keys) {
+		next := ""
+		for _, key := range keys {
+			if !emitted[key] && pending[key] == 0 {
+				next = key
+				break
 			}
 		}
+		if next == "" {
+			// Every result left waits on another. Break a cycle that
+			// waits on nothing outside itself, at its result the history
+			// created first; the results waiting on the cycle stay behind
+			// it.
+			next = cycleBreakingResult(keys, emitted, providers)
+			utils.GetDefaultLogger().WithPrefix("DEP-RESOLVER").Info("Dependency cycle in category %s: emitting %s in history order", category, next)
+		}
+		emitted[next] = true
+		normalResult = append(normalResult, next)
+		for _, dependent := range dependents[next] {
+			pending[dependent]--
+		}
 	}
-
 	// Combine: RequiredFirst + Normal + RequiredLast
 	result := make([]string, 0, len(dependencies))
 	result = append(result, requiredFirst...)
@@ -1788,6 +1800,10 @@ func (udr *UnifiedDependencyResolver) extractTypeProvisions(sql string) []string
 
 // dependencyMatches checks if a dependency requirement matches a provision
 func (udr *UnifiedDependencyResolver) dependencyMatches(dependency, provision string) bool {
+	// Sequences are named the same way on both sides.
+	if strings.HasPrefix(dependency, "sequence:") || strings.HasPrefix(provision, "sequence:") {
+		return dependency == provision
+	}
 	// Handle different types of dependencies
 	if strings.HasPrefix(dependency, "schema:") && strings.HasPrefix(provision, "schema:") {
 		return dependency == provision
@@ -1927,4 +1943,84 @@ func renamedTableProvisions(stmt types.Statement) []string {
 		return []string{parser.QualifiedTableName(n.AlterObjectSchemaStmt.GetNewschema(), n.AlterObjectSchemaStmt.GetRelation().GetRelname())}
 	}
 	return nil
+}
+
+// historyPositionLess orders two lifecycles by where the history creates
+// them: the last CREATE (a table dropped and created again belongs where it
+// is created again), or the first statement of an object never created.
+// Lifecycles the history does not place, and ties, fall back to the keys.
+func historyPositionLess(left, right *tracking.ObjectLifecycle, leftKey, rightKey string) bool {
+	leftEvent, leftOK := historyPosition(left)
+	rightEvent, rightOK := historyPosition(right)
+	if leftOK != rightOK {
+		return leftOK
+	}
+	if leftOK {
+		if leftEvent.Migration != rightEvent.Migration {
+			return leftEvent.Migration < rightEvent.Migration
+		}
+		if leftEvent.Sequence != rightEvent.Sequence {
+			return leftEvent.Sequence < rightEvent.Sequence
+		}
+	}
+	return leftKey < rightKey
+}
+
+func historyPosition(lifecycle *tracking.ObjectLifecycle) (tracking.LifecycleEvent, bool) {
+	if lifecycle == nil || len(lifecycle.History) == 0 {
+		return tracking.LifecycleEvent{}, false
+	}
+	position := lifecycle.History[0]
+	for _, event := range lifecycle.History {
+		if event.Operation == types.OpCreate {
+			position = event
+		}
+	}
+	return position, true
+}
+
+// cycleBreakingResult picks the result to emit when every result left waits
+// on another: the first, in the order of keys, of a cycle (strongly
+// connected component) whose results wait on nothing outside it.
+func cycleBreakingResult(keys []string, emitted map[string]bool, providers map[string]map[string]bool) string {
+	var remaining []string
+	edges := make(map[string][]string)
+	for _, key := range keys {
+		if emitted[key] {
+			continue
+		}
+		remaining = append(remaining, key)
+		for provider := range providers[key] {
+			if !emitted[provider] {
+				edges[key] = append(edges[key], provider)
+			}
+		}
+		sort.Strings(edges[key])
+	}
+	components := stronglyConnectedComponents(remaining, edges)
+	componentOf := make(map[string]int, len(remaining))
+	for i, members := range components {
+		for _, member := range members {
+			componentOf[member] = i
+		}
+	}
+	best := ""
+	for i, members := range components {
+		closed := true
+		for _, member := range members {
+			for _, provider := range edges[member] {
+				if componentOf[provider] != i {
+					closed = false
+				}
+			}
+		}
+		if !closed {
+			continue
+		}
+		// members are in the order of keys: the first is the earliest.
+		if best == "" || slices.Index(keys, members[0]) < slices.Index(keys, best) {
+			best = members[0]
+		}
+	}
+	return best
 }

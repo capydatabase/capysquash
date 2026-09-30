@@ -6,7 +6,6 @@ import (
 	stderrors "errors"
 	"fmt"
 	"maps"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -373,7 +372,7 @@ func newEngineInternal(engineCfg EngineConfig) (*Engine, error) {
 
 	if enableStreaming {
 		memManager = performance.NewMemoryManager(memoryLimitMB)
-		streamingTracker = tracking.NewStreamingTracker(batchSize, workerCount, memManager)
+		streamingTracker = tracking.NewStreamingTracker()
 		batchProcessor = performance.NewBatchProcessor(batchSize, memoryLimitMB/4, memManager)
 	}
 
@@ -1245,206 +1244,6 @@ func (e *Engine) SquashStreaming(migrations map[int]string) (*SquashResult, erro
 	}, nil
 }
 
-// SquashFromDirectory processes migrations from a directory using streaming
-func (e *Engine) SquashFromDirectory(dir string) (*SquashResult, error) {
-	if !e.enableStreaming {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			"streaming not enabled for this engine instance",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		)
-	}
-
-	startTime := time.Now()
-
-	ctx := e.ctx
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	e.updatePhase("Initializing")
-	e.logger.Info("Starting streaming squash process from directory: %s", dir)
-
-	// Same contract as SquashStreaming: post-flight validation does not run in
-	// streaming mode, so record that in the result instead of skipping silently.
-	e.warnings = append(e.warnings,
-		"Streaming mode: post-flight validation is not executed (run 'capysquash lint' or a non-streaming squash to validate the output)")
-
-	// Phase 0: Plugin initialization + extension analysis. Directory streaming
-	// must run the same plugin enrichment and extension detection as the
-	// in-memory paths, so load file contents once for analysis.
-	migrationContents, err := loadMigrationContentsFromDir(dir)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("failed to read migration files from directory %s", dir),
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err)
-	}
-	extAnalysis := e.prepareMigrationEnvironment(ctx, migrationContents)
-
-	// The streaming tracker may see the files in any order, but privileges
-	// and the rewrite to final names depend on it: record the privileges and
-	// rewrite each file from the loaded contents, in sequence order, and let
-	// the tracker see each file's rewritten statements.
-	files, err := migrationFilesInDir(dir)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeValidationFailed,
-			fmt.Sprintf("failed to read migration files from directory %s", dir),
-			errors.SeverityError,
-			errors.CategoryValidation,
-		).WithInnerError(err)
-	}
-	parsed := make([]*types.Migration, len(files))
-	for i, path := range files {
-		migration, err := parser.ParseMigration(migrationContents[i], path)
-		if err != nil {
-			return nil, errors.NewError(
-				errors.ErrorCodeSyntaxError,
-				fmt.Sprintf("parse migration %s", path),
-				errors.SeverityError,
-				errors.CategoryParsing,
-			).WithInnerError(err)
-		}
-		parsed[i] = migration
-		e.normalizer.Observe(privileges.Filter(migration.Statements))
-	}
-	e.normalizer.Finish()
-	trackedByFile := make(map[string][]types.Statement, len(files))
-	for i, path := range files {
-		tracked, err := e.trackedStatements(parsed[i])
-		if err != nil {
-			return nil, err
-		}
-		trackedByFile[path] = tracked.Statements
-	}
-	e.recordNormalizerWarnings()
-	e.streamingTracker.SetStatementFilter(func(statements []types.Statement) []types.Statement {
-		if len(statements) > 0 {
-			if tracked, ok := trackedByFile[statements[0].Filename]; ok {
-				return tracked
-			}
-		}
-		return privileges.Filter(statements)
-	})
-
-	// Phase 1: Stream parse and track migrations
-	e.updatePhase("Parsing and Tracking")
-	if err := e.streamParseAndTrack(ctx, dir); err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeConsolidationFailed,
-			"stream parse and track",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err)
-	}
-
-	// Get the underlying tracker from streaming tracker
-	tracker := e.streamingTracker.GetTracker()
-
-	// Update engine's tracker to use the streaming tracker's results
-	e.tracker = tracker
-
-	// Phase 2: Analyze dependencies (using existing engine logic)
-	e.updatePhase("Analyzing Dependencies")
-	if err := e.analyzeDependenciesAndRisks(ctx); err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeDependencyError,
-			"analyze dependencies",
-			errors.SeverityError,
-			errors.CategoryDependency,
-		).WithInnerError(err)
-	}
-
-	// Phase 3: Apply consolidation rules (using existing engine logic)
-	e.updatePhase("Applying Consolidations")
-	consolidatedObjects, err := e.applyConsolidationRules(ctx)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeConsolidationFailed,
-			"apply consolidation rules",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err)
-	}
-
-	e.stats.ConsolidationsApplied = int64(len(consolidatedObjects))
-
-	// Phase 4: Generate final SQL (using existing engine logic)
-	e.updatePhase("Generating SQL")
-	finalSQL, err := e.generateOptimizedSQL(ctx, consolidatedObjects)
-	if err != nil {
-		return nil, errors.NewError(
-			errors.ErrorCodeSQLGenerationFailed,
-			"generate final SQL",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err)
-	}
-
-	// Update final statistics
-	e.stats.ProcessingTime = time.Since(startTime)
-	e.updatePhase("Completed")
-
-	if e.progressCb != nil && e.enableProgressTrack {
-		e.progressCb(e.stats.MigrationsProcessed, e.stats.TotalMigrations, "Completed")
-	}
-
-	e.logger.Info("Streaming squash completed in %v", e.stats.ProcessingTime)
-	return &SquashResult{
-		BaselineSQL:          finalSQL,
-		Warnings:             e.warnings,
-		AuthCompatibilitySQL: e.GetAuthCompatibilitySQL(),
-		Extensions:           extAnalysis.RequiredExtensions,
-	}, nil
-}
-
-// loadMigrationContentsFromDir reads the contents of all .sql files in a
-// directory (sorted by filename) keyed by their sequence position. It is used
-// by directory streaming to run plugin detection and extension analysis.
-func loadMigrationContentsFromDir(dir string) (map[int]string, error) {
-	files, err := migrationFilesInDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	contents := make(map[int]string, len(files))
-	for i, path := range files {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
-		}
-		contents[i] = string(data)
-	}
-
-	return contents, nil
-}
-
-// migrationFilesInDir lists the .sql files of a directory in name order, as
-// paths joined to dir the way the streaming processor spells them.
-func migrationFilesInDir(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []string
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".sql") {
-			continue
-		}
-		files = append(files, entry.Name())
-	}
-	sort.Strings(files)
-	for i, name := range files {
-		files[i] = filepath.Join(dir, name)
-	}
-	return files, nil
-}
-
 // prepareMigrationEnvironment initializes plugins and analyzes required
 // extensions exactly once per engine instance. It is shared by the regular and
 // streaming squash paths so streaming runs get the same plugin enrichment and
@@ -1928,6 +1727,24 @@ func (e *Engine) applyConsolidationRules(ctx context.Context) (map[string]*track
 		}
 	}
 
+	// The tables the baseline keeps must not reference the tables it leaves
+	// out.
+	for key, result := range consolidatedObjects {
+		if lifecycle := e.lifecycles[key]; lifecycle == nil || lifecycle.Type != types.TypeTable {
+			continue
+		}
+		stripped, err := stripForeignKeysToDroppedTables(result.ConsolidatedSQL, droppedTables)
+		if err != nil {
+			return nil, errors.NewError(
+				errors.ErrorCodeConsolidationFailed,
+				fmt.Sprintf("remove the foreign keys of %s to dropped tables", key),
+				errors.SeverityError,
+				errors.CategoryConsolidation,
+			).WithInnerError(err)
+		}
+		result.ConsolidatedSQL = stripped
+	}
+
 	e.logger.Info("Successfully consolidated %d objects", len(consolidatedObjects))
 	return consolidatedObjects, nil
 }
@@ -1973,6 +1790,23 @@ func renamedTableResult(lifecycle *tracking.ObjectLifecycle) *tracking.Consolida
 		Optimizations:      []string{"renamed_table_in_history_order"},
 		RiskLevel:          tracking.RiskLevelLow,
 	}
+}
+
+// isDroppedTableName reports whether name (bare or schema-qualified) names a
+// table the history ends up dropping.
+func isDroppedTableName(droppedTables map[string]struct{}, name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	if _, ok := droppedTables[name]; ok {
+		return true
+	}
+	if !strings.Contains(name, ".") {
+		_, ok := droppedTables["public."+name]
+		return ok
+	}
+	return false
 }
 
 func lifecycleDependsOnDroppedTables(lifecycle *tracking.ObjectLifecycle, droppedTables map[string]struct{}) bool {
@@ -2062,9 +1896,14 @@ func lifecycleDependsOnDroppedTables(lifecycle *tracking.ObjectLifecycle, droppe
 		return strings.TrimSpace(strings.Trim(d, `"`))
 	}
 
-	// Primary check: statement dependency list.
+	// Primary check: statement dependency list. A table's foreign key to a
+	// dropped table does not take the table with it: DROP TABLE ... CASCADE
+	// drops the constraint and keeps the referencing table.
 	for _, event := range lifecycle.History {
 		for _, dep := range event.Statement.Dependencies {
+			if lifecycle.Type == types.TypeTable && strings.HasPrefix(dep, "REFERENCES:") {
+				continue
+			}
 			if matchesDroppedTable(normalizeDependency(dep)) {
 				return true
 			}
@@ -2319,79 +2158,18 @@ $$`)
 	// Initialize unified dependency resolver
 	unifiedResolver := NewUnifiedDependencyResolver()
 
-	// ================================================================
-	// CIRCULAR FK DETECTION AND RESOLUTION
-	// ================================================================
-	// Before generating Foundation objects (tables), check for circular
-	// foreign key dependencies and handle them with 2-phase approach:
-	// 1. CREATE TABLE without circular FKs
-	// 2. ALTER TABLE ADD CONSTRAINT for circular FKs (after all tables exist)
-	// ================================================================
-	var circularFKAlterStatements []*types.Statement
-
-	// Extract table statements from Foundation category
+	// Foreign keys between tables that end up needing each other are added
+	// once every table exists, in the constraints section.
 	foundationObjects := e.getObjectsByCategoryAsMap(consolidatedObjects, types.CategoryFoundation)
-	tableStatements := make(map[string]*types.Statement)
+	foundationTables := make(map[string]*tracking.ConsolidationResult)
 	for key, result := range foundationObjects {
 		if lifecycle, exists := e.lifecycles[key]; exists && lifecycle.Type == types.TypeTable {
-			// Use consolidated SQL for circular FK detection (includes integrated constraints)
-			// This is critical because ALTER TABLE ADD CONSTRAINT may have been integrated into CREATE TABLE
-			if result.ConsolidatedSQL != "" {
-				// Create a statement from the consolidated SQL
-				consolidatedStmt := &types.Statement{
-					SQL:        result.ConsolidatedSQL,
-					ObjectType: types.TypeTable,
-					ObjectName: lifecycle.Name,
-					Schema:     lifecycle.Schema,
-					Operation:  types.OpCreate,
-				}
-				// Parse the consolidated SQL to get AST for FK extraction
-				if parseResult, err := pg_query.Parse(result.ConsolidatedSQL); err == nil {
-					consolidatedStmt.ParseTree = parseResult
-				}
-				tableStatements[lifecycle.Name] = consolidatedStmt
-			}
+			foundationTables[key] = result
 		}
 	}
-
-	if len(tableStatements) > 0 {
-		e.logger.Info("Checking %d tables for circular FK dependencies", len(tableStatements))
-		circularFKHandler := NewCircularFKHandler()
-
-		// Detect circular dependencies
-		cycles := circularFKHandler.DetectCircularDependencies(tableStatements)
-
-		if len(cycles) > 0 {
-			e.logger.Info("☑ Detected %d circular FK dependency chains - applying 2-phase constraint generation", len(cycles))
-
-			// Remove circular FKs from tables and generate ALTER statements
-			modifiedTables, alterStmts, err := circularFKHandler.RemoveCircularFKsFromTables(tableStatements, cycles)
-			if err != nil {
-				e.warnings = append(e.warnings, fmt.Sprintf("Circular FK handling warning: %v", err))
-			} else {
-				// Update consolidation results with modified table statements
-				for tableName, modifiedStmt := range modifiedTables {
-					// Find the consolidation result for this table
-					for key := range foundationObjects {
-						if lifecycle, exists := e.lifecycles[key]; exists && lifecycle.Name == tableName {
-							// Update BOTH maps with the modified version (circular FKs removed)
-							foundationObjects[key].ConsolidatedSQL = modifiedStmt.SQL
-							foundationObjects[key].Warnings = append(foundationObjects[key].Warnings, "Circular FK constraints removed and deferred to ALTER TABLE")
-							consolidatedObjects[key].ConsolidatedSQL = modifiedStmt.SQL
-							consolidatedObjects[key].Warnings = append(consolidatedObjects[key].Warnings, "Circular FK constraints removed and deferred to ALTER TABLE")
-							e.logger.Info("Updated table %s with circular FKs removed", tableName)
-							break
-						}
-					}
-				}
-
-				// Store ALTER statements for later insertion
-				circularFKAlterStatements = alterStmts
-				e.logger.Info("Generated %d ALTER TABLE statements for circular FK constraints", len(alterStmts))
-			}
-		} else {
-			e.logger.Info("☑ No circular FK dependencies detected - all tables can be created directly")
-		}
+	circularFKAlterStatements, err := deferCyclicForeignKeys(foundationTables, e.lifecycles)
+	if err != nil {
+		return "", err
 	}
 
 	// Some DROP POLICY statements are occasionally mis-categorized into the foundation bucket
@@ -2408,7 +2186,7 @@ $$`)
 	// constraints category instead.
 	deferredTableAlters := make(map[string]*tracking.ConsolidationResult)
 	handledTableAlterKeys := make(map[string]struct{})
-	pendingTableAlters := make(map[*tracking.ConsolidationResult][]string)
+	pendingTableAlters := make(map[*tracking.ConsolidationResult][]positionedSQL)
 	tableAlterKeys := make([]string, 0, len(consolidatedObjects))
 	for key := range consolidatedObjects {
 		tableAlterKeys = append(tableAlterKeys, key)
@@ -2444,6 +2222,10 @@ $$`)
 		remaining := make([]string, 0, len(alterStatements))
 		for _, alterStatement := range alterStatements {
 			alterSQL := terminateSQLStatement(alterStatement.SQL)
+			// An alteration of a table the history drops goes with it.
+			if isDroppedTableName(droppedTablesForGeneration, alterStatement.ObjectName) {
+				continue
+			}
 			tableResult := findTableConsolidationResult(foundationObjects, e.lifecycles, alterStatement.ObjectName)
 			if tableResult == nil {
 				remaining = append(remaining, alterSQL)
@@ -2456,12 +2238,15 @@ $$`)
 
 			prospectiveTableSQL := tableResult.ConsolidatedSQL
 			if pending := pendingTableAlters[tableResult]; len(pending) > 0 {
-				prospectiveTableSQL, _ = insertSQLAfterCreateTable(prospectiveTableSQL, strings.Join(pending, "\n"))
+				prospectiveTableSQL = insertSQLAtHistoryPositions(tableResult, pending)
 			}
 			if tableAlterAlreadyApplied(prospectiveTableSQL, alterStatement) {
 				continue
 			}
-			pendingTableAlters[tableResult] = append(pendingTableAlters[tableResult], alterSQL)
+			pendingTableAlters[tableResult] = append(pendingTableAlters[tableResult], positionedSQL{
+				sql:      alterSQL,
+				position: lifecycleStatementPosition(lifecycle),
+			})
 		}
 
 		if len(remaining) > 0 {
@@ -2471,10 +2256,7 @@ $$`)
 		}
 	}
 	for tableResult, alterations := range pendingTableAlters {
-		updatedSQL, inserted := insertSQLAfterCreateTable(tableResult.ConsolidatedSQL, strings.Join(alterations, "\n"))
-		if inserted {
-			tableResult.ConsolidatedSQL = updatedSQL
-		}
+		tableResult.ConsolidatedSQL = insertSQLAtHistoryPositions(tableResult, alterations)
 	}
 
 	for _, category := range categories {
@@ -2557,16 +2339,11 @@ $$`)
 		// CRITICAL: After Foundation objects, add circular FK ALTER statements to Constraints category
 		// This ensures tables are created first, then circular FK constraints are added
 		if category == types.CategoryConstraints && len(circularFKAlterStatements) > 0 {
-			e.sqlBuilder.NL().Comment("Circular FK constraints (added after all tables exist)").NL()
-			for _, alterStmt := range circularFKAlterStatements {
-				// Add comment from statement
-				for _, comment := range alterStmt.Comments {
-					e.sqlBuilder.Comment(strings.TrimPrefix(comment, "-- ")).NL()
-				}
-				e.sqlBuilder.Statement(alterStmt.SQL)
+			e.sqlBuilder.NL().Comment("Foreign keys between tables that reference each other (added once every table exists)").NL()
+			for _, alterSQL := range circularFKAlterStatements {
+				e.sqlBuilder.Statement(alterSQL)
 				e.sqlBuilder.NL().NL()
 			}
-			e.logger.Info("☑ Added %d circular FK ALTER TABLE statements to Constraints category", len(circularFKAlterStatements))
 		}
 	}
 
@@ -3082,6 +2859,17 @@ func (e *Engine) generateDataOperationsSQL() (string, error) {
 				shouldSkip = true
 			}
 
+			// A DO block that alters a dropped table (a conditional ADD
+			// CONSTRAINT) has no table to alter in the baseline.
+			if !shouldSkip {
+				for _, ddl := range parser.ExtractStaticDDLFromDoBlock(dataOp.Statement.SQL) {
+					if alters, ok := parseStaticTableAlterSQL(ddl); ok &&
+						slices.ContainsFunc(alters, func(alter types.Statement) bool { return matchesDroppedTable(alter.ObjectName) }) {
+						shouldSkip = true
+					}
+				}
+			}
+
 			if shouldSkip {
 				skippedOps++
 				e.logger.Info("[DATA-OPS] Skipping %s on %s because it references a dropped table", dataOp.Operation, dataOp.Table)
@@ -3552,42 +3340,6 @@ func schemaHasObjects(schema *metadata.SchemaMetadata) bool {
 		len(schema.Functions)+len(schema.Sequences)+len(schema.Types) > 0
 }
 
-// streamParseAndTrack streams parsing and tracking from directory
-func (e *Engine) streamParseAndTrack(ctx context.Context, dir string) error {
-	// Set up progress tracking
-	if e.enableProgressTrack {
-		e.streamingTracker.SetProgressCallback(func(processed, total int64, throughput float64) {
-			e.mu.Lock()
-			e.stats.MigrationsProcessed = processed
-			e.mu.Unlock()
-
-			if e.progressCb != nil {
-				e.progressCb(processed, total, e.stats.Phase)
-			}
-		})
-	}
-
-	// Process directory with streaming
-	if err := e.streamingTracker.ProcessDirectory(dir); err != nil {
-		return errors.NewError(
-			errors.ErrorCodeConsolidationFailed,
-			"streaming tracker failed",
-			errors.SeverityError,
-			errors.CategoryConsolidation,
-		).WithInnerError(err)
-	}
-
-	// Update statistics
-	streamStats, _ := e.streamingTracker.GetCombinedStats()
-	e.mu.Lock()
-	e.stats.MigrationsProcessed = streamStats.MigrationsProcessed
-	e.stats.ObjectsTracked = streamStats.ObjectsTracked
-	e.stats.PeakMemoryUsage = e.memManager.GetMemoryStats().PeakMemoryBytes
-	e.mu.Unlock()
-
-	return nil
-}
-
 // streamProcessMigrations processes migrations using batching for memory efficiency
 func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int]string) error {
 	migrationFiles := make([]*performance.MigrationFile, 0, len(migrations))
@@ -3602,7 +3354,7 @@ func (e *Engine) streamProcessMigrations(ctx context.Context, migrations map[int
 	for _, sequence := range sequences {
 		content := migrations[sequence]
 		migrationFile := &performance.MigrationFile{
-			Path:     fmt.Sprintf("migration_%d.sql", sequence),
+			Path:     fmt.Sprintf("migration_%05d", sequence),
 			Content:  []byte(content),
 			Sequence: sequence,
 			Size:     int64(len(content)),
@@ -3762,27 +3514,4 @@ func OptimizedSquashForLargeDatasets(cfg *config.Config, migrations map[int]stri
 	defer func() { _ = engine.Close() }()
 
 	return engine.SquashStreaming(migrations)
-}
-
-// OptimizedSquashFromDirectory provides a high-level interface for directory processing
-func OptimizedSquashFromDirectory(cfg *config.Config, dir string, memoryLimitMB int) (*SquashResult, error) {
-	engineConfig := EngineConfig{
-		Config:              cfg,
-		EnableStreaming:     true,
-		BatchSize:           50,
-		WorkerCount:         2, // Conservative for directory processing
-		MemoryLimitMB:       memoryLimitMB,
-		EnableProgressTrack: true,
-		ProgressCallback: func(processed, total int64, phase string) {
-			utils.GetDefaultLogger().WithPrefix("ENGINE").Info("Processing: %d files - %s", processed, phase)
-		},
-	}
-
-	engine, err := NewEngine(engineConfig)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = engine.Close() }()
-
-	return engine.SquashFromDirectory(dir)
 }

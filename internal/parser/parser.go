@@ -964,6 +964,23 @@ func extractAlterTableConstraints(alterStmt *pg_query.AlterTableStmt, normalizer
 				if columnDef := alterCmd.Def.GetColumnDef(); columnDef != nil {
 					columnName := normalizer.NormalizeIdentifier(columnDef.Colname)
 					constraints = append(constraints, fmt.Sprintf("COLUMN:%s", columnName))
+					// The column's type, when it is not built in, has to
+					// exist first, as for a column of CREATE TABLE.
+					if columnDef.TypeName != nil {
+						if typeName := extractTypeNameFromTypeName(columnDef.TypeName, normalizer); typeName != "" && !isBuiltInType(typeName) {
+							constraints = append(constraints, typeName)
+						}
+					}
+					// The column's inline REFERENCES needs the referenced
+					// table, like a foreign key added as a constraint.
+					for _, node := range columnDef.Constraints {
+						if constraint := node.GetConstraint(); constraint != nil &&
+							constraint.Contype == pg_query.ConstrType_CONSTR_FOREIGN && constraint.Pktable != nil {
+							if refTableName := getTableNameWithNormalization(constraint.Pktable, normalizer); refTableName != "" {
+								constraints = append(constraints, fmt.Sprintf("REFERENCES:%s", refTableName))
+							}
+						}
+					}
 				}
 			}
 		}

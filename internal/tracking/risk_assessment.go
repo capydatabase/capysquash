@@ -532,6 +532,26 @@ func (ut *UnifiedTracker) GetStatistics() TrackerStats {
 	return stats
 }
 
+// hasTypeNamed reports whether the history creates a type (enum, domain,
+// composite or other) named name, in schema or tracked without one.
+func (ut *UnifiedTracker) hasTypeNamed(schema, name string) bool {
+	if name == "" {
+		return false
+	}
+	candidates := []string{name}
+	if schema != "" {
+		candidates = append(candidates, schema+"."+name)
+	}
+	for _, kind := range []types.ObjectType{types.TypeEnum, types.TypeDomain, types.TypeComposite, types.TypeType} {
+		for _, candidate := range candidates {
+			if _, exists := ut.objects[makeKey(candidate, kind)]; exists {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ValidateConsistency checks for consistency issues in tracking
 func (ut *UnifiedTracker) ValidateConsistency() []string {
 	var warnings []string
@@ -601,6 +621,14 @@ func (ut *UnifiedTracker) ValidateConsistency() []string {
 						}
 					}
 				}
+			}
+
+			// A column's type is recorded by name only, before the kind of
+			// type is known (the parser cannot tell an enum from a domain or
+			// a table): it exists when an enum, domain, composite or other
+			// type of that name does, in its schema or unqualified.
+			if !depExists {
+				depExists = ut.hasTypeNamed(dep.DependsOn.Schema, dep.DependsOn.Name)
 			}
 
 			// A reference to a function names no signature (and, from a trigger
