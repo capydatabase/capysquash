@@ -138,6 +138,14 @@ tables that referenced it. `capydb_backend` is CapyDB's own control-plane
 history (see its README for provenance; `scripts/sync-capydb-backend-fixture.sh`
 refreshes it).
 
+### 10. Lifecycles and names: `sequence_lifecycle`, `fk_unique_index_targets`, `auto_constraint_names`
+
+Test that sequences the history drops (directly, or with the column or table
+they belong to) leave nothing in the baseline; that a unique index a foreign
+key references exists before the foreign key; and that constraints and
+indexes created without a name get the names PostgreSQL gave them, numbered
+ones included.
+
 ## Running Tests
 
 ### Unit Tests
