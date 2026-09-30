@@ -156,6 +156,11 @@ func GetAllFixtures() []FixtureTest {
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
 		},
 		{
+			Name:        "sequence_lifecycle",
+			Path:        "sequence_lifecycle",
+			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},
+		},
+		{
 			Name:        "dropped_referenced_table",
 			Path:        "dropped_referenced_table",
 			SafetyModes: []SafetyLevel{Paranoid, Conservative, Standard, Aggressive},

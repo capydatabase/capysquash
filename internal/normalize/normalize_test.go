@@ -296,3 +296,29 @@ CREATE INDEX ON public.t ((coalesce(a, b)));
 ALTER TABLE public.t RENAME TO u;`)
 	assertContains(t, n.sql(), "CREATE INDEX t_case_idx ON public.u", "CREATE INDEX t_coalesce_idx ON public.u")
 }
+
+func TestDroppedSequencesLeaveTheHistory(t *testing.T) {
+	out := run(t,
+		`CREATE SEQUENCE temp_seq;
+COMMENT ON SEQUENCE temp_seq IS 'x';
+CREATE TABLE widgets (id serial PRIMARY KEY, label text);
+CREATE SEQUENCE widget_labels OWNED BY widgets.label;
+ALTER SEQUENCE widgets_id_seq RESTART WITH 100;
+CREATE TABLE gadgets (id bigint, legacy bigint, kept bigint);
+CREATE SEQUENCE gadget_batches OWNED BY gadgets.legacy;
+CREATE SEQUENCE survivor OWNED BY gadgets.legacy;
+CREATE SEQUENCE recycled;`,
+		`DROP SEQUENCE temp_seq;
+DROP TABLE widgets;
+ALTER SEQUENCE survivor OWNED BY NONE;
+ALTER SEQUENCE survivor OWNED BY gadgets.legacy;
+ALTER SEQUENCE survivor OWNED BY gadgets.kept;
+ALTER TABLE gadgets DROP COLUMN legacy;
+DROP SEQUENCE recycled;
+CREATE SEQUENCE recycled START 5;`)
+	sql := out.sql()
+	assertNotContains(t, sql, "temp_seq", "widget_labels", "widgets_id_seq", "gadget_batches",
+		"OWNED BY gadgets.legacy", "CREATE SEQUENCE recycled;", "DROP SEQUENCE recycled")
+	assertContains(t, sql, "CREATE SEQUENCE survivor;", "ALTER SEQUENCE survivor OWNED BY NONE",
+		"ALTER SEQUENCE survivor OWNED BY gadgets.kept", "CREATE SEQUENCE recycled START 5")
+}

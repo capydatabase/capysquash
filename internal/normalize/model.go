@@ -50,6 +50,12 @@ type relation struct {
 	owner    *relation
 	columns  []*column
 	final    *relation
+
+	// ownedBy and ownedColumn are the column a sequence belongs to (a
+	// serial or identity column, or OWNED BY): dropping the column or its
+	// table drops the sequence.
+	ownedBy     *relation
+	ownedColumn *column
 }
 
 // column is a table, view or composite type column.
@@ -353,8 +359,18 @@ func (s *state) dropRelation(rel *relation, killed bool) {
 	rel.dead = true
 	rel.killed = rel.killed || killed
 	for _, other := range s.relations {
-		if !other.dead && other.owner == rel {
+		if !other.dead && (other.owner == rel || other.ownedBy == rel) {
 			s.dropRelation(other, killed)
+		}
+	}
+}
+
+// dropColumn drops a column with the sequences that belong to it.
+func (s *state) dropColumn(rel *relation, col *column) {
+	col.dead = true
+	for _, other := range s.relations {
+		if !other.dead && other.ownedBy == rel && other.ownedColumn == col {
+			s.dropRelation(other, false)
 		}
 	}
 }
@@ -423,6 +439,13 @@ func (rel *relation) finalSchema() *schema {
 
 func (rel *relation) isKilled() bool {
 	return rel.final != nil && rel.final.killed
+}
+
+// isDroppedSequence reports a sequence the history creates and drops again,
+// directly or with the column or table it belongs to: none of its
+// statements belongs in the baseline.
+func (rel *relation) isDroppedSequence() bool {
+	return rel.kind == relSequence && rel.final != nil && rel.final.dead
 }
 
 func (rel *relation) isRenamed() bool {

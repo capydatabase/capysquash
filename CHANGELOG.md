@@ -15,6 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Fixture `sequence_lifecycle` in the e2e suite.
+
+### Fixed
+
+- A sequence the history creates and drops again is left out of the baseline, with everything
+  done to it (`ALTER SEQUENCE`, `COMMENT ON SEQUENCE`). Its `CREATE SEQUENCE` used to stay while
+  the `DROP SEQUENCE` was dropped with it, so the baseline created a sequence the original
+  history did not end with. The same holds for a sequence dropped along with the column or table
+  it belongs to (a `serial` or identity column, `OWNED BY`, `DROP IDENTITY`), and a sequence the
+  history detaches (`OWNED BY NONE`) before dropping its table keeps no `OWNED BY` naming that
+  table, which made the baseline fail.
+
 ## [1.5.0] - 2026-09-30
 
 ### Added

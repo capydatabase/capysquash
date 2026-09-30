@@ -203,11 +203,12 @@ func (n *Normalizer) process(stmt types.Statement) ([]types.Statement, error) {
 	return out, nil
 }
 
-// killed reports an object DROP SCHEMA removes by the end of the history.
+// killed reports an object DROP SCHEMA removes by the end of the history,
+// and a sequence the history drops.
 func killed(subject any) bool {
 	switch o := subject.(type) {
 	case *relation:
-		return o != nil && o.isKilled()
+		return o != nil && (o.isKilled() || o.isDroppedSequence())
 	case *typ:
 		return o != nil && o.isKilled()
 	case *routine:

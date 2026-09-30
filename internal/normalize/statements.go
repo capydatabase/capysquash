@@ -60,7 +60,9 @@ func (r *rewriter) statement(node *pg_query.Node) []result {
 	case *pg_query.Node_CreateSeqStmt:
 		r.createSequence(n.CreateSeqStmt)
 	case *pg_query.Node_AlterSeqStmt:
-		r.alterSequence(n.AlterSeqStmt)
+		if r.alterSequence(n.AlterSeqStmt) {
+			return removed()
+		}
 	case *pg_query.Node_CompositeTypeStmt:
 		r.createComposite(n.CompositeTypeStmt)
 	case *pg_query.Node_CreateEnumStmt:
@@ -413,6 +415,10 @@ func (r *rewriter) dropStmt(node *pg_query.Node, stmt *pg_query.DropStmt) []resu
 			if table := ownerTable(rel); table != nil && len(stmt.GetObjects()) == 1 {
 				r.own, r.subject = table, table
 			}
+			if rel.kind == relSequence && len(stmt.GetObjects()) == 1 {
+				// The history created the sequence: its DROP goes with it.
+				r.subject = rel
+			}
 			r.rewriteRelationList(items, rel)
 			dropped = append(dropped, rel)
 		}
@@ -594,7 +600,7 @@ type indexConstraint struct {
 // collected: PostgreSQL creates their indexes after the columns.
 func (r *rewriter) columnDef(def *pg_query.ColumnDef, table *relation, col *column, sc *scope, indexes *[]indexConstraint) {
 	if isSerial(def.GetTypeName()) {
-		r.implicitSequence(table, col.name, "")
+		r.implicitSequence(table, col, "")
 	}
 	for _, node := range def.GetConstraints() {
 		c := node.GetConstraint()
@@ -641,7 +647,7 @@ func (r *rewriter) constraint(c *pg_query.Constraint, table *relation, col *colu
 		r.walk(c.GetRawExpr(), sc)
 	case pg_query.ConstrType_CONSTR_IDENTITY:
 		if col != nil {
-			r.implicitSequence(table, col.name, sequenceNameOption(c.GetOptions()))
+			r.implicitSequence(table, col, sequenceNameOption(c.GetOptions()))
 		}
 		r.walk(c, sc)
 	case pg_query.ConstrType_CONSTR_FOREIGN:
@@ -700,15 +706,16 @@ func (r *rewriter) constraint(c *pg_query.Constraint, table *relation, col *colu
 
 // implicitSequence records the sequence PostgreSQL creates for a serial or
 // identity column.
-func (r *rewriter) implicitSequence(table *relation, column, explicit string) {
+func (r *rewriter) implicitSequence(table *relation, col *column, explicit string) {
 	name := explicit
 	if name == "" {
-		name = pgnames.ChooseRelationName(table.name, column, "seq", func(candidate string) bool {
+		name = pgnames.ChooseRelationName(table.name, col.name, "seq", func(candidate string) bool {
 			return r.s.relationTaken(table.schema, candidate)
 		})
 	}
 	seq := r.s.newRelation(relSequence, table.schema, name)
 	seq.implicit, seq.owner = true, table
+	seq.ownedBy, seq.ownedColumn = table, col
 }
 
 func isSerial(tn *pg_query.TypeName) bool {
@@ -781,7 +788,7 @@ func (r *rewriter) alterTable(stmt *pg_query.AlterTableStmt) {
 		case pg_query.AlterTableType_AT_DropColumn:
 			r.columnName(&cmd.Name, rel)
 			if col != nil {
-				col.dead = true
+				r.s.dropColumn(rel, col)
 			}
 			continue
 		case pg_query.AlterTableType_AT_AlterColumnType:
@@ -808,14 +815,14 @@ func (r *rewriter) alterTable(stmt *pg_query.AlterTableStmt) {
 		case pg_query.AlterTableType_AT_AddIdentity:
 			r.columnName(&cmd.Name, rel)
 			if c := cmd.GetDef().GetConstraint(); c != nil && col != nil {
-				r.implicitSequence(rel, col.name, sequenceNameOption(c.GetOptions()))
+				r.implicitSequence(rel, col, sequenceNameOption(c.GetOptions()))
 			}
 			continue
 		case pg_query.AlterTableType_AT_DropIdentity:
 			r.columnName(&cmd.Name, rel)
 			if col != nil {
 				for _, other := range r.s.relations {
-					if !other.dead && other.owner == rel && other.kind == relSequence && other.implicit {
+					if !other.dead && other.ownedBy == rel && other.ownedColumn == col && other.implicit {
 						r.s.dropRelation(other, false)
 						break
 					}
@@ -994,10 +1001,11 @@ func (r *rewriter) createSequence(stmt *pg_query.CreateSeqStmt) {
 	seq := r.s.newRelation(relSequence, r.s.creationSchema(rv.GetSchemaname()), rv.GetRelname())
 	r.subject = seq
 	r.nameCreated(rv, seq)
-	r.sequenceOptions(stmt.GetOptions())
+	stmt.Options = r.sequenceOptions(seq, stmt.GetOptions())
 }
 
-func (r *rewriter) alterSequence(stmt *pg_query.AlterSeqStmt) {
+// alterSequence reports whether nothing is left of the statement.
+func (r *rewriter) alterSequence(stmt *pg_query.AlterSeqStmt) bool {
 	rel := r.findRelation(stmt.GetSequence())
 	if rel != nil {
 		if table := ownerTable(rel); table != nil {
@@ -1006,30 +1014,55 @@ func (r *rewriter) alterSequence(stmt *pg_query.AlterSeqStmt) {
 		r.subject = rel
 	}
 	r.relRef(stmt.GetSequence())
-	r.sequenceOptions(stmt.GetOptions())
+	written := len(stmt.GetOptions())
+	stmt.Options = r.sequenceOptions(rel, stmt.GetOptions())
+	return written > 0 && len(stmt.GetOptions()) == 0
 }
 
-// sequenceOptions rewrites OWNED BY table.column.
-func (r *rewriter) sequenceOptions(options []*pg_query.Node) {
+// sequenceOptions rewrites OWNED BY table.column and records the column the
+// sequence (nil when the history did not create it) then belongs to; OWNED
+// BY NONE detaches it. It returns the options the baseline keeps: an OWNED
+// BY naming a column or table the history drops goes, since the sequence
+// only outlives them by being detached later.
+func (r *rewriter) sequenceOptions(seq *relation, options []*pg_query.Node) []*pg_query.Node {
+	kept := options[:0:0]
 	for _, option := range options {
 		def := option.GetDefElem()
 		if def.GetDefname() != "owned_by" {
 			r.walk(option, nil)
+			kept = append(kept, option)
 			continue
 		}
 		items := def.GetArg().GetList().GetItems()
 		if len(items) < 2 {
+			if seq != nil {
+				seq.ownedBy, seq.ownedColumn = nil, nil
+			}
+			kept = append(kept, option)
 			continue
 		}
 		rel := r.relationFromList(items[:len(items)-1])
 		if rel == nil {
+			kept = append(kept, option)
+			continue
+		}
+		var col *column
+		if last := items[len(items)-1].GetString_(); last != nil {
+			col = rel.column(last.GetSval())
+		}
+		if seq != nil {
+			seq.ownedBy, seq.ownedColumn = rel, col
+		}
+		if r.rewrite && (rel.final != nil && rel.final.dead || col != nil && col.final != nil && col.final.dead) {
 			continue
 		}
 		r.rewriteRelationList(items[:len(items)-1], rel)
 		if last := items[len(items)-1].GetString_(); last != nil {
 			r.columnName(&last.Sval, rel)
 		}
+		kept = append(kept, option)
 	}
+	return kept
 }
 
 // ---- types ---------------------------------------------------------------
