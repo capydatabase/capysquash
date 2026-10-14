@@ -1042,7 +1042,7 @@ func (m *model) membership(stmt *pg_query.GrantRoleStmt) {
 // replayStatement keeps a statement on objects the history does not create,
 // with the role it ran as.
 func (m *model) replayStatement(node *pg_query.Node) {
-	sql, err := deparse(node)
+	sql, err := parser.DeparseNode(node)
 	if err != nil {
 		m.warn("a privilege statement could not be rendered and is not in the baseline: %v", err)
 		return

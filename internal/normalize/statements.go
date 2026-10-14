@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/pgnames"
 	"github.com/capydatabase/capysquash/internal/privileges"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
@@ -166,7 +167,7 @@ func (r *rewriter) createSchema(stmt *pg_query.CreateSchemaStmt) []result {
 		// A no-op in the history. On a schema the history did not create
 		// the baseline repeats it: the target database may lack the schema.
 		if !existing.created && r.rewrite {
-			if sql, err := deparse(&pg_query.Node{Node: &pg_query.Node_CreateSchemaStmt{CreateSchemaStmt: stmt}}); err == nil {
+			if sql, err := parser.DeparseNode(&pg_query.Node{Node: &pg_query.Node_CreateSchemaStmt{CreateSchemaStmt: stmt}}); err == nil {
 				r.n.schemaOps = append(r.n.schemaOps, sql)
 			}
 		}
@@ -178,7 +179,7 @@ func (r *rewriter) createSchema(stmt *pg_query.CreateSchemaStmt) []result {
 		if stmt.GetSchemaname() != "" || sc.finalName() != name {
 			stmt.Schemaname = sc.finalName()
 		}
-		if sql, err := deparse(&pg_query.Node{Node: &pg_query.Node_CreateSchemaStmt{CreateSchemaStmt: stmt}}); err == nil {
+		if sql, err := parser.DeparseNode(&pg_query.Node{Node: &pg_query.Node_CreateSchemaStmt{CreateSchemaStmt: stmt}}); err == nil {
 			r.n.schemaCreates = append(r.n.schemaCreates, created{sql: sql, schema: sc})
 		} else {
 			r.n.warn("CREATE SCHEMA %s could not be rendered and is not in the baseline: %v", name, err)
@@ -234,7 +235,7 @@ func (r *rewriter) renameStmt(node *pg_query.Node, stmt *pg_query.RenameStmt) []
 		}
 		r.noteRename(sc.name)
 		if !sc.created && r.rewrite {
-			if sql, err := deparse(node); err == nil {
+			if sql, err := parser.DeparseNode(node); err == nil {
 				r.n.schemaOps = append(r.n.schemaOps, sql)
 			}
 		}
@@ -501,7 +502,7 @@ func (r *rewriter) dropSchemas(stmt *pg_query.DropStmt) []result {
 	}
 	if len(preexisting) > 0 && r.rewrite {
 		stmt.Objects = preexisting
-		if sql, err := deparse(&pg_query.Node{Node: &pg_query.Node_DropStmt{DropStmt: stmt}}); err == nil {
+		if sql, err := parser.DeparseNode(&pg_query.Node{Node: &pg_query.Node_DropStmt{DropStmt: stmt}}); err == nil {
 			r.n.schemaOps = append(r.n.schemaOps, sql)
 		}
 	}
@@ -1350,8 +1351,8 @@ func (r *rewriter) createFunction(stmt *pg_query.CreateFunctionStmt) {
 
 func (r *rewriter) findRoutine(schemaName, name string) *routine {
 	for _, sc := range r.s.searchSchemas(schemaName) {
-		for i := len(r.s.routines) - 1; i >= 0; i-- {
-			if rt := r.s.routines[i]; !rt.dead && rt.schema == sc && rt.name == name {
+		for _, rt := range slices.Backward(r.s.routines) {
+			if !rt.dead && rt.schema == sc && rt.name == name {
 				return rt
 			}
 		}

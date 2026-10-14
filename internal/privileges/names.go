@@ -77,8 +77,3 @@ func splitName(parts []string) (schema, name string) {
 		return parts[len(parts)-2], parts[len(parts)-1]
 	}
 }
-
-// deparse renders a single statement node back to SQL.
-func deparse(node *pg_query.Node) (string, error) {
-	return pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: node}}})
-}

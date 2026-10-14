@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/types"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
@@ -175,7 +176,7 @@ func dollarQuote(body string) string {
 func (h *History) RolesSQL() (string, error) {
 	var sb strings.Builder
 	for _, node := range h.roles {
-		create, err := deparse(node)
+		create, err := parser.DeparseNode(node)
 		if err != nil {
 			return "", fmt.Errorf("render CREATE ROLE: %w", err)
 		}
@@ -185,7 +186,7 @@ func (h *History) RolesSQL() (string, error) {
 		fmt.Fprintf(&sb, "DO %s%s%s;\n\n", tag, body, tag)
 	}
 	for _, node := range h.membership {
-		statement, err := deparse(node)
+		statement, err := parser.DeparseNode(node)
 		if err != nil {
 			return "", fmt.Errorf("render role membership: %w", err)
 		}

@@ -148,20 +148,21 @@ func createDefaultConsolidation(lifecycle *tracking.ObjectLifecycle) *tracking.C
 		finalState = &lifecycle.History[lastCreate].Statement
 	}
 	statements := []types.Statement{*finalState}
-	sql := strings.TrimRight(strings.TrimSpace(finalState.SQL), ";") + ";"
+	var sql strings.Builder
+	sql.WriteString(strings.TrimRight(strings.TrimSpace(finalState.SQL), ";") + ";")
 	if lastCreate >= 0 {
 		for _, event := range lifecycle.History[lastCreate+1:] {
 			if event.Operation != types.OpAlter || strings.TrimSpace(event.Statement.SQL) == "" {
 				continue
 			}
 			statements = append(statements, event.Statement)
-			sql += "\n\n" + strings.TrimRight(strings.TrimSpace(event.Statement.SQL), ";") + ";"
+			sql.WriteString("\n\n" + strings.TrimRight(strings.TrimSpace(event.Statement.SQL), ";") + ";")
 		}
 	}
 
 	return &tracking.ConsolidationResult{
 		OriginalStatements: statements,
-		ConsolidatedSQL:    sql,
+		ConsolidatedSQL:    sql.String(),
 		Optimizations:      []string{"preserved_as_is"},
 		RiskLevel:          tracking.RiskLevelLow,
 		Warnings:           []string{},

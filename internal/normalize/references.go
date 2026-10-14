@@ -1,6 +1,7 @@
 package normalize
 
 import (
+	"slices"
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
@@ -388,10 +389,8 @@ func (sc *scope) lookupColumn(name string) (*source, *column) {
 					return src, col
 				}
 			case src.known:
-				for _, c := range src.cols {
-					if c == name {
-						return src, nil
-					}
+				if slices.Contains(src.cols, name) {
+					return src, nil
 				}
 			default:
 				unknown = true

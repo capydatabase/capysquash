@@ -15,10 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Statements rebuilt from the parse tree (final-name rewrites, schema and privilege replays,
+  cyclic and dropped foreign keys) render again with pg_query_go v6.2.5, whose deparser rejects a
+  tree without the libpg_query version stamp. Every such statement now goes through one helper
+  that sets it.
+
 ### Changed
 
-- Indirect dependency `github.com/charmbracelet/ultraviolet` v0.0.0-20260929091141-666ce5eec9fc
-  (was v0.0.0-20260922123528-4e49372c11f9). No behavior change.
+- Go 1.27.2: `go` directive, the Docker build image (`golang:1.27.2-trixie`) and the release
+  workflow's `goreleaser-cross` image.
+- `github.com/pganalyze/pg_query_go/v6` v6.2.5 (was v6.2.2).
+- `github.com/moby/moby/api` v1.56.1 and `github.com/moby/moby/client` v0.6.1 (were v1.56.0 and
+  v0.6.0).
+- Indirect dependencies: `github.com/charmbracelet/ultraviolet` v0.0.0-20261001125412-878653296cfd
+  (was v0.0.0-20260922123528-4e49372c11f9), OpenTelemetry v1.47.0 / otelhttp v0.72.0 (were v1.46.0
+  / v0.71.0). No behavior change.
 
 ## [1.6.0] - 2026-09-30
 

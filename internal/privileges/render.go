@@ -2,6 +2,7 @@ package privileges
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -46,9 +47,7 @@ type op struct {
 func diffPrivileges(class aclClass, current, want privSet) []op {
 	universe := class.universe()
 	cur := privSet{}
-	for p, option := range current {
-		cur[p] = option
-	}
+	maps.Copy(cur, current)
 	var ops []op
 	has := func(set privSet, p string) bool { _, ok := set[p]; return ok }
 

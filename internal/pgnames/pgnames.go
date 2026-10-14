@@ -8,6 +8,7 @@ package pgnames
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 )
 
@@ -100,10 +101,5 @@ func clipRunes(s string, n int) int {
 }
 
 func contains(list []string, value string) bool {
-	for _, item := range list {
-		if item == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, value)
 }

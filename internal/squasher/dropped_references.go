@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/pgnames"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
@@ -113,7 +114,7 @@ func stripForeignKeysToDroppedTables(sql string, droppedTables map[string]struct
 			edits = append(edits, edit{start: start, end: end})
 			continue
 		}
-		text, err := pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: raw.GetStmt()}}})
+		text, err := parser.DeparseNode(raw.GetStmt())
 		if err != nil {
 			return "", fmt.Errorf("deparse a statement without its foreign keys to dropped tables: %w", err)
 		}

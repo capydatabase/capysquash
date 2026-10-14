@@ -37,6 +37,7 @@
 package privileges
 
 import (
+	"maps"
 	"slices"
 	"strings"
 )
@@ -109,9 +110,7 @@ func (a acl) clone() acl {
 	out := make(acl, len(a))
 	for grantee, privs := range a {
 		copied := make(privSet, len(privs))
-		for p, option := range privs {
-			copied[p] = option
-		}
+		maps.Copy(copied, privs)
 		out[grantee] = copied
 	}
 	return out

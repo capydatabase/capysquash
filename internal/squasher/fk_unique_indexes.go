@@ -175,8 +175,8 @@ func takeSelfReferencesOutOfCreate(table *tracking.ConsolidationResult, key refe
 
 // lastCreatePosition is where the history runs a lifecycle's last CREATE.
 func lastCreatePosition(lifecycle *tracking.ObjectLifecycle) statementPosition {
-	for i := len(lifecycle.History) - 1; i >= 0; i-- {
-		if event := lifecycle.History[i]; event.Operation == types.OpCreate {
+	for _, event := range slices.Backward(lifecycle.History) {
+		if event.Operation == types.OpCreate {
 			return statementPosition{migration: event.Migration, line: event.Statement.Line}
 		}
 	}

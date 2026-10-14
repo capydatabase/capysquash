@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/capydatabase/capysquash/internal/parser"
 	"github.com/capydatabase/capysquash/internal/pgnames"
 	"github.com/capydatabase/capysquash/internal/tracking"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
@@ -246,7 +247,7 @@ func removeForeignKeys(sql string, tree *pg_query.ParseResult, moved []foreignKe
 			edits = append(edits, edit{start: start, end: end})
 			continue
 		}
-		text, err := pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: raw.GetStmt()}}})
+		text, err := parser.DeparseNode(raw.GetStmt())
 		if err != nil {
 			return "", nil, fmt.Errorf("deparse statement %d without its cyclic foreign keys: %w", i+1, err)
 		}
@@ -288,7 +289,7 @@ func addForeignKeySQL(relation *pg_query.RangeVar, use foreignKeyUse) (string, e
 			Behavior: pg_query.DropBehavior_DROP_RESTRICT,
 		}}}},
 	}}}
-	text, err := pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: stmt}}})
+	text, err := parser.DeparseNode(stmt)
 	if err != nil {
 		return "", fmt.Errorf("deparse the deferred foreign key of %s: %w", relation.GetRelname(), err)
 	}

@@ -144,10 +144,6 @@ func statementNode(stmt types.Statement) *pg_query.Node {
 	return stmt.ParseTree.GetStmts()[0].GetStmt()
 }
 
-func deparse(node *pg_query.Node) (string, error) {
-	return pg_query.Deparse(&pg_query.ParseResult{Stmts: []*pg_query.RawStmt{{Stmt: node}}})
-}
-
 // result is what one statement (or one element of a CREATE SCHEMA) becomes.
 type result struct {
 	node    *pg_query.Node
@@ -183,7 +179,7 @@ func (n *Normalizer) process(stmt types.Statement) ([]types.Statement, error) {
 		}
 		next := stmt
 		if res.split || !proto.Equal(res.node, root) {
-			sql, err := deparse(res.node)
+			sql, err := parser.DeparseNode(res.node)
 			if err != nil {
 				return nil, fmt.Errorf("render rewritten statement %q: %w", firstLine(stmt.SQL), err)
 			}

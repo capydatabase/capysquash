@@ -228,8 +228,8 @@ func (s *state) newExtension(sc *schema, name string) *extension {
 
 // findSchema returns the live schema with that name.
 func (s *state) findSchema(name string) *schema {
-	for i := len(s.schemas) - 1; i >= 0; i-- {
-		if sc := s.schemas[i]; !sc.dead && sc.name == name {
+	for _, sc := range slices.Backward(s.schemas) {
+		if !sc.dead && sc.name == name {
 			return sc
 		}
 	}
@@ -275,8 +275,8 @@ func (s *state) searchSchemas(qualifier string) []*schema {
 
 func (s *state) findRelation(qualifier, name string) *relation {
 	for _, sc := range s.searchSchemas(qualifier) {
-		for i := len(s.relations) - 1; i >= 0; i-- {
-			if rel := s.relations[i]; !rel.dead && rel.schema == sc && rel.name == name {
+		for _, rel := range slices.Backward(s.relations) {
+			if !rel.dead && rel.schema == sc && rel.name == name {
 				return rel
 			}
 		}
@@ -286,8 +286,8 @@ func (s *state) findRelation(qualifier, name string) *relation {
 
 func (s *state) findType(qualifier, name string) *typ {
 	for _, sc := range s.searchSchemas(qualifier) {
-		for i := len(s.types) - 1; i >= 0; i-- {
-			if t := s.types[i]; !t.dead && t.schema == sc && t.name == name {
+		for _, t := range slices.Backward(s.types) {
+			if !t.dead && t.schema == sc && t.name == name {
 				return t
 			}
 		}
