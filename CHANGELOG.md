@@ -24,14 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Go 1.27.2: `go` directive, the Docker build image (`golang:1.27.2-trixie`) and the release
+- Go 1.27.3: `go` directive, the Docker build image (`golang:1.27.3-trixie`) and the release
   workflow's `goreleaser-cross` image.
 - `github.com/pganalyze/pg_query_go/v6` v6.2.5 (was v6.2.2).
-- `github.com/moby/moby/api` v1.56.1 and `github.com/moby/moby/client` v0.6.1 (were v1.56.0 and
+- `github.com/moby/moby/api` v1.56.1 and `github.com/moby/moby/client` v0.6.2 (were v1.56.0 and
   v0.6.0).
-- Indirect dependencies: `github.com/charmbracelet/ultraviolet` v0.0.0-20261001125412-878653296cfd
-  (was v0.0.0-20260922123528-4e49372c11f9), OpenTelemetry v1.47.0 / otelhttp v0.72.0 (were v1.46.0
-  / v0.71.0). No behavior change.
+- `charm.land/bubbletea/v2` v2.1.0 (was v2.0.10).
+- Indirect dependencies: `github.com/charmbracelet/ultraviolet` v0.0.0-20261008173134-6b8d4baf91b4
+  (was v0.0.0-20260922123528-4e49372c11f9), `github.com/charmbracelet/x/ansi` v0.11.9,
+  `github.com/Microsoft/go-winio` v0.6.4, `github.com/docker/go-connections` v0.8.2,
+  `github.com/mattn/go-colorable` v0.1.16, `github.com/mattn/go-runewidth` v0.0.31,
+  `golang.org/x/sync` v0.24.0, `golang.org/x/sys` v0.49.0, OpenTelemetry v1.47.0 / otelhttp v0.72.0
+  (were v1.46.0 / v0.71.0). No behavior change.
 
 ## [1.6.0] - 2026-09-30
 
