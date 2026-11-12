@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Go 1.27.4 (`go` directive and the `golang:1.27.4-trixie` build image); lipgloss 2.1.0, protobuf 1.37.0-rc.1, x/sync 0.25.0, x/sys 0.50.0. The release workflow stays on `goreleaser-cross:v1.27.3` (no v1.27.4 image is published yet); the go directive makes it fetch the 1.27.4 toolchain.
+
 ### Fixed
 
 - Statements rebuilt from the parse tree (final-name rewrites, schema and privilege replays,

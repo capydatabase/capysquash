@@ -1,10 +1,10 @@
 module github.com/capydatabase/capysquash
 
-go 1.27.3
+go 1.27.4
 
 require (
 	charm.land/bubbletea/v2 v2.1.1
-	charm.land/lipgloss/v2 v2.0.6
+	charm.land/lipgloss/v2 v2.1.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/fatih/color v1.19.0
 	github.com/lib/pq v1.12.3
@@ -15,7 +15,7 @@ require (
 	github.com/spf13/pflag v1.1.0
 	github.com/stretchr/testify v1.12.1
 	go.yaml.in/yaml/v3 v3.0.6
-	google.golang.org/protobuf v1.36.12
+	google.golang.org/protobuf v1.37.0-rc.1
 )
 
 require (
@@ -53,6 +53,6 @@ require (
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 )

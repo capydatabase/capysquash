@@ -12,7 +12,7 @@
 # ═════════════════════════════════════════════════════════════════════════════
 
 # ── build-time knobs (override with --build-arg or compose build.args) ───────
-ARG BUILD_IMAGE=golang:1.27.3-trixie
+ARG BUILD_IMAGE=golang:1.27.4-trixie
 ARG RUNTIME_IMAGE=ubuntu:resolute
 
 ARG APP_UID=10001
