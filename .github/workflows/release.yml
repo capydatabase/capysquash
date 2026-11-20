@@ -32,6 +32,8 @@ jobs:
       # cross toolchains required for the CGO builds (pg_query_go). The
       # goreleaser-action `distribution` input only supports
       # goreleaser/goreleaser-pro, so the cross image is invoked directly.
+      # No goreleaser-cross image ships Go 1.27.4 yet (newest: v1.27.3-4); the
+      # go.mod directive makes Go fetch 1.27.4. Move to a v1.27.4 tag when it exists.
       - name: Run GoReleaser (goreleaser-cross)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -41,7 +43,7 @@ jobs:
             -w /work \
             -e GITHUB_TOKEN \
             --entrypoint /bin/sh \
-            ghcr.io/goreleaser/goreleaser-cross:v1.27.3 \
+            ghcr.io/goreleaser/goreleaser-cross:v1.27.3-4 \
             -c 'git config --global --add safe.directory /work && goreleaser release --clean'
 
       - name: Upload artifacts
