@@ -3,7 +3,7 @@ module github.com/capydatabase/capysquash
 go 1.27.4
 
 require (
-	charm.land/bubbletea/v2 v2.1.2
+	charm.land/bubbletea/v2 v2.1.3
 	charm.land/lipgloss/v2 v2.1.1
 	github.com/containerd/errdefs v1.0.0
 	github.com/fatih/color v1.19.0
